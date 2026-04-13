@@ -26,5 +26,17 @@ void celSurfaceShader(realitykit::surface_parameters params)
     else
         intensity = 0.3h;
 
-    params.surface().set_emissive_color(baseColor * intensity);
+    half3 color = baseColor * intensity;
+
+    // Selection highlight: custom.value[0] = selection amount (0 or 1)
+    float selection = params.uniforms().custom_parameter()[0];
+    if (selection > 0.5) {
+        // Brighten and add a warm rim glow
+        float rim = 1.0 - max(0.0, dot(normal, normalize(float3(0, 1, 0.5))));
+        rim = pow(rim, 2.0);
+        half3 glowColor = half3(1.0h, 0.85h, 0.4h); // warm gold
+        color = mix(color, color * 1.4h + glowColor * (half)rim * 0.5h, half(selection));
+    }
+
+    params.surface().set_emissive_color(color);
 }

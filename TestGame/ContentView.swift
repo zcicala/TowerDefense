@@ -26,6 +26,8 @@ struct ContentView: View {
 
     // UI state
     @State private var showRoundOverMessage: Bool = false
+    @State private var selectedTower: Tower?
+    @State private var dialogRefresh: Int = 0
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -36,6 +38,13 @@ struct ContentView: View {
                 self.renderer = renderer
                 renderer.buildScene(from: gameState, into: content)
                 cameraEntity = renderer.createCamera(into: content)
+
+                // Create the base tower at the end cell
+                if let endCell = gameState.endCell {
+                    let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
+                    renderer.createBaseTower(cellHeight: endCell.height, position: pos)
+                }
+
                 updateCamera()
 
                 // Game loop
@@ -78,15 +87,24 @@ struct ContentView: View {
                         }
                     }
 
-                    // Update enemy positions
+                    // Update enemy positions and shield domes
                     for enemy in events.movedEnemies {
                         if let pos = gameState.enemyWorldPosition(enemy) {
                             renderer.updateEnemyPosition(enemy, position: pos)
+                            if enemy.isShielder && enemy.shieldActive {
+                                renderer.updateShieldDome(for: enemy, position: pos, shieldRatio: enemy.shieldHP / enemy.shieldMaxHP)
+                            }
                         }
+                    }
+
+                    // Remove shield domes for broken shields
+                    for enemy in events.shieldsBroken {
+                        renderer.removeShieldDome(for: enemy)
                     }
 
                     // Remove killed enemies
                     for enemy in events.killedEnemies {
+                        renderer.removeShieldDome(for: enemy)
                         renderer.removeEnemy(enemy)
                     }
 
@@ -132,9 +150,22 @@ struct ContentView: View {
                         }
                     }
 
+                    // Update tracking fire cones
+                    for tower in events.conesUpdated {
+                        let origin = gameState.fireOrigin(for: tower)
+                        if let target = gameState.fireTargetPosition(for: tower) {
+                            renderer.updateCone(for: tower, origin: origin, target: target)
+                        }
+                    }
+
                     // Remove ended fire cones
                     for tower in events.conesEnded {
                         renderer.removeCone(for: tower)
+                    }
+
+                    // Base tower block explosions
+                    for _ in 0..<events.baseTowerBlocksDestroyed {
+                        renderer.explodeTopBlock()
                     }
 
                     if events.roundOver {
@@ -189,6 +220,8 @@ struct ContentView: View {
                 HStack(spacing: 16) {
                     Text("Round \(gameState.round)")
                     Text("$\(gameState.money)")
+                    Text("HP: \(gameState.baseTowerHP)/\(gameState.baseTowerMaxHP)")
+                        .foregroundColor(gameState.baseTowerHP <= 3 ? .red : .white)
                 }
                 .font(.headline)
                 .foregroundColor(.white)
@@ -202,6 +235,7 @@ struct ContentView: View {
                         Text("Projectile ($\(gameState.costForTower(.projectile)))").tag(TowerType.projectile)
                         Text("Laser ($\(gameState.costForTower(.laser)))").tag(TowerType.laser)
                         Text("Fire ($\(gameState.costForTower(.fire)))").tag(TowerType.fire)
+                        Text("Ice ($\(gameState.costForTower(.ice)))").tag(TowerType.ice)
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 400)
@@ -225,18 +259,125 @@ struct ContentView: View {
                 }
 
                 if showRoundOverMessage {
-                    Text("Round Complete!")
-                        .font(.headline)
-                        .foregroundColor(.green)
+                    if gameState.baseTowerHP <= 0 {
+                        Text("Game Over!")
+                            .font(.title)
+                            .foregroundColor(.red)
 
-                    Button("Next Round") {
-                        gameState.returnToPlacing()
-                        showRoundOverMessage = false
+                        Text("Survived \(gameState.round) rounds")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+
+                        Button("Restart") {
+                            guard let renderer else { return }
+                            let removedIDs = gameState.restart()
+                            for id in removedIDs {
+                                renderer.removeTower(id: id)
+                            }
+                            renderer.removeAllEnemies()
+                            renderer.removeAllProjectiles()
+                            renderer.removeAllBeams()
+                            renderer.removeAllCones()
+                            if let endCell = gameState.endCell {
+                                let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
+                                renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos)
+                            }
+                            showRoundOverMessage = false
+                            selectedTower = nil
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    } else {
+                        Text("Round Complete!")
+                            .font(.headline)
+                            .foregroundColor(.green)
+
+                        Button("Next Round") {
+                            gameState.returnToPlacing()
+                            showRoundOverMessage = false
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(.top, 16)
+
+            // Tower info dialog — right side
+            if let tower = selectedTower {
+                VStack(alignment: .leading, spacing: 6) {
+                    let _ = dialogRefresh  // trigger re-render
+
+                    Text("\(towerTypeName(tower.type)) Tower  Lv.\(tower.level)")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Divider().background(.white.opacity(0.3))
+
+                    towerStatsView(tower)
+
+                    Divider().background(.white.opacity(0.3))
+
+                    if tower.canUpgrade {
+                        Text(tower.upgradeDescription)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        Button("Upgrade ($\(tower.upgradeCost))") {
+                            if gameState.upgradeTower(tower) {
+                                dialogRefresh += 1
+                                if tower.level == Tower.maxLevel {
+                                    renderer?.addMaxLevelDome(for: tower)
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(gameState.money < tower.upgradeCost)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        Text("Max Level")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+
+                    Divider().background(.white.opacity(0.3))
+
+                    Text("Targeting")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    ForEach(TargetingMode.allCases, id: \.self) { mode in
+                        Button(action: {
+                            tower.targetingMode = mode
+                            dialogRefresh += 1
+                        }) {
+                            HStack {
+                                Text(mode.rawValue)
+                                Spacer()
+                                if tower.targetingMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(tower.targetingMode == mode ? .blue : .gray)
+                    }
+
+                    Button("Close") { selectedTower = nil }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.6))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.75))
+                .cornerRadius(10)
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
         }
     }
 
@@ -248,8 +389,91 @@ struct ContentView: View {
         camera.look(at: cameraTarget, from: [x, y, z], relativeTo: nil)
     }
 
+    @ViewBuilder
+    private func towerStatsView(_ tower: Tower) -> some View {
+        let statFont = Font.system(.caption, design: .monospaced)
+        let labelColor = Color.white.opacity(0.6)
+        let valueColor = Color.white
+
+        switch tower.type {
+        case .projectile:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        case .laser:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("DPS", "\(String(format: "%.0f", tower.beamDamagePerSecond))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Duration", "\(String(format: "%.1f", tower.beamDuration))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Range", "\(tower.beamRange)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        case .fire:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("DPS", "\(String(format: "%.0f", tower.fireDamagePerSecond))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Duration", "\(String(format: "%.1f", tower.fireDuration))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        case .ice:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Slow", "50%", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Duration", "\(String(format: "%.1f", tower.fireDuration))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        }
+    }
+
+    private func statRow(_ label: String, _ value: String, label font: Font, labelColor: Color, valueColor: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(font)
+                .foregroundColor(labelColor)
+            Text(value)
+                .font(font)
+                .foregroundColor(valueColor)
+        }
+    }
+
+    private func towerTypeName(_ type: TowerType) -> String {
+        switch type {
+        case .projectile: return "Projectile"
+        case .laser: return "Laser"
+        case .fire: return "Fire"
+        case .ice: return "Ice"
+        }
+    }
+
     private func handleTap(entity: Entity) {
         guard let renderer, let coord = renderer.coord(for: entity) else { return }
+
+        // Check if tapping an existing tower
+        if let tower = gameState.tower(at: coord) {
+            selectedTower = tower
+            return
+        }
+
+        // Close tower dialog if tapping elsewhere
+        selectedTower = nil
 
         if gameState.phase == .placing {
             // Try to place a tower

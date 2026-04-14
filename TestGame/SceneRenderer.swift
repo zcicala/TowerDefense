@@ -104,6 +104,7 @@ class SceneRenderer {
         switch tower.type {
         case .laser: tint = .init(red: 0.3, green: 0.5, blue: 0.7, alpha: 1)
         case .fire:  tint = .init(red: 0.6, green: 0.35, blue: 0.2, alpha: 1)
+        case .ice:   tint = .init(red: 0.5, green: 0.6, blue: 0.8, alpha: 1)
         case .projectile: tint = .init(red: 0.5, green: 0.5, blue: 0.6, alpha: 1)
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
@@ -141,6 +142,7 @@ class SceneRenderer {
         switch tower.type {
         case .laser: turretTint = .init(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
         case .fire:  turretTint = .init(red: 0.9, green: 0.4, blue: 0.1, alpha: 1)
+        case .ice:   turretTint = .init(red: 0.3, green: 0.6, blue: 1.0, alpha: 1)
         case .projectile: turretTint = .init(red: 0.7, green: 0.3, blue: 0.2, alpha: 1)
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
@@ -166,6 +168,108 @@ class SceneRenderer {
         turretEntities[tower.id] = turretGroup
     }
 
+    // MARK: - Base Tower
+
+    private var baseTowerRoot: Entity?
+    private var baseTowerBlocks: [Entity] = []  // index 0 = bottom, 4 = top
+
+    func createBaseTower(cellHeight: Float, position: SIMD2<Float>) {
+        guard let content else { return }
+
+        let root = Entity()
+        root.position = [position.x, cellHeight, position.y]
+
+        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        material.baseColor = CustomMaterial.BaseColor(
+            tint: .init(red: 0.85, green: 0.75, blue: 0.5, alpha: 1)
+        )
+
+        let baseWidth: Float = 0.3
+        let blockHeight: Float = 0.25
+        let blockGap: Float = 0.02
+        let cornerRadius: Float = 0.04
+
+        var currentY: Float = 0
+        baseTowerBlocks.removeAll()
+
+        for i in 0..<5 {
+            let scale = pow(0.9, Float(i))
+            let w = baseWidth * scale
+            let h = blockHeight * scale
+            let cr = cornerRadius * scale
+            let mesh = MeshResource.generateBox(width: w, height: h, depth: w, cornerRadius: cr)
+            let block = Entity()
+            block.components.set(ModelComponent(mesh: mesh, materials: [material]))
+            block.position.y = currentY + h / 2
+            root.addChild(block)
+            baseTowerBlocks.append(block)
+            currentY += h + blockGap
+        }
+
+        content.add(root)
+        baseTowerRoot = root
+    }
+
+    /// Explodes the top remaining block with particles and removes it.
+    func explodeTopBlock() {
+        guard let content, let block = baseTowerBlocks.last, let root = baseTowerRoot else { return }
+
+        // Compute world position manually: root position + block's local Y offset
+        let worldPos = SIMD3<Float>(
+            root.position.x,
+            root.position.y + block.position.y,
+            root.position.z
+        )
+
+        block.removeFromParent()
+        baseTowerBlocks.removeLast()
+
+        // Spawn explosion particles
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .point
+        emitter.emitterShapeSize = [0.15, 0.15, 0.15]
+        emitter.speed = 10.0
+        emitter.speedVariation = 1.5
+        emitter.mainEmitter.birthRate = 1000
+        emitter.mainEmitter.lifeSpan = 5
+        emitter.mainEmitter.lifeSpanVariation = 0.2
+        emitter.mainEmitter.size = 2
+        emitter.mainEmitter.sizeVariation = 0.1
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 0.1, green: 0.1, blue: 0.8, alpha: 1.0)),
+            end: .single(.init(red: 0.8, green: 0.2, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .once(warmUp: 0, emit: .init(duration: 0.1))
+
+        let particleEntity = Entity()
+        particleEntity.components.set(emitter)
+        particleEntity.position = worldPos
+        content.add(particleEntity)
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            particleEntity.removeFromParent()
+        }
+    }
+
+    /// Adds a small yellow dome on top of the turret to indicate max level.
+    func addMaxLevelDome(for tower: Tower) {
+        guard let turretGroup = turretEntities[tower.id] else { return }
+
+        let domeMesh = MeshResource.generateSphere(radius: 0.08)
+        var domeMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        domeMaterial.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.2, alpha: 1))
+
+        let dome = Entity()
+        dome.components.set(ModelComponent(mesh: domeMesh, materials: [domeMaterial]))
+        // Position on top of turret (turret height is 0.1, so half = 0.05)
+        dome.position = [0, 0.05 + 0.08, 0]
+        // Squash into a dome shape
+        dome.scale = [1.0, 0.5, 1.0]
+        turretGroup.addChild(dome)
+    }
+
     func updateTurretRotation(_ tower: Tower) {
         guard let turretGroup = turretEntities[tower.id] else { return }
         turretGroup.orientation = simd_quatf(angle: tower.currentYaw, axis: [0, 1, 0])
@@ -182,67 +286,70 @@ class SceneRenderer {
         let diff = endpoint - origin
         let beamLength = simd_length(diff)
         let midpoint = origin + diff * 0.5
+        let direction = normalize(diff)
 
-        // Thin red cylinder stretched along the beam
+        // Solid beam
         let mesh = MeshResource.generateBox(width: 0.03, height: 0.03, depth: beamLength)
         var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
-        material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.1, blue: 0.1, alpha: 1))
+        material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.3, green: 0.6, blue: 1.0, alpha: 1))
 
-        let entity = Entity()
-        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
-        entity.position = midpoint
-        let direction = normalize(diff)
-        entity.orientation = simd_quatf(from: [0, 0, 1], to: direction)
+        let beamEntity = Entity()
+        beamEntity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        beamEntity.position = midpoint
+        beamEntity.orientation = simd_quatf(from: [0, 0, 1], to: direction)
+        content.add(beamEntity)
+        beamEntities[tower.id] = beamEntity
 
-        content.add(entity)
-        beamEntities[tower.id] = entity
-
-        // Glow particles along the beam
+        // Particle glow
         var emitter = ParticleEmitterComponent()
-        emitter.emitterShape = .box
-        emitter.emitterShapeSize = [0.12, 0.12, beamLength]
-        emitter.speed = 0.15
-        emitter.speedVariation = 0.1
-        emitter.mainEmitter.birthRate = 200
-        emitter.mainEmitter.lifeSpan = 0.4
+        emitter.emitterShape = .point
+        emitter.speed = beamLength * 3.0
+        emitter.speedVariation = beamLength * 0.2
+        emitter.mainEmitter.birthRate = 100
+        emitter.mainEmitter.lifeSpan = Double(1.0 / 3.0) + 0.02
+        emitter.mainEmitter.lifeSpanVariation = 0.02
         emitter.mainEmitter.size = 0.04
-        emitter.mainEmitter.sizeVariation = 0.02
+        emitter.mainEmitter.sizeVariation = 0.01
+        emitter.mainEmitter.spreadingAngle = 0.03
         emitter.mainEmitter.color = .evolving(
-            start: .single(.init(red: 1.0, green: 0.5, blue: 0.5, alpha: 1.0)),
-            end: .single(.init(red: 1.0, green: 0.2, blue: 0.2, alpha: 0.0))
+            start: .single(.init(red: 0.4, green: 0.7, blue: 1.0, alpha: 1.0)),
+            end: .single(.init(red: 0.1, green: 0.3, blue: 1.0, alpha: 0.0))
         )
         emitter.mainEmitter.blendMode = .additive
 
         let particleEntity = Entity()
         particleEntity.components.set(emitter)
-        particleEntity.position = midpoint
-        particleEntity.orientation = entity.orientation
+        particleEntity.position = origin
+        particleEntity.orientation = simd_quatf(from: [0, 1, 0], to: direction)
         content.add(particleEntity)
         beamParticleEntities[tower.id] = particleEntity
     }
 
     func updateBeam(for tower: Tower, origin: SIMD3<Float>, endpoint: SIMD3<Float>) {
-        guard let entity = beamEntities[tower.id] else { return }
-
         let diff = endpoint - origin
         let beamLength = simd_length(diff)
         let midpoint = origin + diff * 0.5
-
-        let mesh = MeshResource.generateBox(width: 0.03, height: 0.03, depth: beamLength)
-        if var model = entity.components[ModelComponent.self] {
-            model.mesh = mesh
-            entity.components[ModelComponent.self] = model
-        }
-        entity.position = midpoint
         let direction = normalize(diff)
-        entity.orientation = simd_quatf(from: [0, 0, 1], to: direction)
 
-        // Update particle entity to follow beam
+        // Update solid beam
+        if let beamEntity = beamEntities[tower.id] {
+            let mesh = MeshResource.generateBox(width: 0.03, height: 0.03, depth: beamLength)
+            if var model = beamEntity.components[ModelComponent.self] {
+                model.mesh = mesh
+                beamEntity.components[ModelComponent.self] = model
+            }
+            beamEntity.position = midpoint
+            beamEntity.orientation = simd_quatf(from: [0, 0, 1], to: direction)
+        }
+
+        // Update particle glow
         if let particleEntity = beamParticleEntities[tower.id] {
-            particleEntity.position = midpoint
-            particleEntity.orientation = entity.orientation
+            particleEntity.position = origin
+            particleEntity.orientation = simd_quatf(from: [0, 1, 0], to: direction)
             if var emitter = particleEntity.components[ParticleEmitterComponent.self] {
-                emitter.emitterShapeSize = [0.2, 0.2, beamLength]
+                emitter.speed = beamLength * 3.0
+                emitter.speedVariation = beamLength * 0.2
+                emitter.mainEmitter.lifeSpan = Double(1.0 / 3.0) + 0.02
                 particleEntity.components[ParticleEmitterComponent.self] = emitter
             }
         }
@@ -288,10 +395,17 @@ class SceneRenderer {
         emitter.mainEmitter.sizeMultiplierAtEndOfLifespan = 6.0
         emitter.mainEmitter.sizeVariation = 0.02
         emitter.mainEmitter.spreadingAngle = 0.25
-        emitter.mainEmitter.color = .evolving(
-            start: .single(.init(red: 1.0, green: 0.8, blue: 0.2, alpha: 1.0)),
-            end: .single(.init(red: 1.0, green: 0.15, blue: 0.0, alpha: 0.0))
-        )
+        if tower.type == .ice {
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 0.5, green: 0.8, blue: 1.0, alpha: 1.0)),
+                end: .single(.init(red: 0.2, green: 0.4, blue: 1.0, alpha: 0.0))
+            )
+        } else {
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 1.0, green: 0.8, blue: 0.2, alpha: 1.0)),
+                end: .single(.init(red: 1.0, green: 0.15, blue: 0.0, alpha: 0.0))
+            )
+        }
         emitter.mainEmitter.blendMode = .additive
 
         let entity = Entity()
@@ -302,6 +416,24 @@ class SceneRenderer {
         entity.orientation = rotation
         content.add(entity)
         coneEntities[tower.id] = entity
+    }
+
+    func updateCone(for tower: Tower, origin: SIMD3<Float>, target: SIMD3<Float>) {
+        guard let entity = coneEntities[tower.id] else { return }
+
+        let diff = target - origin
+        let distance = simd_length(diff)
+        let direction = normalize(diff)
+
+        entity.position = origin
+        entity.orientation = simd_quatf(from: [0, 1, 0], to: direction)
+
+        if var emitter = entity.components[ParticleEmitterComponent.self] {
+            emitter.speed = distance * 1.8
+            emitter.speedVariation = distance * 0.3
+            emitter.mainEmitter.lifeSpan = Double(distance / (distance * 1.8)) + 0.05
+            entity.components[ParticleEmitterComponent.self] = emitter
+        }
     }
 
     func removeCone(for tower: Tower) {
@@ -322,15 +454,34 @@ class SceneRenderer {
 
     func createEnemy(_ enemy: Enemy, radius: Float, at position: SIMD3<Float>) {
         guard let content else { return }
-        let mesh = MeshResource.generateSphere(radius: radius)
+
+        let mesh: MeshResource
         var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
-        material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.3, blue: 0.2, alpha: 1))
+
+        if enemy.isBoss {
+            mesh = MeshResource.generateBox(width: radius * 3, height: radius * 4, depth: radius * 3, cornerRadius: radius * 0.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.6, green: 0.1, blue: 0.15, alpha: 1))
+        } else if enemy.isShielder {
+            mesh = MeshResource.generateSphere(radius: radius * 1.5)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.2, alpha: 1))
+        } else if enemy.isTank {
+            mesh = MeshResource.generateSphere(radius: radius * 2)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.25, blue: 0.6, alpha: 1))
+        } else {
+            mesh = MeshResource.generateSphere(radius: radius)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.3, blue: 0.2, alpha: 1))
+        }
 
         let entity = Entity()
         entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
         entity.position = position
         content.add(entity)
         enemyEntities[enemy.id] = entity
+
+        // Create shield dome for shielder enemies
+        if enemy.isShielder {
+            createShieldDome(for: enemy, at: position, spacing: radius)
+        }
     }
 
     func updateEnemyPosition(_ enemy: Enemy, position: SIMD3<Float>) {
@@ -381,11 +532,54 @@ class SceneRenderer {
         }
     }
 
+    // MARK: - Shield Domes
+
+    private var shieldDomeEntities: [UUID: Entity] = [:]
+
+    func createShieldDome(for enemy: Enemy, at position: SIMD3<Float>, spacing: Float) {
+        guard let content else { return }
+
+        // Dome radius covers the shielder's cell + 1 cell around it (~1.5 hex widths)
+        let domeRadius: Float = 0.8
+        let mesh = MeshResource.generateSphere(radius: domeRadius)
+        var material = UnlitMaterial(color: .init(red: 1.0, green: 0.95, blue: 0.3, alpha: 0.2))
+        material.blending = .transparent(opacity: .init(floatLiteral: 0.2))
+
+        let dome = Entity()
+        dome.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        dome.position = position
+        // Squash slightly into a dome shape
+        dome.scale = [1.0, 0.6, 1.0]
+        content.add(dome)
+        shieldDomeEntities[enemy.id] = dome
+    }
+
+    func updateShieldDome(for enemy: Enemy, position: SIMD3<Float>, shieldRatio: Float) {
+        guard let dome = shieldDomeEntities[enemy.id] else { return }
+        dome.position = position
+        // Scale dome based on remaining shield HP for visual feedback
+        let s = 0.5 + 0.5 * shieldRatio
+        dome.scale = [s, 0.6 * s, s]
+    }
+
+    func removeShieldDome(for enemy: Enemy) {
+        shieldDomeEntities[enemy.id]?.removeFromParent()
+        shieldDomeEntities.removeValue(forKey: enemy.id)
+    }
+
+    func removeAllShieldDomes() {
+        for (_, entity) in shieldDomeEntities {
+            entity.removeFromParent()
+        }
+        shieldDomeEntities.removeAll()
+    }
+
     func removeAllEnemies() {
         for (_, entity) in enemyEntities {
             entity.removeFromParent()
         }
         enemyEntities.removeAll()
+        removeAllShieldDomes()
     }
 
     // MARK: - Projectiles
@@ -419,6 +613,19 @@ class SceneRenderer {
             entity.removeFromParent()
         }
         projectileEntities.removeAll()
+    }
+
+    func removeTower(id: UUID) {
+        towerEntities[id]?.removeFromParent()
+        towerEntities.removeValue(forKey: id)
+        turretEntities.removeValue(forKey: id)
+    }
+
+    func rebuildBaseTower(cellHeight: Float, position: SIMD2<Float>) {
+        baseTowerRoot?.removeFromParent()
+        baseTowerRoot = nil
+        baseTowerBlocks.removeAll()
+        createBaseTower(cellHeight: cellHeight, position: position)
     }
 
     // MARK: - Color

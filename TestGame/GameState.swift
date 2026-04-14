@@ -19,7 +19,7 @@ class GameState {
 
     let hexRadius: Float = 0.5
     let gap: Float = 0.05
-    let pathLength = 50
+    let pathLength = 25
     let terrainRings = 2
 
     var spacing: Float { hexRadius + gap / 2 }
@@ -32,12 +32,18 @@ class GameState {
     let killReward: Int = 5
     var selectedTowerType: TowerType = .projectile
 
+    private var towerPlacedCount: [TowerType: Int] = [:]
+
     func costForTower(_ type: TowerType) -> Int {
+        let base: Int
         switch type {
-        case .projectile: return 20
-        case .laser: return 50
-        case .fire: return 35
+        case .projectile: base = 25
+        case .laser: base = 40
+        case .fire: base = 60
+        case .ice: base = 100
         }
+        let count = towerPlacedCount[type, default: 0]
+        return Int(Double(base) * pow(1.1, Double(count)))
     }
 
     // MARK: - Towers
@@ -51,8 +57,17 @@ class GameState {
     private(set) var enemies: [Enemy] = []
 
     private var enemiesToSpawn: Int = 0
-    private var spawnInterval: Float = 1.0  // seconds between spawns
+    private var spawnInterval: Float = 0.5  // seconds between spawns
     private var spawnTimer: Float = 0
+
+    // MARK: - Base Tower
+
+    let baseTowerMaxHP: Int = 10
+    private(set) var baseTowerHP: Int = 10
+    /// Number of visual blocks remaining (starts at 5, loses one every 2 HP lost)
+    private(set) var baseTowerBlocksRemaining: Int = 5
+    /// Tracks cumulative damage for block destruction threshold
+    private var baseTowerDamageAccumulated: Int = 0
 
     // MARK: - Projectiles
 
@@ -83,15 +98,44 @@ class GameState {
 
             currentHeight *= Float.random(in: 0.95...1.05)
 
-            let roll = Float.random(in: 0..<1)
-            if roll < 0.20 {
-                dir = (dir + 5) % 6
-            } else if roll < 0.4 {
-                dir = (dir + 1) % 6
+            // Look ahead 2 steps in each turn direction to detect curling
+            let leftDir = (dir + 5) % 6
+            let rightDir = (dir + 1) % 6
+
+            let leftBlocked = isPathAhead(from: coord, direction: leftDir)
+            let rightBlocked = isPathAhead(from: coord, direction: rightDir)
+            let straightBlocked = isPathAhead(from: coord, direction: dir)
+
+            // Choose turn direction, biasing away from existing path
+            if straightBlocked && !leftBlocked && !rightBlocked {
+                dir = Bool.random() ? leftDir : rightDir
+            } else if straightBlocked && leftBlocked {
+                dir = rightDir
+            } else if straightBlocked && rightBlocked {
+                dir = leftDir
+            } else if leftBlocked && !rightBlocked {
+                // Bias right when left is blocked
+                let roll = Float.random(in: 0..<1)
+                if roll < 0.3 { dir = rightDir }
+                // else keep straight
+            } else if rightBlocked && !leftBlocked {
+                // Bias left when right is blocked
+                let roll = Float.random(in: 0..<1)
+                if roll < 0.3 { dir = leftDir }
+                // else keep straight
+            } else {
+                // Normal random turning
+                let roll = Float.random(in: 0..<1)
+                if roll < 0.20 {
+                    dir = leftDir
+                } else if roll < 0.4 {
+                    dir = rightDir
+                }
             }
 
             var next = coord.neighbor(dir)
             if hexGrid.cell(at: next) != nil {
+                // Fallback: try other directions
                 var found = false
                 for offset in 1...5 {
                     let tryDir = (dir + offset) % 6
@@ -108,6 +152,15 @@ class GameState {
         }
 
         previousCell?.type = .end
+    }
+
+    /// Checks if there's an existing path cell within 2 steps in the given direction.
+    private func isPathAhead(from coord: HexCoord, direction: Int) -> Bool {
+        let step1 = coord.neighbor(direction)
+        if hexGrid.cell(at: step1) != nil { return true }
+        let step2 = step1.neighbor(direction)
+        if hexGrid.cell(at: step2) != nil { return true }
+        return false
     }
 
     private func generateTerrain() {
@@ -159,6 +212,7 @@ class GameState {
         guard cell.type == .terrain && !cell.hasTower else { return nil }
 
         money -= cost
+        towerPlacedCount[selectedTowerType, default: 0] += 1
         cell.hasTower = true
         let tower: Tower
         switch selectedTowerType {
@@ -168,9 +222,25 @@ class GameState {
             tower = Tower.makeLaser(coord: coord)
         case .fire:
             tower = Tower.makeFire(coord: coord)
+        case .ice:
+            tower = Tower.makeIce(coord: coord)
         }
         towers.append(tower)
         return tower
+    }
+
+    func tower(at coord: HexCoord) -> Tower? {
+        towers.first(where: { $0.coord == coord })
+    }
+
+    /// Upgrades a tower if affordable. Returns true on success.
+    func upgradeTower(_ tower: Tower) -> Bool {
+        guard tower.canUpgrade else { return false }
+        let cost = tower.upgradeCost
+        guard money >= cost else { return false }
+        money -= cost
+        tower.applyUpgrade()
+        return true
     }
 
     // MARK: - Round Management
@@ -180,21 +250,39 @@ class GameState {
         round += 1
         phase = .combat
 
-        let enemyCount = 10 + round * 4
-        let hp: Float = 50 + Float(round) * 15
-        let speed: Float = 1.5 + Float(round )/2
+        let enemyCount = 2 + Int(Float(round) * 1.5)
+        let hp: Float = 25 + Float(round) * 15
+        let speed: Float = 0.4 + Float(round) / 10
 
         enemiesToSpawn = enemyCount
-        spawnInterval = max(0.4, 1.2 - floorf(Float(round)/5) * 0.1)
+        spawnInterval = max(0.1, 0.6 - floorf(Float(round)/5) * 0.1)
         spawnTimer = 0
 
         enemies.removeAll()
         projectiles.removeAll()
 
         // Pre-create enemies for this round
-        for _ in 0..<enemyCount {
-            enemies.append(Enemy(hitPoints: hp, speed: speed))
+        for i in 0..<enemyCount {
+            let idx = i + 1
+            if round >= 10 && idx % 7 == 0 {
+                // Shield emitter: normal HP, half speed, shield scales with round
+                let shieldAmt = Float(150 + 50 * round)
+                enemies.append(Enemy(hitPoints: hp, speed: speed * 0.75, isShielder: true, shieldAmount: shieldAmt))
+            } else if round > 5 && idx % 5 == 0 {
+                // Tank enemy: 3x HP, half speed, bigger
+                enemies.append(Enemy(hitPoints: hp * 4, speed: speed * 0.5, isTank: true, baseDamage: 2))
+            } else {
+                enemies.append(Enemy(hitPoints: hp, speed: speed))
+            }
         }
+
+        // Boss every 5 rounds — spawns last
+        if round % 5 == 0 {
+            let bossHP = hp * Float(round)
+            let bossSpeed = speed * 0.5
+            enemies.append(Enemy(hitPoints: bossHP, speed: bossSpeed, isBoss: true, baseDamage: 5))
+        }
+
         // Deactivate all — they'll be activated by the spawner
         for enemy in enemies {
             enemy.active = false
@@ -224,43 +312,74 @@ class GameState {
             }
         }
 
-        // Move enemies
+        // Regenerate shields
+        for enemy in enemies where enemy.active && enemy.isShielder && enemy.shieldHP > 0 {
+            enemy.shieldHP = min(enemy.shieldMaxHP, enemy.shieldHP + enemy.shieldRegen * deltaTime)
+        }
+
+        // Move enemies and apply burn DOT
         for enemy in enemies where enemy.active {
+            // Burn damage tick
+            if enemy.burning {
+                enemy.burnTimer -= deltaTime
+                if enemy.burnTimer <= 0 {
+                    enemy.burning = false
+                    enemy.burnTimer = 0
+                } else {
+                    if dealDamage(enemy.burnDPS * deltaTime, to: enemy, events: &events) {
+                        continue
+                    }
+                }
+            }
+
             moveEnemy(enemy, deltaTime: deltaTime)
-            events.movedEnemies.append(enemy)
+            if enemy.reachedEnd {
+                damageBaseTower(damage: enemy.baseDamage, events: &events)
+                events.killedEnemies.append(enemy)
+            } else {
+                events.movedEnemies.append(enemy)
+            }
         }
 
         // Update tower aiming and firing
         for tower in towers {
             tower.cooldownRemaining = max(0, tower.cooldownRemaining - deltaTime)
 
-            // Fire cone: locked rotation, apply AoE damage
-            if tower.type == .fire && tower.isFiringCone {
+            // Fire/Ice cone: track enemies and apply effects
+            if (tower.type == .fire || tower.type == .ice) && tower.isFiringCone {
                 tower.fireTimeRemaining -= deltaTime
                 if tower.fireTimeRemaining <= 0 {
                     tower.isFiringCone = false
                     tower.fireTargetCoord = nil
+                    tower.beamTargetID = nil
                     tower.cooldownRemaining = tower.cooldown
                     events.conesEnded.append(tower)
+                    continue
                 } else {
                     let coneCells = fireConeCoords(for: tower)
-                    applyAreaDamage(cells: coneCells, dps: tower.fireDamagePerSecond, deltaTime: deltaTime, events: &events)
+                    if tower.type == .fire {
+                        applyAreaDamage(cells: coneCells, dps: tower.fireDamagePerSecond, deltaTime: deltaTime, events: &events)
+                        // Max-level fire tower applies burning DOT
+                        if tower.level == Tower.maxLevel {
+                            applyBurning(cells: coneCells)
+                        }
+                    } else if tower.type == .ice, let target = tower.fireTargetCoord {
+                        applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
+                    }
+                    // Falls through to enemy detection and rotation below
                 }
-                continue
             }
 
-            // Find closest enemy in detection radius for aiming
+            // Find target enemy — use locked target if actively firing, otherwise select new
             let towerPos2D = tower.coord.worldPosition(spacing: spacing)
-            var closestEnemy: Enemy?
-            var closestDist: Int = Int.max
+            let closestEnemy: Enemy?
 
-            for enemy in enemies where enemy.active {
-                guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-                let dist = tower.coord.distance(to: enemyCoord)
-                if dist <= tower.detectionRadius && dist < closestDist {
-                    closestDist = dist
-                    closestEnemy = enemy
-                }
+            let isFiring = tower.isFiringCone || tower.isFiringBeam
+            if isFiring, let lockedID = tower.beamTargetID,
+               let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
+                closestEnemy = locked
+            } else {
+                closestEnemy = selectTarget(for: tower)
             }
 
             if let target = closestEnemy, let targetPos = enemyWorldPosition(target) {
@@ -286,18 +405,64 @@ class GameState {
                 }
             }
 
-            // Laser beam: track and apply damage while firing
+            // Update fire/ice cone target tracking locked enemy
+            if (tower.type == .fire || tower.type == .ice) && tower.isFiringCone {
+                if let target = closestEnemy, let coord = enemyNearestCoord(target) {
+                    tower.fireTargetCoord = coord
+                }
+                events.conesUpdated.append(tower)
+                continue
+            }
+
+            // Laser beam: lock onto target, track it, end on kill/loss/timeout
             if tower.type == .laser && tower.isFiringBeam {
                 tower.beamTimeRemaining -= deltaTime
-                if tower.beamTimeRemaining <= 0 {
+
+                // Check if locked target is still valid
+                let lockedTarget = tower.beamTargetID.flatMap { id in
+                    enemies.first(where: { $0.id == id && $0.active })
+                }
+
+                if tower.beamTimeRemaining <= 0 || lockedTarget == nil {
+                    // Beam ends: timeout or target lost/killed
                     tower.isFiringBeam = false
+                    tower.beamTimeRemaining = 0
+                    tower.beamTargetID = nil
                     tower.cooldownRemaining = tower.cooldown
+                    tower.hasTarget = false
                     events.beamsEnded.append(tower)
                 } else {
+                    // Track the locked target for turret aiming
+                    if let target = lockedTarget, let targetPos = enemyWorldPosition(target) {
+                        let towerPos2D = tower.coord.worldPosition(spacing: spacing)
+                        let dx = targetPos.x - towerPos2D.x
+                        let dz = targetPos.z - towerPos2D.y
+                        tower.targetYaw = atan2(dx, dz) + .pi
+                        tower.hasTarget = true
+                    }
+
                     let beamCells = beamCellCoords(for: tower)
+                    let killCountBefore = events.killedEnemies.count
                     applyAreaDamage(cells: beamCells, dps: tower.beamDamagePerSecond, deltaTime: deltaTime, events: &events)
-                    events.beamsUpdated.append(tower)
+
+                    if events.killedEnemies.count > killCountBefore {
+                        // Target killed — end beam, enter cooldown
+                        tower.isFiringBeam = false
+                        tower.beamTimeRemaining = 0
+                        tower.beamTargetID = nil
+                        tower.cooldownRemaining = tower.cooldown
+                        tower.hasTarget = false
+                        events.beamsEnded.append(tower)
+                    } else {
+                        events.beamsUpdated.append(tower)
+                    }
                 }
+                continue
+            }
+
+            // Laser in cooldown — don't track new targets
+            if tower.type == .laser && tower.cooldownRemaining > 0 {
+                tower.hasTarget = false
                 continue
             }
 
@@ -312,13 +477,15 @@ class GameState {
                 if tower.type == .laser {
                     tower.isFiringBeam = true
                     tower.beamTimeRemaining = tower.beamDuration
+                    tower.beamTargetID = closestEnemy?.id
                     events.beamsStarted.append(tower)
-                } else if tower.type == .fire {
+                } else if tower.type == .fire || tower.type == .ice {
                     // Find the target enemy's nearest coord for the cone center
                     if let target = closestEnemy, let coord = enemyNearestCoord(target) {
                         tower.isFiringCone = true
                         tower.fireTimeRemaining = tower.fireDuration
                         tower.fireTargetCoord = coord
+                        tower.beamTargetID = target.id
                         events.conesStarted.append(tower)
                     }
                 } else {
@@ -343,16 +510,28 @@ class GameState {
         // Apply damage from completed projectiles
         for projectile in completedProjectiles {
             if let enemy = enemies.first(where: { $0.id == projectile.targetEnemyID && $0.active }) {
-                enemy.hitPoints -= projectile.damage
-                if enemy.hitPoints <= 0 {
-                    enemy.active = false
-                    money += killReward
-                    events.killedEnemies.append(enemy)
+                dealDamage(projectile.damage, to: enemy, events: &events)
+
+                // Max-level projectile tower: AoE explosion hits all enemies on same tile
+                if projectile.isAoE, let coord = enemyNearestCoord(enemy) {
+                    for other in enemies where other.active && other.id != enemy.id {
+                        guard let otherCoord = enemyNearestCoord(other) else { continue }
+                        if otherCoord == coord {
+                            dealDamage(projectile.damage, to: other, events: &events)
+                        }
+                    }
                 }
             }
             events.completedProjectiles.append(projectile)
         }
         projectiles.removeAll { $0.isComplete }
+
+        // Check game over
+        if events.gameOver {
+            phase = .roundOver
+            events.roundOver = true
+            return events
+        }
 
         // Check round over: all enemies dead or escaped
         let allDone = enemies.allSatisfy { !$0.active }
@@ -366,20 +545,50 @@ class GameState {
 
     // MARK: - Enemy Movement
 
+    /// Called when an enemy reaches the end tile and hits the base tower.
+    private func damageBaseTower(damage: Int, events: inout GameEvents) {
+        baseTowerHP = max(0, baseTowerHP - damage)
+        baseTowerDamageAccumulated += damage
+        events.baseTowerHit = true
+
+        // Every 2 HP lost, destroy a block
+        while baseTowerDamageAccumulated >= 2 && baseTowerBlocksRemaining > 0 {
+            baseTowerDamageAccumulated -= 2
+            baseTowerBlocksRemaining -= 1
+            events.baseTowerBlocksDestroyed += 1
+        }
+
+        if baseTowerHP <= 0 {
+            events.gameOver = true
+        }
+    }
+
     private func moveEnemy(_ enemy: Enemy, deltaTime: Float) {
         guard let current = enemy.currentCell else { return }
 
         guard let nextCell = current.next else {
-            // Reached the end — enemy escapes
+            // Reached the end — enemy hits the base tower
             enemy.active = false
+            enemy.reachedEnd = true
             return
+        }
+
+        // Tick down slow timer
+        if enemy.slowed {
+            enemy.slowTimer -= deltaTime
+            if enemy.slowTimer <= 0 {
+                enemy.slowed = false
+                enemy.slowTimer = 0
+                enemy.slowFactor = 0.5
+            }
         }
 
         let currentPos = current.coord.worldPosition(spacing: spacing)
         let nextPos = nextCell.coord.worldPosition(spacing: spacing)
         let distance = simd_distance(currentPos, nextPos)
 
-        enemy.progress += (enemy.speed * deltaTime) / distance
+        let effectiveSpeed = enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed
+        enemy.progress += (effectiveSpeed * deltaTime) / distance
 
         if enemy.progress >= 1.0 {
             enemy.progress -= 1.0
@@ -445,6 +654,45 @@ class GameState {
         return cell.next?.coord ?? cell.coord
     }
 
+    /// How far along the path an enemy is (higher = closer to end).
+    private func enemyPathProgress(_ enemy: Enemy) -> Int {
+        var steps = 0
+        var cell = hexGrid.cells.values.first(where: { $0.type == .start })
+        while let c = cell {
+            if c === enemy.currentCell { return steps }
+            cell = c.next
+            steps += 1
+        }
+        return steps
+    }
+
+    /// Selects the best enemy target for a tower based on its targeting mode.
+    private func selectTarget(for tower: Tower) -> Enemy? {
+        // Gather enemies in detection radius
+        var candidates: [(enemy: Enemy, dist: Int)] = []
+        for enemy in enemies where enemy.active {
+            guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            let dist = tower.coord.distance(to: enemyCoord)
+            if dist <= tower.detectionRadius {
+                candidates.append((enemy, dist))
+            }
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        switch tower.targetingMode {
+        case .closest:
+            return candidates.min(by: { $0.dist < $1.dist })?.enemy
+        case .furthestAhead:
+            return candidates.max(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
+        case .furthestBehind:
+            return candidates.min(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
+        case .mostHealth:
+            return candidates.max(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
+        case .leastHealth:
+            return candidates.min(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
+        }
+    }
+
     /// Predicts the world position of an enemy after `time` seconds.
     private func predictEnemyPosition(_ enemy: Enemy, afterTime time: Float) -> (position: SIMD3<Float>, coord: HexCoord)? {
         guard var cell = enemy.currentCell else { return nil }
@@ -493,7 +741,7 @@ class GameState {
     private func tryFire(tower: Tower) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerWorldPos2D = tower.coord.worldPosition(spacing: spacing)
-        let towerHeight = (towerCell?.height ?? 1.0) + 0.65 // top of tower
+        let towerHeight = (towerCell?.height ?? 1.0) + 0.62 // turret height
         let towerOrigin = SIMD3<Float>(towerWorldPos2D.x, towerHeight, towerWorldPos2D.y)
 
         // Find enemies within detection radius
@@ -532,25 +780,93 @@ class GameState {
                 target: prediction.position,
                 totalFlightTime: actualFlightTime,
                 damage: tower.damage,
-                targetEnemyID: enemy.id
+                targetEnemyID: enemy.id,
+                isAoE: tower.level == Tower.maxLevel
             )
         }
 
         return nil
     }
 
-    // MARK: - Area Damage Helper
+    // MARK: - Damage Helpers
+
+    /// Finds a nearby active shielder protecting the given coord (within 1 hex).
+    private func findShielder(near coord: HexCoord) -> Enemy? {
+        for enemy in enemies where enemy.active && enemy.isShielder && enemy.shieldActive {
+            guard let shielderCoord = enemyNearestCoord(enemy) else { continue }
+            if shielderCoord.distance(to: coord) <= 1 {
+                return enemy
+            }
+        }
+        return nil
+    }
+
+    /// Deals damage to an enemy, routing through a nearby shield if one exists.
+    /// Returns true if the enemy was killed.
+    @discardableResult
+    private func dealDamage(_ amount: Float, to enemy: Enemy, events: inout GameEvents) -> Bool {
+        guard enemy.active else { return false }
+        guard let coord = enemyNearestCoord(enemy) else {
+            enemy.hitPoints -= amount
+            if enemy.hitPoints <= 0 {
+                enemy.active = false
+                money += enemy.isBoss ? 5 * round : killReward
+                events.killedEnemies.append(enemy)
+                return true
+            }
+            return false
+        }
+
+        var remaining = amount
+        if let shielder = findShielder(near: coord) {
+            let absorbed = min(shielder.shieldHP, remaining)
+            shielder.shieldHP -= absorbed
+            remaining -= absorbed
+            if shielder.shieldHP <= 0 {
+                events.shieldsBroken.append(shielder)
+            }
+        }
+
+        if remaining > 0 {
+            enemy.hitPoints -= remaining
+        }
+        if enemy.hitPoints <= 0 {
+            enemy.active = false
+            money += enemy.isBoss ? 5 * round : killReward
+            events.killedEnemies.append(enemy)
+            return true
+        }
+        return false
+    }
 
     private func applyAreaDamage(cells: [HexCoord], dps: Float, deltaTime: Float, events: inout GameEvents) {
         for enemy in enemies where enemy.active {
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             if cells.contains(enemyCoord) {
-                enemy.hitPoints -= dps * deltaTime
-                if enemy.hitPoints <= 0 {
-                    enemy.active = false
-                    money += killReward
-                    events.killedEnemies.append(enemy)
-                }
+                dealDamage(dps * deltaTime, to: enemy, events: &events)
+            }
+        }
+    }
+
+    private func applyBurning(cells: [HexCoord]) {
+        for enemy in enemies where enemy.active {
+            guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            if cells.contains(enemyCoord) {
+                enemy.burning = true
+                enemy.burnTimer = 3.0
+            }
+        }
+    }
+
+    private func applyAreaSlow(cells: [HexCoord], slowFactor: Float = 0.5) {
+        let slowDuration: Float = 2.0
+        for enemy in enemies where enemy.active {
+            guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            if cells.contains(enemyCoord) {
+                enemy.slowed = true
+                enemy.slowTimer = max(enemy.slowTimer, slowDuration)
+                // Use the strongest slow (lowest factor)
+                enemy.slowFactor = min(enemy.slowFactor, slowFactor)
             }
         }
     }
@@ -620,13 +936,13 @@ class GameState {
     func beamOrigin(for tower: Tower) -> SIMD3<Float> {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerPos = tower.coord.worldPosition(spacing: spacing)
-        let towerHeight = (towerCell?.height ?? 1.0) + 0.65
+        let towerHeight = (towerCell?.height ?? 1.0) + 0.62
 
-        // Barrel tip offset: 0.25 units in the direction the turret faces
+        // Barrel tip offset: barrel center (0.25) + half barrel height (0.1) = 0.35
         let yaw = tower.currentYaw + .pi
         let dirX = sin(yaw)
         let dirZ = cos(yaw)
-        let barrelLength: Float = 0.25
+        let barrelLength: Float = 0.35
 
         return SIMD3<Float>(
             towerPos.x + dirX * barrelLength,
@@ -690,6 +1006,13 @@ class GameState {
         return HexCoord(q: Int(rq), r: Int(rr))
     }
 
+    // MARK: - Base Tower Position
+
+    /// Returns the end cell where the base tower is placed.
+    var endCell: HexCell? {
+        hexGrid.cells.values.first(where: { $0.type == .end })
+    }
+
     // MARK: - Return to Placing Phase
 
     func returnToPlacing() {
@@ -700,10 +1023,31 @@ class GameState {
         for tower in towers {
             tower.isFiringBeam = false
             tower.beamTimeRemaining = 0
+            tower.beamTargetID = nil
             tower.isFiringCone = false
             tower.fireTimeRemaining = 0
             tower.fireTargetCoord = nil
         }
+    }
+
+    /// Resets the entire game to its initial state. Returns removed tower IDs for cleanup.
+    func restart() -> [UUID] {  
+        let towerIDs = towers.map(\.id)
+        phase = .placing
+        round = 0
+        money = 100
+        baseTowerHP = baseTowerMaxHP
+        baseTowerBlocksRemaining = 5
+        baseTowerDamageAccumulated = 0
+        towers.removeAll()
+        enemies.removeAll()
+        projectiles.removeAll()
+        towerPlacedCount.removeAll()
+        // Clear hasTower flags
+        for cell in hexGrid.cells.values {
+            cell.hasTower = false
+        }
+        return towerIDs
     }
 
     // MARK: - Selection
@@ -747,6 +1091,11 @@ struct GameEvents {
     var beamsUpdated: [Tower] = []
     var beamsEnded: [Tower] = []
     var conesStarted: [Tower] = []
+    var conesUpdated: [Tower] = []
     var conesEnded: [Tower] = []
+    var baseTowerHit: Bool = false
+    var baseTowerBlocksDestroyed: Int = 0
+    var gameOver: Bool = false
     var roundOver: Bool = false
+    var shieldsBroken: [Enemy] = []  // shielders whose shield just hit 0
 }

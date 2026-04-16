@@ -194,8 +194,11 @@ class GameState {
                     let avg = adjacentTerrain.map(\.height).reduce(0, +) / Float(adjacentTerrain.count)
                     terrainHeight = avg * Float.random(in: 0.80...1.20)
                 }
-
+                
+                
+                
                 let cell = HexCell(coord: terrainCoord, height: terrainHeight, type: .terrain)
+                    
                 hexGrid.addCell(cell)
             }
         }
@@ -251,8 +254,8 @@ class GameState {
         phase = .combat
 
         let enemyCount = 2 + Int(Float(round) * 1.5)
-        let hp: Float = 25 + Float(round) * 15
-        let speed: Float = 0.4 + Float(round) / 10
+        let hp: Float = 25 + Float(round) * 20
+        let speed: Float = 1.0 //max(0.4 + Float(round) / 10, 1.0)
 
         enemiesToSpawn = enemyCount
         spawnInterval = max(0.1, 0.6 - floorf(Float(round)/5) * 0.1)
@@ -264,23 +267,24 @@ class GameState {
         // Pre-create enemies for this round
         for i in 0..<enemyCount {
             let idx = i + 1
-            if round >= 10 && idx % 7 == 0 {
-                // Shield emitter: normal HP, half speed, shield scales with round
+            if round > 15 && idx % 9 == 0 {
+                enemies.append(Enemy(type: .exploder, hitPoints: hp * 0.8, speed: speed * 1.5))
+            } else if round > 10 && idx % 7 == 0 {
                 let shieldAmt = Float(150 + 50 * round)
-                enemies.append(Enemy(hitPoints: hp, speed: speed * 0.75, isShielder: true, shieldAmount: shieldAmt))
+                enemies.append(Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt))
             } else if round > 5 && idx % 5 == 0 {
-                // Tank enemy: 3x HP, half speed, bigger
-                enemies.append(Enemy(hitPoints: hp * 4, speed: speed * 0.5, isTank: true, baseDamage: 2))
+                enemies.append(Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 0.5, baseDamage: 2))
+            } else if idx % 4 == 0 {
+                enemies.append(Enemy(type: .basic, hitPoints: hp, speed: speed * 2))
             } else {
-                enemies.append(Enemy(hitPoints: hp, speed: speed))
+                enemies.append(Enemy(type: .basic, hitPoints: hp, speed: speed))
             }
         }
 
         // Boss every 5 rounds — spawns last
         if round % 5 == 0 {
-            let bossHP = hp * Float(round)
-            let bossSpeed = speed * 0.5
-            enemies.append(Enemy(hitPoints: bossHP, speed: bossSpeed, isBoss: true, baseDamage: 5))
+            let bossHP = 50 + hp * Float(round)
+            enemies.append(Enemy(type: .boss, hitPoints: bossHP, speed: speed * 0.5, baseDamage: 5))
         }
 
         // Deactivate all — they'll be activated by the spawner
@@ -313,7 +317,7 @@ class GameState {
         }
 
         // Regenerate shields
-        for enemy in enemies where enemy.active && enemy.isShielder && enemy.shieldHP > 0 {
+        for enemy in enemies where enemy.active && enemy.enemyType == .shield && enemy.shieldHP > 0 {
             enemy.shieldHP = min(enemy.shieldMaxHP, enemy.shieldHP + enemy.shieldRegen * deltaTime)
         }
 
@@ -525,6 +529,33 @@ class GameState {
             events.completedProjectiles.append(projectile)
         }
         projectiles.removeAll { $0.isComplete }
+
+        // Process exploder deaths — damage nearby towers
+        for enemy in events.killedEnemies where enemy.enemyType == .exploder {
+            guard let coord = enemyNearestCoord(enemy) ?? enemy.currentCell?.coord else { continue }
+            if let pos = enemyWorldPosition(enemy) {
+                events.explosions.append(pos)
+            }
+            for tower in towers {
+                if tower.coord.distance(to: coord) <= enemy.explosionRadius {
+                    tower.hitPoints -= enemy.explosionDamage
+                    if tower.hitPoints <= 0 {
+                        events.destroyedTowers.append(tower)
+                    }
+                }
+            }
+        }
+
+        // Remove destroyed towers
+        for tower in events.destroyedTowers {
+            if let cell = hexGrid.cell(at: tower.coord) {
+                cell.hasTower = false
+            }
+            // Stop any active effects
+            if tower.isFiringBeam { events.beamsEnded.append(tower) }
+            if tower.isFiringCone { events.conesEnded.append(tower) }
+        }
+        towers.removeAll { t in events.destroyedTowers.contains(where: { $0.id == t.id }) }
 
         // Check game over
         if events.gameOver {
@@ -792,7 +823,7 @@ class GameState {
 
     /// Finds a nearby active shielder protecting the given coord (within 1 hex).
     private func findShielder(near coord: HexCoord) -> Enemy? {
-        for enemy in enemies where enemy.active && enemy.isShielder && enemy.shieldActive {
+        for enemy in enemies where enemy.active && enemy.enemyType == .shield && enemy.shieldActive {
             guard let shielderCoord = enemyNearestCoord(enemy) else { continue }
             if shielderCoord.distance(to: coord) <= 1 {
                 return enemy
@@ -810,7 +841,7 @@ class GameState {
             enemy.hitPoints -= amount
             if enemy.hitPoints <= 0 {
                 enemy.active = false
-                money += enemy.isBoss ? 5 * round : killReward
+                money += enemy.enemyType == .boss ? 5 * round : killReward
                 events.killedEnemies.append(enemy)
                 return true
             }
@@ -832,7 +863,7 @@ class GameState {
         }
         if enemy.hitPoints <= 0 {
             enemy.active = false
-            money += enemy.isBoss ? 5 * round : killReward
+            money += enemy.enemyType == .boss ? 5 * round : killReward
             events.killedEnemies.append(enemy)
             return true
         }
@@ -1098,4 +1129,6 @@ struct GameEvents {
     var gameOver: Bool = false
     var roundOver: Bool = false
     var shieldsBroken: [Enemy] = []  // shielders whose shield just hit 0
+    var destroyedTowers: [Tower] = []  // towers reduced to 0 HP
+    var explosions: [SIMD3<Float>] = []  // world positions of exploder death blasts
 }

@@ -46,6 +46,8 @@ enum HexCellType {
     case terrain
 }
 
+
+
 /// Represents a single hex cell with game state (no rendering dependency).
 class HexCell {
     let coord: HexCoord
@@ -55,7 +57,7 @@ class HexCell {
     var isSelected: Bool = false
     var isPassable: Bool = true
     var hasTower: Bool = false
-
+    var isBonus: Bool = false
     /// The next cell along the path (toward the end).
     weak var next: HexCell?
     /// The previous cell along the path (toward the start).
@@ -75,6 +77,14 @@ enum TowerType {
     case laser
     case fire
     case ice
+}
+
+enum EnemyType {
+    case basic
+    case tank
+    case boss
+    case exploder
+    case shield
 }
 
 enum TargetingMode: String, CaseIterable {
@@ -102,6 +112,8 @@ class Tower {
     var targetYaw: Float = 0       // desired turret facing angle
     var hasTarget: Bool = false     // whether the turret is tracking an enemy
     let turretRotationSpeed: Float = 3.0 // radians per second
+    var hitPoints: Int = 5
+    let maxHitPoints: Int = 5
 
     // Laser-specific state
     var beamDuration: Float        // how long the beam fires
@@ -119,7 +131,7 @@ class Tower {
     var fireTargetCoord: HexCoord? // the cell the cone is aimed at
 
     init(coord: HexCoord, type: TowerType = .projectile,
-         detectionRadius: Int = 6, fireRadius: Int = 5,
+         detectionRadius: Int = 5, fireRadius: Int = 4,
          projectileSpeed: Float = 6.0, damage: Float = 40, cooldown: Float = 1.0,
          beamDuration: Float = 2.0, beamDamagePerSecond: Float = 1.0, beamRange: Int = 5,
          fireDuration: Float = 3.0, fireDamagePerSecond: Float = 15.0) {
@@ -184,8 +196,7 @@ class Tower {
             cooldown *= 0.88
         case .laser:
             beamDamagePerSecond *= boost
-            beamDuration *= 1.15
-            cooldown *= 0.88
+            cooldown *= 0.80
             // Max level bonus: extended range
             if level == Tower.maxLevel {
                 fireRadius = 10
@@ -206,7 +217,7 @@ class Tower {
     var upgradeDescription: String {
         switch type {
         case .projectile: return "+25% dmg, -12% cooldown"
-        case .laser: return "+25% DPS, +15% duration"
+        case .laser: return "+25% DPS, -18% cooldown"
         case .fire: return "+25% DPS, +15% duration"
         case .ice: return "+20% duration, -18% cooldown"
         }
@@ -217,6 +228,7 @@ class Tower {
 
 class Enemy {
     let id: UUID = UUID()
+    let enemyType: EnemyType
     var currentCell: HexCell?
     var progress: Float = 0       // 0...1 between current and next cell
     var hitPoints: Float
@@ -225,33 +237,30 @@ class Enemy {
     var active: Bool = true
     var reachedEnd: Bool = false
     var slowed: Bool = false
-    let isBoss: Bool
-    let isTank: Bool
-    let baseDamage: Int  // damage dealt to base tower on reaching end
-    var slowTimer: Float = 0  // remaining seconds of slow effect
-    var slowFactor: Float = 0.5  // speed multiplier when slowed
+    let baseDamage: Int           // damage dealt to base tower on reaching end
+    var slowTimer: Float = 0      // remaining seconds of slow effect
+    var slowFactor: Float = 0.5   // speed multiplier when slowed
     var burning: Bool = false
-    var burnTimer: Float = 0  // remaining seconds of burn
-    let burnDPS: Float = 10.0  // damage per second while burning
+    var burnTimer: Float = 0      // remaining seconds of burn
+    let burnDPS: Float = 10.0     // damage per second while burning
 
-    // Shield emitter properties
-    let isShielder: Bool
-    var shieldHP: Float = 0
+    // Shield properties (only used when enemyType == .shield)
+    var shieldHP: Float
     let shieldMaxHP: Float
-    let shieldRegen: Float  // HP per second
-    var shieldActive: Bool { shieldHP > 0 }
+    let shieldRegen: Float = 10   // HP per second
 
-    init(hitPoints: Float, speed: Float, isBoss: Bool = false, isTank: Bool = false, isShielder: Bool = false, shieldAmount: Float = 100, baseDamage: Int = 1) {
+    var shieldActive: Bool { shieldHP > 0 }
+    var explosionRadius: Int { enemyType == .exploder ? 2 : 0 }
+    var explosionDamage: Int { enemyType == .exploder ? 1 : 0 }
+
+    init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1, shieldAmount: Float = 0) {
+        self.enemyType = type
         self.hitPoints = hitPoints
         self.maxHitPoints = hitPoints
         self.speed = speed
-        self.isBoss = isBoss
-        self.isTank = isTank
-        self.isShielder = isShielder
-        self.shieldMaxHP = isShielder ? shieldAmount : 0
-        self.shieldHP = isShielder ? shieldAmount : 0
-        self.shieldRegen = isShielder ? 10 : 0
         self.baseDamage = baseDamage
+        self.shieldMaxHP = type == .shield ? shieldAmount : 0
+        self.shieldHP = type == .shield ? shieldAmount : 0
     }
 }
 

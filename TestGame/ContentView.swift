@@ -91,7 +91,7 @@ struct ContentView: View {
                     for enemy in events.movedEnemies {
                         if let pos = gameState.enemyWorldPosition(enemy) {
                             renderer.updateEnemyPosition(enemy, position: pos)
-                            if enemy.isShielder && enemy.shieldActive {
+                            if enemy.enemyType == .shield && enemy.shieldActive {
                                 renderer.updateShieldDome(for: enemy, position: pos, shieldRatio: enemy.shieldHP / enemy.shieldMaxHP)
                             }
                         }
@@ -161,6 +161,21 @@ struct ContentView: View {
                     // Remove ended fire cones
                     for tower in events.conesEnded {
                         renderer.removeCone(for: tower)
+                    }
+
+                    // Exploder death explosions
+                    for pos in events.explosions {
+                        renderer.createExplosion(at: pos)
+                    }
+
+                    // Remove destroyed towers
+                    for tower in events.destroyedTowers {
+                        renderer.removeBeam(for: tower)
+                        renderer.removeCone(for: tower)
+                        renderer.removeTower(id: tower.id)
+                        if selectedTower?.id == tower.id {
+                            selectedTower = nil
+                        }
                     }
 
                     // Base tower block explosions
@@ -310,6 +325,18 @@ struct ContentView: View {
                     Text("\(towerTypeName(tower.type)) Tower  Lv.\(tower.level)")
                         .font(.headline)
                         .frame(maxWidth: .infinity, alignment: .center)
+
+                    HStack(spacing: 4) {
+                        Text("HP:")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.6))
+                        ForEach(0..<tower.maxHitPoints, id: \.self) { i in
+                            Image(systemName: i < tower.hitPoints ? "heart.fill" : "heart")
+                                .font(.caption2)
+                                .foregroundColor(i < tower.hitPoints ? .red : .gray)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
 
                     Divider().background(.white.opacity(0.3))
 

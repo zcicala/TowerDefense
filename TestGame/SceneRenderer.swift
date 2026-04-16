@@ -458,16 +458,20 @@ class SceneRenderer {
         let mesh: MeshResource
         var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
 
-        if enemy.isBoss {
+        switch enemy.enemyType {
+        case .boss:
             mesh = MeshResource.generateBox(width: radius * 3, height: radius * 4, depth: radius * 3, cornerRadius: radius * 0.3)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.6, green: 0.1, blue: 0.15, alpha: 1))
-        } else if enemy.isShielder {
+        case .exploder:
+            mesh = MeshResource.generateBox(width: radius * 2.2, height: radius * 2.2, depth: radius * 2.2, cornerRadius: radius * 0.2)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.4, blue: 0.0, alpha: 1))
+        case .shield:
             mesh = MeshResource.generateSphere(radius: radius * 1.5)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.2, alpha: 1))
-        } else if enemy.isTank {
+        case .tank:
             mesh = MeshResource.generateSphere(radius: radius * 2)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.25, blue: 0.6, alpha: 1))
-        } else {
+        case .basic:
             mesh = MeshResource.generateSphere(radius: radius)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.3, blue: 0.2, alpha: 1))
         }
@@ -479,7 +483,7 @@ class SceneRenderer {
         enemyEntities[enemy.id] = entity
 
         // Create shield dome for shielder enemies
-        if enemy.isShielder {
+        if enemy.enemyType == .shield {
             createShieldDome(for: enemy, at: position, spacing: radius)
         }
     }
@@ -572,6 +576,38 @@ class SceneRenderer {
             entity.removeFromParent()
         }
         shieldDomeEntities.removeAll()
+    }
+
+    /// Spawns a large orange explosion effect at the given world position.
+    func createExplosion(at position: SIMD3<Float>) {
+        guard let content else { return }
+
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .sphere
+        emitter.emitterShapeSize = [0.2, 0.2, 0.2]
+        emitter.speed = 4.0
+        emitter.speedVariation = 2.0
+        emitter.mainEmitter.birthRate = 800
+        emitter.mainEmitter.lifeSpan = 0.8
+        emitter.mainEmitter.lifeSpanVariation = 0.3
+        emitter.mainEmitter.size = 0.1
+        emitter.mainEmitter.sizeVariation = 0.05
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 1.0, green: 0.7, blue: 0.1, alpha: 1.0)),
+            end: .single(.init(red: 1.0, green: 0.1, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .once(warmUp: 0, emit: .init(duration: 0.15))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = position
+        content.add(entity)
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            entity.removeFromParent()
+        }
     }
 
     func removeAllEnemies() {

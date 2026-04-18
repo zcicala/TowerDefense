@@ -48,6 +48,25 @@ enum HexCellType {
 
 
 
+enum BonusType: CaseIterable {
+    case freeUpgrade
+    case invulnerable
+
+    var displayName: String {
+        switch self {
+        case .freeUpgrade: return "Free Upgrades"
+        case .invulnerable: return "Invulnerable"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .freeUpgrade: return "Place a tower here to instantly gain 3 free upgrade levels!"
+        case .invulnerable: return "Place a tower here to make it immune to exploder damage!"
+        }
+    }
+}
+
 /// Represents a single hex cell with game state (no rendering dependency).
 class HexCell {
     let coord: HexCoord
@@ -57,7 +76,8 @@ class HexCell {
     var isSelected: Bool = false
     var isPassable: Bool = true
     var hasTower: Bool = false
-    var isBonus: Bool = false
+    var bonusType: BonusType? = nil
+    var isBonus: Bool { bonusType != nil }
     /// The next cell along the path (toward the end).
     weak var next: HexCell?
     /// The previous cell along the path (toward the start).
@@ -77,11 +97,15 @@ enum TowerType {
     case laser
     case fire
     case ice
+    case bowler
+    case sword
+    case healer
 }
 
 enum EnemyType {
     case basic
     case tank
+    case fastTank
     case boss
     case exploder
     case shield
@@ -114,6 +138,11 @@ class Tower {
     let turretRotationSpeed: Float = 3.0 // radians per second
     var hitPoints: Int = 5
     let maxHitPoints: Int = 5
+    var isInvulnerable: Bool = false
+
+    // Healer-specific state
+    var healCharges: Int = 1      // remaining heal charges this round
+    var healRadius: Int = 1       // hex distance to reach damaged towers
 
     // Laser-specific state
     var beamDuration: Float        // how long the beam fires
@@ -129,6 +158,17 @@ class Tower {
     var isFiringCone: Bool = false
     var fireTimeRemaining: Float = 0
     var fireTargetCoord: HexCoord? // the cell the cone is aimed at
+
+    // Sword-specific state
+    var isFiringBlade: Bool = false
+    var bladeTimeRemaining: Float = 0
+    var bladeTargetCoord: HexCoord?                     // single-stab target
+    var bladeSwipeTargets: [(coord: HexCoord, angle: Float)] = []  // max-level swipe: coord + angle
+    var bladeSwipeStartAngle: Float = 0
+    var bladeSwipeEndAngle: Float = 0
+    var bladeSweepProgress: Float = 0                   // 0...1 over fireDuration
+    var bladeDamagedCoords: Set<HexCoord> = []          // coords already hit this swipe
+    var bladeDamageDealt: Bool = false                  // for single stab
 
     init(coord: HexCoord, type: TowerType = .projectile,
          detectionRadius: Int = 5, fireRadius: Int = 4,
@@ -170,6 +210,33 @@ class Tower {
               fireDuration: 3.0, fireDamagePerSecond: 0)
     }
 
+    static func makeSword(coord: HexCoord) -> Tower {
+        Tower(coord: coord, type: .sword,
+              detectionRadius: 1, fireRadius: 1,
+              projectileSpeed: 0, damage: 49, cooldown: 0.84,
+              beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
+              fireDuration: 0.28, fireDamagePerSecond: 0)
+    }
+
+    static func makeBowler(coord: HexCoord) -> Tower {
+        Tower(coord: coord, type: .bowler,
+              detectionRadius: 5, fireRadius: 5,
+              projectileSpeed: 0, damage: 40, cooldown: 4.0,
+              beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
+              fireDuration: 0, fireDamagePerSecond: 0)
+    }
+
+    static func makeHealer(coord: HexCoord) -> Tower {
+        let t = Tower(coord: coord, type: .healer,
+                      detectionRadius: 1, fireRadius: 1,
+                      projectileSpeed: 0, damage: 0, cooldown: 5.0,
+                      beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
+                      fireDuration: 0, fireDamagePerSecond: 0)
+        t.healCharges = 1
+        t.healRadius = 1
+        return t
+    }
+
     var canUpgrade: Bool { level < Tower.maxLevel }
 
     /// Cost to upgrade to the next level.
@@ -180,6 +247,9 @@ class Tower {
         case .laser: base = 33
         case .fire: base = 28
         case .ice: base = 44
+        case .bowler: base = 20
+        case .sword: base = 18
+        case .healer: base = 30
         }
         return base * level
     }
@@ -210,6 +280,18 @@ class Tower {
         case .ice:
             fireDuration *= 1.2
             cooldown *= 0.82
+        case .bowler:
+            damage *= boost
+            cooldown *= 0.88
+        case .sword:
+            damage *= boost
+            cooldown *= 0.88
+        case .healer:
+            healCharges = level  // charges equal to new level
+            cooldown *= 0.90
+            if level == Tower.maxLevel {
+                healRadius = 2
+            }
         }
     }
 
@@ -220,6 +302,9 @@ class Tower {
         case .laser: return "+25% DPS, -18% cooldown"
         case .fire: return "+25% DPS, +15% duration"
         case .ice: return "+20% duration, -18% cooldown"
+        case .bowler: return "+25% dmg, -12% cooldown"
+        case .sword: return "+25% dmg, -12% cooldown"
+        case .healer: return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
         }
     }
 }
@@ -250,7 +335,7 @@ class Enemy {
     let shieldRegen: Float = 10   // HP per second
 
     var shieldActive: Bool { shieldHP > 0 }
-    var explosionRadius: Int { enemyType == .exploder ? 2 : 0 }
+    var explosionRadius: Int { enemyType == .exploder ? 1 : 0 }
     var explosionDamage: Int { enemyType == .exploder ? 1 : 0 }
 
     init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1, shieldAmount: Float = 0) {
@@ -297,6 +382,39 @@ class Projectile {
 
     var isComplete: Bool {
         elapsed >= totalFlightTime
+    }
+}
+
+// MARK: - Bowling Ball
+
+class BowlingBall {
+    let id: UUID = UUID()
+    var position: SIMD3<Float>
+    var direction: SIMD3<Float>  // normalized XZ travel direction (mutable for bounce)
+    let speed: Float
+    let damage: Float
+    var active: Bool = true
+    var hitEnemyIDs: Set<UUID> = []  // enemies already struck by this ball
+    var bouncesRemaining: Int        // >0 allows path-following on bend
+    var lastPathCell: HexCell?       // last valid path cell, used for bounce redirect
+
+    // Fall-in animation
+    let fallDuration: Float = 0.35
+    var fallTimer: Float = 0
+    var isFalling: Bool = true
+    let startY: Float       // Y at top of tower
+    let targetY: Float      // Y at path level
+
+    var fallProgress: Float { min(fallTimer / fallDuration, 1.0) }
+
+    init(startPosition: SIMD3<Float>, direction: SIMD3<Float>, speed: Float, damage: Float, targetY: Float, bouncesRemaining: Int = 0) {
+        self.position = startPosition
+        self.direction = direction
+        self.speed = speed
+        self.damage = damage
+        self.startY = startPosition.y
+        self.targetY = targetY
+        self.bouncesRemaining = bouncesRemaining
     }
 }
 

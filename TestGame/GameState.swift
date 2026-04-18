@@ -28,19 +28,22 @@ class GameState {
 
     private(set) var phase: GamePhase = .placing
     private(set) var round: Int = 0
-    private(set) var money: Int = 100
-    let killReward: Int = 5
-    var selectedTowerType: TowerType = .projectile
+    private(set) var money: Int = 80
+    let killReward: Int = 8
+    var selectedTowerType: TowerType? = nil
 
     private var towerPlacedCount: [TowerType: Int] = [:]
 
     func costForTower(_ type: TowerType) -> Int {
         let base: Int
         switch type {
-        case .projectile: base = 25
+        case .projectile: base = 50
         case .laser: base = 40
-        case .fire: base = 60
+        case .fire: base = 80
         case .ice: base = 100
+        case .bowler: base = 50
+        case .sword: base = 40
+        case .healer: base = 150
         }
         let count = towerPlacedCount[type, default: 0]
         return Int(Double(base) * pow(1.1, Double(count)))
@@ -72,6 +75,7 @@ class GameState {
     // MARK: - Projectiles
 
     private(set) var projectiles: [Projectile] = []
+    private(set) var bowlingBalls: [BowlingBall] = []
 
     // MARK: - Map Generation
 
@@ -208,17 +212,24 @@ class GameState {
 
     /// Places a tower on a terrain cell. Returns the tower if successful.
     func placeTower(at coord: HexCoord) -> Tower? {
-        guard phase == .placing else { return nil }
-        let cost = costForTower(selectedTowerType)
+        guard phase == .placing, let type = selectedTowerType else { return nil }
+        let cost = costForTower(type)
         guard money >= cost else { return nil }
         guard let cell = hexGrid.cell(at: coord) else { return nil }
         guard cell.type == .terrain && !cell.hasTower else { return nil }
 
+        if type == .bowler || type == .sword {
+            let hasPathNeighbor = hexGrid.neighbors(of: coord).contains {
+                $0.type == .path || $0.type == .start
+            }
+            guard hasPathNeighbor else { return nil }
+        }
+
         money -= cost
-        towerPlacedCount[selectedTowerType, default: 0] += 1
+        towerPlacedCount[type, default: 0] += 1
         cell.hasTower = true
         let tower: Tower
-        switch selectedTowerType {
+        switch type {
         case .projectile:
             tower = Tower(coord: coord)
         case .laser:
@@ -227,7 +238,26 @@ class GameState {
             tower = Tower.makeFire(coord: coord)
         case .ice:
             tower = Tower.makeIce(coord: coord)
+        case .bowler:
+            tower = Tower.makeBowler(coord: coord)
+        case .sword:
+            tower = Tower.makeSword(coord: coord)
+        case .healer:
+            tower = Tower.makeHealer(coord: coord)
         }
+        // Apply and consume any bonus on this cell
+        if let bonus = cell.bonusType {
+            switch bonus {
+            case .freeUpgrade:
+                tower.applyUpgrade()
+                tower.applyUpgrade()
+                tower.applyUpgrade()
+            case .invulnerable:
+                tower.isInvulnerable = true
+            }
+            cell.bonusType = nil
+        }
+
         towers.append(tower)
         return tower
     }
@@ -237,6 +267,16 @@ class GameState {
     }
 
     /// Upgrades a tower if affordable. Returns true on success.
+    let repairCost: Int = 75
+
+    /// Heals a tower by 1 HP for $75. Returns true on success.
+    func repairTower(_ tower: Tower) -> Bool {
+        guard tower.hitPoints < tower.maxHitPoints, money >= repairCost else { return false }
+        money -= repairCost
+        tower.hitPoints += 1
+        return true
+    }
+
     func upgradeTower(_ tower: Tower) -> Bool {
         guard tower.canUpgrade else { return false }
         let cost = tower.upgradeCost
@@ -267,11 +307,13 @@ class GameState {
         // Pre-create enemies for this round
         for i in 0..<enemyCount {
             let idx = i + 1
-            if round > 15 && idx % 9 == 0 {
+            if round > 10 && idx % 9 == 0 {
                 enemies.append(Enemy(type: .exploder, hitPoints: hp * 0.8, speed: speed * 1.5))
-            } else if round > 10 && idx % 7 == 0 {
-                let shieldAmt = Float(150 + 50 * round)
+            } else if round > 15 && idx % 7 == 0 {
+                let shieldAmt = Float(225 + 75 * round)
                 enemies.append(Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt))
+            } else if round > 20 && idx % 5 == 0 {
+                enemies.append(Enemy(type: .fastTank, hitPoints: hp * 4, speed: speed, baseDamage: 2))
             } else if round > 5 && idx % 5 == 0 {
                 enemies.append(Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 0.5, baseDamage: 2))
             } else if idx % 4 == 0 {
@@ -345,9 +387,140 @@ class GameState {
             }
         }
 
+        // Update bowling balls
+        updateBowlingBalls(deltaTime: deltaTime, events: &events)
+
         // Update tower aiming and firing
         for tower in towers {
             tower.cooldownRemaining = max(0, tower.cooldownRemaining - deltaTime)
+
+            // Sword: stabs to an adjacent path tile when an enemy is on it
+            if tower.type == .sword {
+                if tower.isFiringBlade {
+                    tower.bladeTimeRemaining -= deltaTime
+                    tower.bladeSweepProgress = 1.0 - max(0, tower.bladeTimeRemaining / tower.fireDuration)
+
+                    if tower.level == Tower.maxLevel {
+                        // Apply damage as sweep angle passes each target
+                        let currentAngle = tower.bladeSwipeStartAngle + (tower.bladeSwipeEndAngle - tower.bladeSwipeStartAngle) * tower.bladeSweepProgress
+                        for target in tower.bladeSwipeTargets where !tower.bladeDamagedCoords.contains(target.coord) {
+                            let angleDiff = tower.bladeSwipeEndAngle > tower.bladeSwipeStartAngle
+                                ? target.angle <= currentAngle
+                                : target.angle >= currentAngle
+                            if angleDiff {
+                                let victim = enemies
+                                    .filter { $0.active && enemyNearestCoord($0) == target.coord }
+                                    .max { enemyPathProgress($0) < enemyPathProgress($1) }
+                                if let enemy = victim {
+                                    dealDamage(tower.damage, to: enemy, events: &events)
+                                }
+                                tower.bladeDamagedCoords.insert(target.coord)
+                            }
+                        }
+                        events.bladesUpdated.append(tower)
+                    } else if !tower.bladeDamageDealt, let target = tower.bladeTargetCoord {
+                        // Single stab: deal damage once
+                        let victim = enemies
+                            .filter { $0.active && enemyNearestCoord($0) == target }
+                            .max { enemyPathProgress($0) < enemyPathProgress($1) }
+                        if let enemy = victim { dealDamage(tower.damage, to: enemy, events: &events) }
+                        tower.bladeDamageDealt = true
+                    }
+
+                    if tower.bladeTimeRemaining <= 0 {
+                        tower.isFiringBlade = false
+                        tower.bladeTargetCoord = nil
+                        tower.bladeSwipeTargets = []
+                        tower.bladeDamagedCoords = []
+                        tower.bladeDamageDealt = false
+                        tower.bladeSweepProgress = 0
+                        tower.cooldownRemaining = tower.cooldown
+                        events.bladesEnded.append(tower)
+                    }
+                } else if tower.cooldownRemaining <= 0 {
+                    let adjacent = hexGrid.neighbors(of: tower.coord)
+                        .filter { $0.type == .path || $0.type == .start }
+
+                    if tower.level == Tower.maxLevel {
+                        // Swipe arc: gather all adjacent path cells and compute their angles
+                        let towerPos = tower.coord.worldPosition(spacing: spacing)
+                        let swipeTargets: [(coord: HexCoord, angle: Float)] = adjacent.compactMap { cell in
+                            let cellPos = cell.coord.worldPosition(spacing: spacing)
+                            let angle = atan2(cellPos.x - towerPos.x, cellPos.y - towerPos.y)
+                            return (cell.coord, angle)
+                        }.sorted { $0.angle < $1.angle }
+
+                        if !swipeTargets.isEmpty {
+                            // Add padding so blade starts before and ends after outermost cells
+                            let pad: Float = 0.25
+                            tower.bladeSwipeStartAngle = swipeTargets.first!.angle - pad
+                            tower.bladeSwipeEndAngle   = swipeTargets.last!.angle + pad
+                            tower.isFiringBlade = true
+                            tower.bladeTimeRemaining = tower.fireDuration
+                            tower.bladeSwipeTargets = swipeTargets
+                            tower.bladeSweepProgress = 0
+                            tower.bladeDamagedCoords = []
+                            events.bladesStarted.append(tower)
+                        }
+                    } else {
+                        let target = adjacent.first { cell in
+                            enemies.contains { $0.active && enemyNearestCoord($0) == cell.coord }
+                        }
+                        if let targetCell = target {
+                            tower.isFiringBlade = true
+                            tower.bladeTimeRemaining = tower.fireDuration
+                            tower.bladeTargetCoord = targetCell.coord
+                            tower.bladeSwipeTargets = []
+                            tower.bladeDamageDealt = false
+                            events.bladesStarted.append(tower)
+                        }
+                    }
+                }
+                continue
+            }
+
+            // Bowler: fires when an enemy is detected in range
+            if tower.type == .bowler {
+                if tower.cooldownRemaining <= 0 {
+                    let hasEnemyInRange = enemies.contains { enemy in
+                        guard enemy.active, let coord = enemyNearestCoord(enemy) else { return false }
+                        return tower.coord.distance(to: coord) <= tower.detectionRadius
+                    }
+                    if hasEnemyInRange, let entry = bowlerEntryCell(for: tower) {
+                        let entryPos = entry.coord.worldPosition(spacing: spacing)
+                        let towerCell = hexGrid.cell(at: tower.coord)
+                        let towerTopY = (towerCell?.height ?? 1.0) + 0.85  // top of tower stack + resting ball
+                        let pathY = (entry.height) + bowlingBallRadius
+                        // Ball starts at tower top (XZ = entry cell), falls to path level
+                        let startPos = SIMD3<Float>(entryPos.x, towerTopY, entryPos.y)
+                        let dir = bowlerBallDirection(tower: tower, entry: entry)
+                        let bounces = tower.level == Tower.maxLevel ? 1 : 0
+                        let ball = BowlingBall(startPosition: startPos, direction: dir, speed: 3.0, damage: tower.damage, targetY: pathY, bouncesRemaining: bounces)
+                        bowlingBalls.append(ball)
+                        events.firedBalls.append(ball)
+                        tower.cooldownRemaining = tower.cooldown
+                    }
+                }
+                continue
+            }
+
+            // Healer: automatically heals a nearby damaged tower each cooldown
+            if tower.type == .healer {
+                if tower.cooldownRemaining <= 0 && tower.healCharges > 0 {
+                    let target = towers.first {
+                        $0.id != tower.id &&
+                        $0.hitPoints < $0.maxHitPoints &&
+                        $0.coord.distance(to: tower.coord) <= tower.healRadius
+                    }
+                    if let target {
+                        target.hitPoints = min(target.hitPoints + 1, target.maxHitPoints)
+                        tower.healCharges -= 1
+                        tower.cooldownRemaining = tower.cooldown
+                        events.healedTowers.append(target)
+                    }
+                }
+                continue
+            }
 
             // Fire/Ice cone: track enemies and apply effects
             if (tower.type == .fire || tower.type == .ice) && tower.isFiringCone {
@@ -537,10 +710,12 @@ class GameState {
                 events.explosions.append(pos)
             }
             for tower in towers {
-                if tower.coord.distance(to: coord) <= enemy.explosionRadius {
+                if tower.coord.distance(to: coord) <= enemy.explosionRadius && !tower.isInvulnerable {
                     tower.hitPoints -= enemy.explosionDamage
                     if tower.hitPoints <= 0 {
                         events.destroyedTowers.append(tower)
+                    } else {
+                        events.damagedTowers.append(tower)
                     }
                 }
             }
@@ -569,6 +744,9 @@ class GameState {
         if allDone && spawnedCount == enemies.count {
             phase = .roundOver
             events.roundOver = true
+            for tower in towers where tower.type == .healer {
+                tower.healCharges = tower.level
+            }
         }
 
         return events
@@ -577,6 +755,62 @@ class GameState {
     // MARK: - Enemy Movement
 
     /// Called when an enemy reaches the end tile and hits the base tower.
+    private func updateBowlingBalls(deltaTime: Float, events: inout GameEvents) {
+        for ball in bowlingBalls where ball.active {
+            // Fall-in animation: hold position, just tick the timer
+            if ball.isFalling {
+                ball.fallTimer += deltaTime
+                if ball.fallTimer >= ball.fallDuration {
+                    ball.isFalling = false
+                }
+                events.movedBalls.append(ball)
+                continue
+            }
+
+            // Move straight in world space
+            ball.position.x += ball.direction.x * ball.speed * deltaTime
+            ball.position.z += ball.direction.z * ball.speed * deltaTime
+
+            // Check if current position is still over a path cell
+            let coord = nearestHexCoord(worldX: ball.position.x, worldZ: ball.position.z)
+            if let cell = hexGrid.cell(at: coord), cell.type == .path || cell.type == .start {
+                ball.lastPathCell = cell
+            } else {
+                // Ball rolled off the path
+                if ball.bouncesRemaining > 0, let lastCell = ball.lastPathCell {
+                    // Bounce: reverse direction and snap back to last valid cell center
+                    ball.direction = SIMD3(-ball.direction.x, 0, -ball.direction.z)
+                    let cellPos = lastCell.coord.worldPosition(spacing: spacing)
+                    ball.position.x = cellPos.x
+                    ball.position.z = cellPos.y
+                    ball.bouncesRemaining -= 1
+                    ball.hitEnemyIDs.removeAll()  // can hit enemies again on the return
+                } else {
+                    ball.active = false
+                    events.poppedBalls.append(ballWorldPosition(ball))
+                    events.removedBalls.append(ball)
+                    continue
+                }
+            }
+
+            // Collide with nearby enemies
+            let ballPos = ballWorldPosition(ball)
+            for enemy in enemies where enemy.active && !ball.hitEnemyIDs.contains(enemy.id) {
+                guard let enemyPos = enemyWorldPosition(enemy) else { continue }
+                let dx = ballPos.x - enemyPos.x
+                let dz = ballPos.z - enemyPos.z
+                let dist = sqrt(dx * dx + dz * dz)
+                if dist < (bowlingBallRadius + enemyRadius) * 1.5 {
+                    dealDamage(ball.damage, to: enemy, events: &events)
+                    ball.hitEnemyIDs.insert(enemy.id)
+                }
+            }
+
+            events.movedBalls.append(ball)
+        }
+        bowlingBalls.removeAll { !$0.active }
+    }
+
     private func damageBaseTower(damage: Int, events: inout GameEvents) {
         baseTowerHP = max(0, baseTowerHP - damage)
         baseTowerDamageAccumulated += damage
@@ -937,6 +1171,119 @@ class GameState {
         return SIMD3<Float>(pos.x, cell.height + 0.05, pos.y)
     }
 
+    // MARK: - Bowling
+
+    /// Returns the best entry path cell for a bowler — whichever adjacent path direction
+    /// has enemies nearest to it in world space. Falls back to most-upstream if no enemies nearby.
+    func bowlerEntryCell(for tower: Tower) -> HexCell? {
+        let candidates = hexGrid.neighbors(of: tower.coord)
+            .filter { $0.type == .path || $0.type == .start }
+        guard !candidates.isEmpty else { return nil }
+
+        // Pick the cell whose world position is closest to any active enemy
+        return candidates.min { a, b in
+            let distA = minEnemyDistance(to: a.coord)
+            let distB = minEnemyDistance(to: b.coord)
+            // If both have no enemies, prefer most-upstream
+            if distA == .infinity && distB == .infinity {
+                return pathStepsRemaining(a) > pathStepsRemaining(b)
+            }
+            return distA < distB
+        }
+    }
+
+    /// Minimum world-space distance from any active enemy to the given coord.
+    private func minEnemyDistance(to coord: HexCoord) -> Float {
+        let cellPos = coord.worldPosition(spacing: spacing)
+        return enemies.filter(\.active).reduce(Float.infinity) { best, enemy in
+            guard let ePos = enemyWorldPosition(enemy) else { return best }
+            let dx = ePos.x - cellPos.x
+            let dz = ePos.z - cellPos.y
+            return min(best, sqrt(dx*dx + dz*dz))
+        }
+    }
+
+    private func pathStepsRemaining(_ cell: HexCell) -> Int {
+        var steps = 0
+        var current: HexCell? = cell
+        while let c = current { steps += 1; current = c.next }
+        return steps
+    }
+
+    let bowlingBallRadius: Float = 0.18
+
+    /// World position of the ball, interpolating Y during the fall-in animation.
+    func ballWorldPosition(_ ball: BowlingBall) -> SIMD3<Float> {
+        let coord = nearestHexCoord(worldX: ball.position.x, worldZ: ball.position.z)
+        let cellHeight = hexGrid.cell(at: coord)?.height ?? 0
+        let rollingY = cellHeight + bowlingBallRadius
+        if ball.isFalling {
+            // Ease-in: slow at top, fast at bottom
+            let t = ball.fallProgress
+            let easedT = t * t
+            let y = ball.startY + (rollingY - ball.startY) * easedT
+            return SIMD3(ball.position.x, y, ball.position.z)
+        }
+        return SIMD3(ball.position.x, rollingY, ball.position.z)
+    }
+
+    let swordBladeLength: Float = 0.55   // shorter than a full cell spacing
+
+    /// World-space origin and tip for the sword blade this frame.
+    /// For the swipe, this returns the current animated position based on sweep progress.
+    func bladePositions(for tower: Tower) -> [(origin: SIMD3<Float>, tip: SIMD3<Float>)] {
+        guard let towerCell = hexGrid.cell(at: tower.coord) else { return [] }
+        let towerPos = tower.coord.worldPosition(spacing: spacing)
+        let bladeY = towerCell.height + 0.45
+        let origin = SIMD3<Float>(towerPos.x, bladeY, towerPos.y)
+
+        if tower.level == Tower.maxLevel && tower.isFiringBlade {
+            // Single blade at current sweep angle
+            let currentAngle = tower.bladeSwipeStartAngle + (tower.bladeSwipeEndAngle - tower.bladeSwipeStartAngle) * tower.bladeSweepProgress
+            // Scale: extend in first 15%, full during middle, retract in last 15%
+            let scaleT: Float
+            if tower.bladeSweepProgress < 0.15 {
+                scaleT = tower.bladeSweepProgress / 0.15
+            } else if tower.bladeSweepProgress > 0.85 {
+                scaleT = (1.0 - tower.bladeSweepProgress) / 0.15
+            } else {
+                scaleT = 1.0
+            }
+            let len = swordBladeLength * scaleT
+            let tip = SIMD3<Float>(
+                towerPos.x + sin(currentAngle) * len,
+                bladeY,
+                towerPos.y + cos(currentAngle) * len
+            )
+            return [(origin, tip)]
+        } else if let coord = tower.bladeTargetCoord {
+            guard let cell = hexGrid.cell(at: coord) else { return [] }
+            let pos = coord.worldPosition(spacing: spacing)
+            let dx = pos.x - towerPos.x
+            let dz = pos.y - towerPos.y
+            let dist = sqrt(dx*dx + dz*dz)
+            guard dist > 0 else { return [] }
+            let tip = SIMD3<Float>(
+                towerPos.x + (dx/dist) * swordBladeLength,
+                cell.height + 0.45,
+                towerPos.y + (dz/dist) * swordBladeLength
+            )
+            return [(origin, tip)]
+        }
+        return []
+    }
+
+    /// Direction vector for a ball: from the tower toward the adjacent path entry cell.
+    func bowlerBallDirection(tower: Tower, entry: HexCell) -> SIMD3<Float> {
+        let from = tower.coord.worldPosition(spacing: spacing)
+        let to   = entry.coord.worldPosition(spacing: spacing)
+        let dx = to.x - from.x
+        let dz = to.y - from.y
+        let len = sqrt(dx*dx + dz*dz)
+        guard len > 0 else { return SIMD3(1, 0, 0) }
+        return SIMD3(dx / len, 0, dz / len)
+    }
+
     // MARK: - Laser Beam
 
     /// Returns the hex coords along the beam's straight line from the tower.
@@ -1046,11 +1393,30 @@ class GameState {
 
     // MARK: - Return to Placing Phase
 
+    /// All terrain cells that currently have a bonus.
+    var bonusCells: [HexCell] {
+        hexGrid.cells.values.filter { $0.isBonus }
+    }
+
+    /// Assigns a random bonus to a random unoccupied terrain cell every 5 rounds.
+    private func assignBonusTile() {
+        let candidates = hexGrid.cells.values.filter {
+            $0.type == .terrain && !$0.hasTower && $0.bonusType == nil
+        }
+        guard let cell = candidates.randomElement() else { return }
+        cell.bonusType = BonusType.allCases.randomElement()
+    }
+
     func returnToPlacing() {
         guard phase == .roundOver else { return }
+        if round % 5 == 0 {
+            assignBonusTile()
+        }
         phase = .placing
+        selectedTowerType = nil
         enemies.removeAll()
         projectiles.removeAll()
+        bowlingBalls.removeAll()
         for tower in towers {
             tower.isFiringBeam = false
             tower.beamTimeRemaining = 0
@@ -1058,6 +1424,12 @@ class GameState {
             tower.isFiringCone = false
             tower.fireTimeRemaining = 0
             tower.fireTargetCoord = nil
+            tower.isFiringBlade = false
+            tower.bladeTimeRemaining = 0
+            tower.bladeTargetCoord = nil
+            tower.bladeSwipeTargets = []
+            tower.bladeDamagedCoords = []
+            tower.bladeSweepProgress = 0
         }
     }
 
@@ -1067,16 +1439,19 @@ class GameState {
         phase = .placing
         round = 0
         money = 100
+        selectedTowerType = nil
         baseTowerHP = baseTowerMaxHP
         baseTowerBlocksRemaining = 5
         baseTowerDamageAccumulated = 0
         towers.removeAll()
         enemies.removeAll()
         projectiles.removeAll()
+        bowlingBalls.removeAll()
         towerPlacedCount.removeAll()
         // Clear hasTower flags
         for cell in hexGrid.cells.values {
             cell.hasTower = false
+            cell.bonusType = nil
         }
         return towerIDs
     }
@@ -1129,6 +1504,15 @@ struct GameEvents {
     var gameOver: Bool = false
     var roundOver: Bool = false
     var shieldsBroken: [Enemy] = []  // shielders whose shield just hit 0
+    var damagedTowers: [Tower] = []    // towers that took damage but survived
+    var healedTowers: [Tower] = []     // towers that received a heal this frame
     var destroyedTowers: [Tower] = []  // towers reduced to 0 HP
     var explosions: [SIMD3<Float>] = []  // world positions of exploder death blasts
+    var bladesStarted: [Tower] = []
+    var bladesUpdated: [Tower] = []
+    var bladesEnded: [Tower] = []
+    var firedBalls: [BowlingBall] = []
+    var movedBalls: [BowlingBall] = []
+    var removedBalls: [BowlingBall] = []
+    var poppedBalls: [SIMD3<Float>] = []  // positions of balls that hit non-path
 }

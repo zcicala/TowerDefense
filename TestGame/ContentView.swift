@@ -27,6 +27,7 @@ struct ContentView: View {
     // UI state
     @State private var showRoundOverMessage: Bool = false
     @State private var selectedTower: Tower?
+    @State private var selectedBonusCell: HexCell?
     @State private var dialogRefresh: Int = 0
 
     var body: some View {
@@ -123,6 +124,20 @@ struct ContentView: View {
                         renderer.removeProjectile(projectile)
                     }
 
+                    // Bowling balls
+                    for ball in events.firedBalls {
+                        renderer.createBowlingBall(ball, at: gameState.ballWorldPosition(ball))
+                    }
+                    for ball in events.movedBalls {
+                        renderer.updateBowlingBallPosition(ball, position: gameState.ballWorldPosition(ball))
+                    }
+                    for ball in events.removedBalls {
+                        renderer.removeBowlingBall(ball)
+                    }
+                    for pos in events.poppedBalls {
+                        renderer.createBallPop(at: pos)
+                    }
+
                     // Create laser beams
                     for tower in events.beamsStarted {
                         let origin = gameState.beamOrigin(for: tower)
@@ -163,9 +178,35 @@ struct ContentView: View {
                         renderer.removeCone(for: tower)
                     }
 
+                    // Sword blades
+                    for tower in events.bladesStarted {
+                        let positions = gameState.bladePositions(for: tower)
+                        if !positions.isEmpty {
+                            renderer.createBlades(for: tower, positions: positions)
+                        }
+                    }
+                    for tower in events.bladesUpdated {
+                        renderer.updateBlade(for: tower, positions: gameState.bladePositions(for: tower))
+                    }
+                    for tower in events.bladesEnded {
+                        renderer.removeBlade(for: tower)
+                    }
+
                     // Exploder death explosions
                     for pos in events.explosions {
                         renderer.createExplosion(at: pos)
+                    }
+
+                    // Refresh dialog if selected tower took damage or was healed
+                    if let selected = selectedTower,
+                       events.damagedTowers.contains(where: { $0.id == selected.id }) ||
+                       events.healedTowers.contains(where: { $0.id == selected.id }) {
+                        dialogRefresh += 1
+                    }
+                    // Also refresh if selected tower is a healer that used a charge
+                    if let selected = selectedTower, selected.type == .healer,
+                       !events.healedTowers.isEmpty {
+                        dialogRefresh += 1
                     }
 
                     // Remove destroyed towers
@@ -175,6 +216,8 @@ struct ContentView: View {
                         renderer.removeTower(id: tower.id)
                         if selectedTower?.id == tower.id {
                             selectedTower = nil
+                            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                            renderer.updateSelection(deselected: deselected, selected: nil)
                         }
                     }
 
@@ -188,6 +231,8 @@ struct ContentView: View {
                         renderer.removeAllProjectiles()
                         renderer.removeAllBeams()
                         renderer.removeAllCones()
+                        renderer.removeAllBowlingBalls()
+                        renderer.removeAllBlades()
                     }
                 }
             }
@@ -247,15 +292,19 @@ struct ContentView: View {
 
                 if gameState.phase == .placing {
                     Picker("Tower", selection: $gameState.selectedTowerType) {
-                        Text("Projectile ($\(gameState.costForTower(.projectile)))").tag(TowerType.projectile)
-                        Text("Laser ($\(gameState.costForTower(.laser)))").tag(TowerType.laser)
-                        Text("Fire ($\(gameState.costForTower(.fire)))").tag(TowerType.fire)
-                        Text("Ice ($\(gameState.costForTower(.ice)))").tag(TowerType.ice)
+                        Text("None").tag(TowerType?.none)
+                        Text("Projectile ($\(gameState.costForTower(.projectile)))").tag(TowerType?.some(.projectile))
+                        Text("Laser ($\(gameState.costForTower(.laser)))").tag(TowerType?.some(.laser))
+                        Text("Fire ($\(gameState.costForTower(.fire)))").tag(TowerType?.some(.fire))
+                        Text("Ice ($\(gameState.costForTower(.ice)))").tag(TowerType?.some(.ice))
+                        Text("Bowler ($\(gameState.costForTower(.bowler)))").tag(TowerType?.some(.bowler))
+                        Text("Sword ($\(gameState.costForTower(.sword)))").tag(TowerType?.some(.sword))
+                        Text("Healer ($\(gameState.costForTower(.healer)))").tag(TowerType?.some(.healer))
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 400)
+                    .frame(width: 560)
 
-                    Text("Tap terrain cells to place towers")
+                    Text(gameState.selectedTowerType == nil ? "Click cells to inspect or select a tower to place" : "Tap terrain cells to place towers")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
 
@@ -293,6 +342,9 @@ struct ContentView: View {
                             renderer.removeAllProjectiles()
                             renderer.removeAllBeams()
                             renderer.removeAllCones()
+                            renderer.removeAllBowlingBalls()
+                            renderer.removeAllBlades()
+                            renderer.removeAllBonusIndicators()
                             if let endCell = gameState.endCell {
                                 let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
                                 renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos)
@@ -310,12 +362,60 @@ struct ContentView: View {
                         Button("Next Round") {
                             gameState.returnToPlacing()
                             showRoundOverMessage = false
+                            // Show indicators for any bonus tiles (including newly assigned ones)
+                            if let renderer {
+                                for cell in gameState.bonusCells {
+                                    let pos = cell.coord.worldPosition(spacing: gameState.spacing)
+                                    renderer.showBonusIndicator(for: cell, at: SIMD3(pos.x, cell.height, pos.y))
+                                }
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                     }
                 }
             }
             .padding(.top, 16)
+
+            // Bonus tile dialog — right side
+            if let bonusCell = selectedBonusCell, let bonus = bonusCell.bonusType {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Bonus Tile!")
+                        .font(.headline)
+                        .foregroundColor(.yellow)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Divider().background(.white.opacity(0.3))
+
+                    Text(bonus.displayName)
+                        .font(.subheadline)
+                        .foregroundColor(.yellow)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Text(bonus.description)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Button("Close") {
+                        selectedBonusCell = nil
+                        if let renderer {
+                            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                            renderer.updateSelection(deselected: deselected, selected: nil)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.75))
+                .cornerRadius(10)
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
 
             // Tower info dialog — right side
             if let tower = selectedTower {
@@ -334,6 +434,11 @@ struct ContentView: View {
                             Image(systemName: i < tower.hitPoints ? "heart.fill" : "heart")
                                 .font(.caption2)
                                 .foregroundColor(i < tower.hitPoints ? .red : .gray)
+                        }
+                        if tower.isInvulnerable {
+                            Image(systemName: "shield.fill")
+                                .font(.caption2)
+                                .foregroundColor(.cyan)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -368,6 +473,18 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
 
+                    if tower.hitPoints < tower.maxHitPoints {
+                        Button("Repair HP ($75)") {
+                            if gameState.repairTower(tower) {
+                                dialogRefresh += 1
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.green)
+                        .disabled(gameState.money < 75)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+
                     Divider().background(.white.opacity(0.3))
 
                     Text("Targeting")
@@ -392,7 +509,14 @@ struct ContentView: View {
                         .tint(tower.targetingMode == mode ? .blue : .gray)
                     }
 
-                    Button("Close") { selectedTower = nil }
+                    Button("Close") {
+                        selectedTower = nil
+                        selectedBonusCell = nil
+                        if let renderer {
+                            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                            renderer.updateSelection(deselected: deselected, selected: nil)
+                        }
+                    }
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.6))
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -467,6 +591,34 @@ struct ContentView: View {
                     statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
                 }
             }
+        case .bowler:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        case .sword:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
+        case .healer:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Charges", "\(tower.healCharges)/\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Radius", "\(tower.healRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
         }
     }
 
@@ -487,6 +639,9 @@ struct ContentView: View {
         case .laser: return "Laser"
         case .fire: return "Fire"
         case .ice: return "Ice"
+        case .bowler: return "Bowler"
+        case .sword: return "Sword"
+        case .healer: return "Healer"
         }
     }
 
@@ -496,19 +651,41 @@ struct ContentView: View {
         // Check if tapping an existing tower
         if let tower = gameState.tower(at: coord) {
             selectedTower = tower
+            selectedBonusCell = nil
+            let (deselected, selected) = gameState.selectCell(at: tower.coord)
+            renderer.updateSelection(deselected: deselected, selected: selected)
             return
         }
 
-        // Close tower dialog if tapping elsewhere
-        selectedTower = nil
+        // Dismiss any open dialogs
+        if selectedTower != nil || selectedBonusCell != nil {
+            selectedTower = nil
+            selectedBonusCell = nil
+            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+            renderer.updateSelection(deselected: deselected, selected: nil)
+        }
 
         if gameState.phase == .placing {
             // Try to place a tower
             if let tower = gameState.placeTower(at: coord) {
                 let cell = gameState.hexGrid.cell(at: coord)
                 renderer.createTower(tower, cellHeight: cell?.height ?? 1.0, spacing: gameState.spacing)
+                renderer.removeBonusIndicator(for: coord)
+                selectedBonusCell = nil
+                // If tower got a free upgrade to max, add the dome
+                if tower.level == Tower.maxLevel {
+                    renderer.addMaxLevelDome(for: tower)
+                }
                 return
             }
+        }
+
+        // Check if tapping a bonus tile — show the bonus dialog
+        if let cell = gameState.hexGrid.cell(at: coord), cell.isBonus {
+            selectedBonusCell = cell
+            let (deselected, selected) = gameState.selectCell(at: coord)
+            renderer.updateSelection(deselected: deselected, selected: selected)
+            return
         }
 
         let (deselected, selected) = gameState.selectCell(at: coord)

@@ -86,6 +86,45 @@ class SceneRenderer {
         entityMap.first { $0.value === entity }?.key
     }
 
+    // MARK: - Bonus Cell Indicators
+
+    private var bonusIndicatorEntities: [HexCoord: Entity] = [:]
+
+    func showBonusIndicator(for cell: HexCell, at position: SIMD3<Float>) {
+        guard let content, bonusIndicatorEntities[cell.coord] == nil else { return }
+
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .torus
+        emitter.emitterShapeSize = [0.3, 0.05, 0.3]
+        emitter.speed = 0.8
+        emitter.speedVariation = 0.1
+        emitter.mainEmitter.birthRate = 60
+        emitter.mainEmitter.lifeSpan = 1.2
+        emitter.mainEmitter.size = 0.1
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 1.0, green: 0.85, blue: 0.1, alpha: 1.0)),
+            end: .single(.init(red: 1.0, green: 0.6, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = SIMD3(position.x, position.y + 0.1, position.z)
+        content.add(entity)
+        bonusIndicatorEntities[cell.coord] = entity
+    }
+
+    func removeBonusIndicator(for coord: HexCoord) {
+        bonusIndicatorEntities[coord]?.removeFromParent()
+        bonusIndicatorEntities.removeValue(forKey: coord)
+    }
+
+    func removeAllBonusIndicators() {
+        for entity in bonusIndicatorEntities.values { entity.removeFromParent() }
+        bonusIndicatorEntities.removeAll()
+    }
+
     // MARK: - Towers
 
     private var towerEntities: [UUID: Entity] = [:]
@@ -106,6 +145,9 @@ class SceneRenderer {
         case .fire:  tint = .init(red: 0.6, green: 0.35, blue: 0.2, alpha: 1)
         case .ice:   tint = .init(red: 0.5, green: 0.6, blue: 0.8, alpha: 1)
         case .projectile: tint = .init(red: 0.5, green: 0.5, blue: 0.6, alpha: 1)
+        case .bowler: tint = .init(red: 0.75, green: 0.75, blue: 0.75, alpha: 1)
+        case .sword:  tint = .init(red: 0.35, green: 0.45, blue: 0.35, alpha: 1)
+        case .healer: tint = .init(red: 0.3, green: 0.6, blue: 0.4, alpha: 1)  // soft green base
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
@@ -144,6 +186,9 @@ class SceneRenderer {
         case .fire:  turretTint = .init(red: 0.9, green: 0.4, blue: 0.1, alpha: 1)
         case .ice:   turretTint = .init(red: 0.3, green: 0.6, blue: 1.0, alpha: 1)
         case .projectile: turretTint = .init(red: 0.7, green: 0.3, blue: 0.2, alpha: 1)
+        case .bowler: turretTint = .init(red: 0.3, green: 0.3, blue: 0.3, alpha: 1)
+        case .sword:  turretTint = .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1)  // silver top
+        case .healer: turretTint = .init(red: 0.9, green: 1.0, blue: 0.9, alpha: 1)    // pale green top
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
 
@@ -152,16 +197,46 @@ class SceneRenderer {
         turret.components.set(ModelComponent(mesh: turretMesh, materials: [turretMaterial]))
         turretGroup.addChild(turret)
 
-        // Barrel: short black cylinder protruding from one side
+        // Barrel / launch mechanism
         var barrelMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
         barrelMaterial.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.1, green: 0.1, blue: 0.1, alpha: 1))
 
-        let barrelMesh = MeshResource.generateCylinder(height: 0.2, radius: 0.06)
-        let barrel = Entity()
-        barrel.components.set(ModelComponent(mesh: barrelMesh, materials: [barrelMaterial]))
-        barrel.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-        barrel.position = [0, 0, -0.25]
-        turretGroup.addChild(barrel)
+        if tower.type == .bowler {
+            // Resting ball on top of the turret platform
+            let ballMesh = MeshResource.generateSphere(radius: 0.1)
+            let restBall = Entity()
+            restBall.components.set(ModelComponent(mesh: ballMesh, materials: [barrelMaterial]))
+            restBall.position = [0, 0.1, 0]
+            turretGroup.addChild(restBall)
+        } else if tower.type == .sword {
+            // Upright sword blade resting in a scabbard
+            var bladeMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            bladeMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1))
+            let bladeMesh = MeshResource.generateBox(width: 0.04, height: 0.4, depth: 0.04, cornerRadius: 0.01)
+            let blade = Entity()
+            blade.components.set(ModelComponent(mesh: bladeMesh, materials: [bladeMat]))
+            blade.position = [0, 0.25, 0]
+            turretGroup.addChild(blade)
+        } else if tower.type == .healer {
+            // Cross shape on top (two overlapping boxes forming a +)
+            var crossMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            crossMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 1.0, blue: 1.0, alpha: 1))
+            let armH = Entity()
+            armH.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.22, height: 0.06, depth: 0.06), materials: [crossMat]))
+            armH.position = [0, 0.1, 0]
+            turretGroup.addChild(armH)
+            let armV = Entity()
+            armV.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.06, height: 0.22, depth: 0.06), materials: [crossMat]))
+            armV.position = [0, 0.1, 0]
+            turretGroup.addChild(armV)
+        } else {
+            let barrelMesh = MeshResource.generateCylinder(height: 0.2, radius: 0.06)
+            let barrel = Entity()
+            barrel.components.set(ModelComponent(mesh: barrelMesh, materials: [barrelMaterial]))
+            barrel.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+            barrel.position = [0, 0, -0.25]
+            turretGroup.addChild(barrel)
+        }
 
         content.add(root)
         towerEntities[tower.id] = root
@@ -448,6 +523,117 @@ class SceneRenderer {
         coneEntities.removeAll()
     }
 
+    // MARK: - Bowling Balls
+
+    private var ballEntities: [UUID: Entity] = [:]
+
+    func createBowlingBall(_ ball: BowlingBall, at position: SIMD3<Float>) {
+        guard let content else { return }
+        var mat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        mat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.05, green: 0.05, blue: 0.05, alpha: 1))
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: MeshResource.generateSphere(radius: 0.18), materials: [mat]))
+        entity.position = position
+        entity.scale = [0.05, 0.05, 0.05]
+        content.add(entity)
+        ballEntities[ball.id] = entity
+    }
+
+    func updateBowlingBallPosition(_ ball: BowlingBall, position: SIMD3<Float>) {
+        guard let entity = ballEntities[ball.id] else { return }
+        entity.position = position
+        if ball.isFalling {
+            // Grow from near-zero to full size with an ease-out curve
+            let t = ball.fallProgress
+            let scale = 0.05 + 0.95 * (1 - pow(1 - t, 2))
+            entity.scale = [scale, scale, scale]
+        } else {
+            entity.scale = [1, 1, 1]
+        }
+    }
+
+    func removeBowlingBall(_ ball: BowlingBall) {
+        ballEntities[ball.id]?.removeFromParent()
+        ballEntities.removeValue(forKey: ball.id)
+    }
+
+    func removeAllBowlingBalls() {
+        for (_, entity) in ballEntities { entity.removeFromParent() }
+        ballEntities.removeAll()
+    }
+
+    /// Small grey poof when a bowling ball rolls off the path.
+    func createBallPop(at position: SIMD3<Float>) {
+        guard let content else { return }
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .sphere
+        emitter.emitterShapeSize = [0.1, 0.1, 0.1]
+        emitter.speed = 1.5
+        emitter.speedVariation = 0.5
+        emitter.mainEmitter.birthRate = 200
+        emitter.mainEmitter.lifeSpan = 0.5
+        emitter.mainEmitter.size = 0.06
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 0.5, green: 0.5, blue: 0.5, alpha: 1.0)),
+            end: .single(.init(red: 0.3, green: 0.3, blue: 0.3, alpha: 0.0))
+        )
+        emitter.timing = .once(warmUp: 0, emit: .init(duration: 0.1))
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = position
+        content.add(entity)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.0))
+            entity.removeFromParent()
+        }
+    }
+
+    // MARK: - Sword Blades
+
+    private var bladeEntities: [UUID: Entity] = [:]
+
+    func createBlades(for tower: Tower, positions: [(origin: SIMD3<Float>, tip: SIMD3<Float>)]) {
+        guard let content, let (origin, tip) = positions.first else { return }
+        var mat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        mat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.9, blue: 1.0, alpha: 1))
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.025, height: 0.025, depth: 0.01), materials: [mat]))
+        content.add(entity)
+        bladeEntities[tower.id] = entity
+        applyBladeTransform(entity, origin: origin, tip: tip)
+    }
+
+    func updateBlade(for tower: Tower, positions: [(origin: SIMD3<Float>, tip: SIMD3<Float>)]) {
+        guard let entity = bladeEntities[tower.id], let (origin, tip) = positions.first else { return }
+        applyBladeTransform(entity, origin: origin, tip: tip)
+    }
+
+    private func applyBladeTransform(_ entity: Entity, origin: SIMD3<Float>, tip: SIMD3<Float>) {
+        let dx = tip.x - origin.x
+        let dz = tip.z - origin.z
+        let length = sqrt(dx*dx + (tip.y-origin.y)*(tip.y-origin.y) + dz*dz)
+        guard length > 0.001 else { entity.scale = [0, 0, 0]; return }
+
+        entity.position = SIMD3(
+            (origin.x + tip.x) / 2,
+            (origin.y + tip.y) / 2,
+            (origin.z + tip.z) / 2
+        )
+        let angle = atan2(dx, dz)
+        entity.orientation = simd_quatf(angle: angle, axis: [0, 1, 0])
+        entity.scale = [1, 1, length / 0.01]  // stretch the unit-depth box to match length
+    }
+
+    func removeBlade(for tower: Tower) {
+        bladeEntities[tower.id]?.removeFromParent()
+        bladeEntities.removeValue(forKey: tower.id)
+    }
+
+    func removeAllBlades() {
+        for entity in bladeEntities.values { entity.removeFromParent() }
+        bladeEntities.removeAll()
+    }
+
     // MARK: - Enemies
 
     private var enemyEntities: [UUID: Entity] = [:]
@@ -468,6 +654,9 @@ class SceneRenderer {
         case .shield:
             mesh = MeshResource.generateSphere(radius: radius * 1.5)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.2, alpha: 1))
+        case .fastTank:
+            mesh = MeshResource.generateSphere(radius: radius * 2)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.85, green: 0.35, blue: 0.1, alpha: 1))
         case .tank:
             mesh = MeshResource.generateSphere(radius: radius * 2)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.25, blue: 0.6, alpha: 1))

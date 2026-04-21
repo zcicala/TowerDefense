@@ -125,6 +125,141 @@ class SceneRenderer {
         bonusIndicatorEntities.removeAll()
     }
 
+    // MARK: - Slow Aura Indicators
+
+    private var slowAuraIndicatorEntities: [HexCoord: Entity] = [:]
+
+    func showSlowAuraIndicator(at coord: HexCoord, height: Float, spacing: Float) {
+        guard let content, slowAuraIndicatorEntities[coord] == nil else { return }
+        let pos = coord.worldPosition(spacing: spacing)
+
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .torus
+        emitter.emitterShapeSize = [0.25, 0.04, 0.25]
+        emitter.speed = 0.5
+        emitter.speedVariation = 0.1
+        emitter.mainEmitter.birthRate = 40
+        emitter.mainEmitter.lifeSpan = 1.0
+        emitter.mainEmitter.size = 0.08
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 0.3, green: 0.6, blue: 1.0, alpha: 1.0)),
+            end:   .single(.init(red: 0.1, green: 0.3, blue: 0.9, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = SIMD3(pos.x, height + 0.08, pos.y)
+        content.add(entity)
+        slowAuraIndicatorEntities[coord] = entity
+    }
+
+    func removeSlowAuraIndicator(at coord: HexCoord) {
+        slowAuraIndicatorEntities[coord]?.removeFromParent()
+        slowAuraIndicatorEntities.removeValue(forKey: coord)
+    }
+
+    func removeAllSlowAuraIndicators() {
+        for entity in slowAuraIndicatorEntities.values { entity.removeFromParent() }
+        slowAuraIndicatorEntities.removeAll()
+    }
+
+    // MARK: - Placement Preview
+
+    private var ghostTowerType: TowerType? = nil
+    private var ghostTowerEntity: Entity? = nil
+    private var rangeHighlightedCoords: [HexCoord] = []
+
+    func showGhostTower(type: TowerType, at coord: HexCoord, cellHeight: Float, spacing: Float) {
+        let pos = coord.worldPosition(spacing: spacing)
+        let targetPos = SIMD3<Float>(pos.x, cellHeight, pos.y)
+
+        // If same type already exists, just reposition it
+        if let existing = ghostTowerEntity, ghostTowerType == type {
+            existing.position = targetPos
+            return
+        }
+
+        removeGhostTower()
+        guard let content else { return }
+
+        let alpha: Float = 0.4
+        func mat(_ r: Float, _ g: Float, _ b: Float) -> UnlitMaterial {
+            var m = UnlitMaterial(color: .init(red: CGFloat(r), green: CGFloat(g), blue: CGFloat(b), alpha: CGFloat(alpha)))
+            m.blending = .transparent(opacity: .init(floatLiteral: alpha))
+            return m
+        }
+
+        let (br, bg, bb, tr, tg, tb): (Float, Float, Float, Float, Float, Float)
+        switch type {
+        case .laser:      (br, bg, bb, tr, tg, tb) = (0.3, 0.5, 0.7, 0.2, 0.4, 0.8)
+        case .fire:       (br, bg, bb, tr, tg, tb) = (0.6, 0.35, 0.2, 0.9, 0.4, 0.1)
+        case .ice:        (br, bg, bb, tr, tg, tb) = (0.5, 0.6, 0.8, 0.3, 0.6, 1.0)
+        case .projectile: (br, bg, bb, tr, tg, tb) = (0.5, 0.5, 0.6, 0.7, 0.3, 0.2)
+        case .bowler:     (br, bg, bb, tr, tg, tb) = (0.75, 0.75, 0.75, 0.3, 0.3, 0.3)
+        case .sword:      (br, bg, bb, tr, tg, tb) = (0.35, 0.45, 0.35, 0.85, 0.85, 0.95)
+        case .healer:     (br, bg, bb, tr, tg, tb) = (0.3, 0.6, 0.4, 0.9, 1.0, 0.9)
+        }
+
+        let root = Entity()
+        root.position = targetPos
+
+        // Two-prism base (mirrors createTower geometry)
+        var currentY: Float = 0
+        for i in 0..<2 {
+            let scale = pow(0.9, Float(i))
+            let w = 0.25 * scale
+            let h = 0.3 * scale
+            let prism = ModelEntity(
+                mesh: .generateBox(width: w, height: h, depth: w, cornerRadius: 0.04 * scale),
+                materials: [mat(br, bg, bb)])
+            prism.position.y = currentY + h / 2
+            root.addChild(prism)
+            currentY += h + 0.02
+        }
+
+        // Turret
+        let turret = ModelEntity(
+            mesh: .generateBox(width: 0.3, height: 0.1, depth: 0.3, cornerRadius: 0.05),
+            materials: [mat(tr, tg, tb)])
+        turret.position.y = currentY + 0.05
+        root.addChild(turret)
+
+        content.add(root)
+        ghostTowerEntity = root
+        ghostTowerType = type
+    }
+
+    func removeGhostTower() {
+        ghostTowerEntity?.removeFromParent()
+        ghostTowerEntity = nil
+        ghostTowerType = nil
+    }
+
+    func showRangeHighlights(coords: [HexCoord]) {
+        removeRangeHighlights()
+        for coord in coords {
+            guard let entity = entityMap[coord] else { continue }
+            if var material = entity.components[ModelComponent.self]?.materials.first as? CustomMaterial {
+                material.custom.value[1] = 1
+                entity.components[ModelComponent.self]?.materials = [material]
+                rangeHighlightedCoords.append(coord)
+            }
+        }
+    }
+
+    func removeRangeHighlights() {
+        for coord in rangeHighlightedCoords {
+            guard let entity = entityMap[coord] else { continue }
+            if var material = entity.components[ModelComponent.self]?.materials.first as? CustomMaterial {
+                material.custom.value[1] = 0
+                entity.components[ModelComponent.self]?.materials = [material]
+            }
+        }
+        rangeHighlightedCoords.removeAll()
+    }
+
     // MARK: - Towers
 
     private var towerEntities: [UUID: Entity] = [:]
@@ -648,6 +783,10 @@ class SceneRenderer {
         case .boss:
             mesh = MeshResource.generateBox(width: radius * 3, height: radius * 4, depth: radius * 3, cornerRadius: radius * 0.3)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.6, green: 0.1, blue: 0.15, alpha: 1))
+        case .superExploder:
+            // Larger, darker orange-red box
+            mesh = MeshResource.generateBox(width: radius * 3.0, height: radius * 3.0, depth: radius * 3.0, cornerRadius: radius * 0.25)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.85, green: 0.1, blue: 0.0, alpha: 1))
         case .exploder:
             mesh = MeshResource.generateBox(width: radius * 2.2, height: radius * 2.2, depth: radius * 2.2, cornerRadius: radius * 0.2)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.4, blue: 0.0, alpha: 1))
@@ -660,6 +799,14 @@ class SceneRenderer {
         case .tank:
             mesh = MeshResource.generateSphere(radius: radius * 2)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.25, blue: 0.6, alpha: 1))
+        case .superHopper:
+            // Larger, darker green sphere
+            mesh = MeshResource.generateSphere(radius: radius * 1.5)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.05, green: 0.55, blue: 0.1, alpha: 1))
+        case .hopper:
+            // Slightly flattened sphere — lime green
+            mesh = MeshResource.generateSphere(radius: radius * 1.1)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.2, green: 0.85, blue: 0.25, alpha: 1))
         case .basic:
             mesh = MeshResource.generateSphere(radius: radius)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.3, blue: 0.2, alpha: 1))
@@ -851,6 +998,36 @@ class SceneRenderer {
         baseTowerRoot = nil
         baseTowerBlocks.removeAll()
         createBaseTower(cellHeight: cellHeight, position: position)
+    }
+
+    // MARK: - Dynamic Terrain
+
+    /// Adds a single terrain cell entity to the scene. Call after adding the cell to the hex grid.
+    func addTerrainCell(_ cell: HexCell, spacing: Float, hexRadius: Float) {
+        guard let content else { return }
+        let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
+        let t = max(0, min(1, cell.height))
+        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        material.baseColor = CustomMaterial.BaseColor(tint: colorForHeight(t, isPath: false))
+        let pos = cell.coord.worldPosition(spacing: spacing)
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        entity.components.set(CollisionComponent(shapes: [.generateBox(size: [hexRadius * 2, cell.height, hexRadius * 2])]))
+        entity.components.set(InputTargetComponent())
+        entity.position = [pos.x, cell.height / 2, pos.y]
+        entity.scale = [0.1, 0.1, 0.1]
+        content.add(entity)
+        // Animate from 1/10 scale to full size over 0.25 seconds
+        let target = Transform(scale: [1, 1, 1], rotation: entity.transform.rotation,
+                               translation: entity.transform.translation)
+        entity.move(to: target, relativeTo: nil, duration: 0.25, timingFunction: .easeOut)
+        entityMap[cell.coord] = entity
+    }
+
+    /// Removes a terrain cell entity from the scene.
+    func removeTerrainCell(at coord: HexCoord) {
+        entityMap[coord]?.removeFromParent()
+        entityMap.removeValue(forKey: coord)
     }
 
     // MARK: - Color

@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import Observation
 
 /// Axial hex coordinate.
 struct HexCoord: Hashable {
@@ -51,11 +52,25 @@ enum HexCellType {
 enum BonusType: CaseIterable {
     case freeUpgrade
     case invulnerable
+    case doubleRing
+    case goldCache
+    case slowAura
+    case repair
+    case moneyDoubler
+    case sell
+    case rangeExtender
 
     var displayName: String {
         switch self {
         case .freeUpgrade: return "Free Upgrades"
         case .invulnerable: return "Invulnerable"
+        case .doubleRing: return "Ring Bonus"
+        case .goldCache: return "Gold Cache ($150)"
+        case .slowAura: return "Slow Aura"
+        case .repair: return "Repair (+1 HP)"
+        case .moneyDoubler: return "Money Doubler"
+        case .sell: return "Resale Deed"
+        case .rangeExtender: return "Range Extender"
         }
     }
 
@@ -63,6 +78,13 @@ enum BonusType: CaseIterable {
         switch self {
         case .freeUpgrade: return "Place a tower here to instantly gain 3 free upgrade levels!"
         case .invulnerable: return "Place a tower here to make it immune to exploder damage!"
+        case .doubleRing: return "Place a tower here, then pick any cell to expand a full ring of terrain around it!"
+        case .goldCache: return "Place a tower here to receive $150!"
+        case .slowAura: return "Place a tower here to slow enemies on adjacent path tiles by 20%!"
+        case .repair: return "Place a tower here to restore 1 HP to the base tower!"
+        case .moneyDoubler: return "Place a tower here to earn double money for every enemy it kills!"
+        case .sell: return "Place a tower here to unlock selling it for a full refund at any time!"
+        case .rangeExtender: return "Place a tower here to extend its detection and firing range by +1!"
         }
     }
 }
@@ -102,13 +124,30 @@ enum TowerType {
     case healer
 }
 
-enum EnemyType {
+enum EnemyType: CaseIterable {
     case basic
     case tank
     case fastTank
     case boss
     case exploder
+    case superExploder
     case shield
+    case hopper
+    case superHopper
+
+    var displayName: String {
+        switch self {
+        case .basic:        return "Basic"
+        case .tank:         return "Tank"
+        case .fastTank:     return "Fast Tank"
+        case .boss:         return "Boss"
+        case .exploder:     return "Exploder"
+        case .superExploder: return "Super Exploder"
+        case .shield:       return "Shield"
+        case .hopper:       return "Hopper"
+        case .superHopper:  return "Super Hopper"
+        }
+    }
 }
 
 enum TargetingMode: String, CaseIterable {
@@ -119,6 +158,7 @@ enum TargetingMode: String, CaseIterable {
     case leastHealth = "Least Health"
 }
 
+@Observable
 class Tower {
     let id: UUID = UUID()
     let coord: HexCoord
@@ -139,6 +179,14 @@ class Tower {
     var hitPoints: Int = 5
     let maxHitPoints: Int = 5
     var isInvulnerable: Bool = false
+    var hasSlowAura: Bool = false   // tower has slow aura bonus; slowedCoords stores the chosen tiles
+    var slowedCoords: Set<HexCoord> = []  // the 3 path tiles this tower slows
+    var hasMoneyDoubler: Bool = false    // kills by this tower earn 2× the normal reward
+    var moneySpent: Int = 0             // total money spent on this tower (placement + upgrades)
+    var totalKills: Int = 0             // enemies killed by this tower
+    var totalDamageDealt: Float = 0     // total damage dealt to enemies (not shields)
+    /// Max-level laser only: when set, prioritises this enemy type for targeting.
+    var priorityEnemyType: EnemyType? = nil
 
     // Healer-specific state
     var healCharges: Int = 1      // remaining heal charges this round
@@ -267,12 +315,7 @@ class Tower {
         case .laser:
             beamDamagePerSecond *= boost
             cooldown *= 0.80
-            // Max level bonus: extended range
-            if level == Tower.maxLevel {
-                fireRadius = 10
-                detectionRadius = 11
-                beamRange = 10
-            }
+            // Max level bonus: target priority targeting unlocked (priorityEnemyType becomes available)
         case .fire:
             fireDamagePerSecond *= boost
             fireDuration *= 1.15
@@ -299,7 +342,7 @@ class Tower {
     var upgradeDescription: String {
         switch type {
         case .projectile: return "+25% dmg, -12% cooldown"
-        case .laser: return "+25% DPS, -18% cooldown"
+        case .laser: return level == Tower.maxLevel - 1 ? "+25% DPS, -20% cooldown, +Target Priority" : "+25% DPS, -20% cooldown"
         case .fire: return "+25% DPS, +15% duration"
         case .ice: return "+20% duration, -18% cooldown"
         case .bowler: return "+25% dmg, -12% cooldown"
@@ -335,10 +378,21 @@ class Enemy {
     let shieldRegen: Float = 10   // HP per second
 
     var shieldActive: Bool { shieldHP > 0 }
-    var explosionRadius: Int { enemyType == .exploder ? 1 : 0 }
-    var explosionDamage: Int { enemyType == .exploder ? 1 : 0 }
+    let explosionRadius: Int   // 0 = no explosion
+    let explosionDamage: Int
 
-    init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1, shieldAmount: Float = 0) {
+    // Hopper-specific state
+    var hopperJumpTimer: Float = 0      // countdown to next jump
+    var isJumping: Bool = false         // currently mid-air
+    var jumpProgress: Float = 0         // 0→1 during arc
+    let jumpDuration: Float = 0.28      // seconds in the air
+    let hopperJumpRange: ClosedRange<Int>   // cells skipped per jump
+    let hopperJumpInterval: ClosedRange<Float>  // seconds between jumps
+    var jumpFromPos: SIMD3<Float>? = nil
+    var jumpToPos: SIMD3<Float>? = nil
+
+    init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1,
+         shieldAmount: Float = 0, explosionRadius: Int = 0, explosionDamage: Int = 0) {
         self.enemyType = type
         self.hitPoints = hitPoints
         self.maxHitPoints = hitPoints
@@ -346,6 +400,22 @@ class Enemy {
         self.baseDamage = baseDamage
         self.shieldMaxHP = type == .shield ? shieldAmount : 0
         self.shieldHP = type == .shield ? shieldAmount : 0
+        self.explosionRadius = explosionRadius
+        self.explosionDamage = explosionDamage
+        switch type {
+        case .hopper:
+            self.hopperJumpRange = 2...5
+            self.hopperJumpInterval = 1.2...2.2
+            self.hopperJumpTimer = Float.random(in: 0.5...1.5)
+        case .superHopper:
+            self.hopperJumpRange = 3...6
+            self.hopperJumpInterval = 0.9...1.8
+            self.hopperJumpTimer = Float.random(in: 0.5...1.0)
+        default:
+            self.hopperJumpRange = 2...5
+            self.hopperJumpInterval = 1.2...2.2
+            self.hopperJumpTimer = 0
+        }
     }
 }
 
@@ -360,15 +430,17 @@ class Projectile {
     let damage: Float
     let targetEnemyID: UUID
     let isAoE: Bool  // max-level projectile tower explodes on impact
+    let sourceTowerID: UUID?
 
     init(origin: SIMD3<Float>, target: SIMD3<Float>, totalFlightTime: Float,
-         damage: Float, targetEnemyID: UUID, isAoE: Bool = false) {
+         damage: Float, targetEnemyID: UUID, isAoE: Bool = false, sourceTowerID: UUID? = nil) {
         self.origin = origin
         self.target = target
         self.totalFlightTime = totalFlightTime
         self.damage = damage
         self.targetEnemyID = targetEnemyID
         self.isAoE = isAoE
+        self.sourceTowerID = sourceTowerID
     }
 
     var currentPosition: SIMD3<Float> {
@@ -407,7 +479,9 @@ class BowlingBall {
 
     var fallProgress: Float { min(fallTimer / fallDuration, 1.0) }
 
-    init(startPosition: SIMD3<Float>, direction: SIMD3<Float>, speed: Float, damage: Float, targetY: Float, bouncesRemaining: Int = 0) {
+    let sourceTowerID: UUID?
+
+    init(startPosition: SIMD3<Float>, direction: SIMD3<Float>, speed: Float, damage: Float, targetY: Float, bouncesRemaining: Int = 0, sourceTowerID: UUID? = nil) {
         self.position = startPosition
         self.direction = direction
         self.speed = speed
@@ -415,6 +489,7 @@ class BowlingBall {
         self.startY = startPosition.y
         self.targetY = targetY
         self.bouncesRemaining = bouncesRemaining
+        self.sourceTowerID = sourceTowerID
     }
 }
 
@@ -432,5 +507,9 @@ class HexGrid {
 
     func neighbors(of coord: HexCoord) -> [HexCell] {
         (0..<6).compactMap { cells[coord.neighbor($0)] }
+    }
+
+    func removeCell(at coord: HexCoord) {
+        cells.removeValue(forKey: coord)
     }
 }

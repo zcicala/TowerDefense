@@ -26,9 +26,13 @@ struct ContentView: View {
 
     // UI state
     @State private var showRoundOverMessage: Bool = false
+    @State private var showingStats: Bool = false
     @State private var selectedTower: Tower?
     @State private var selectedBonusCell: HexCell?
+    @State private var selectedAuraCell: HexCell?
     @State private var dialogRefresh: Int = 0
+    @State private var viewSize: CGSize = CGSize(width: 800, height: 600)
+    @State private var hoveredPlacementCoord: HexCoord? = nil
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -70,6 +74,7 @@ struct ContentView: View {
                     guard gameState.phase == .combat else {
                         if gameState.phase == .roundOver && !showRoundOverMessage {
                             showRoundOverMessage = true
+                            if gameState.baseTowerHP <= 0 { showingStats = true }
                         }
                         return
                     }
@@ -197,29 +202,20 @@ struct ContentView: View {
                         renderer.createExplosion(at: pos)
                     }
 
-                    // Refresh dialog if selected tower took damage or was healed
-                    if let selected = selectedTower,
-                       events.damagedTowers.contains(where: { $0.id == selected.id }) ||
-                       events.healedTowers.contains(where: { $0.id == selected.id }) {
-                        dialogRefresh += 1
-                    }
-                    // Also refresh if selected tower is a healer that used a charge
-                    if let selected = selectedTower, selected.type == .healer,
-                       !events.healedTowers.isEmpty {
-                        dialogRefresh += 1
-                    }
-
                     // Remove destroyed towers
+                    var needsAuraRefresh = false
                     for tower in events.destroyedTowers {
                         renderer.removeBeam(for: tower)
                         renderer.removeCone(for: tower)
                         renderer.removeTower(id: tower.id)
+                        if tower.hasSlowAura { needsAuraRefresh = true }
                         if selectedTower?.id == tower.id {
                             selectedTower = nil
                             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                             renderer.updateSelection(deselected: deselected, selected: nil)
                         }
                     }
+                    if needsAuraRefresh { refreshSlowAuraIndicators() }
 
                     // Base tower block explosions
                     for _ in 0..<events.baseTowerBlocksDestroyed {
@@ -274,6 +270,13 @@ struct ContentView: View {
                         handleTap(entity: value.entity)
                     }
             )
+            .background(GeometryReader { geo in
+                Color.clear.onAppear { viewSize = geo.size }
+                    .onChange(of: geo.size) { viewSize = $1 }
+            })
+            .onContinuousHover { phase in
+                handlePlacementHover(phase: phase)
+            }
 
             // HUD overlay
             VStack(spacing: 8) {
@@ -282,6 +285,11 @@ struct ContentView: View {
                     Text("$\(gameState.money)")
                     Text("HP: \(gameState.baseTowerHP)/\(gameState.baseTowerMaxHP)")
                         .foregroundColor(gameState.baseTowerHP <= 3 ? .red : .white)
+                    Divider().frame(height: 14)
+                    Button("Stats") { showingStats = true }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .foregroundColor(.white.opacity(0.8))
                 }
                 .font(.headline)
                 .foregroundColor(.white)
@@ -309,6 +317,9 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.8))
 
                     Button("Start Round") {
+                        gameState.cancelPendingSlowAura()
+                        gameState.cancelPendingSellBonus()
+                        gameState.cancelPendingRingBonus()
                         gameState.startRound()
                         showRoundOverMessage = false
                     }
@@ -334,9 +345,15 @@ struct ContentView: View {
 
                         Button("Restart") {
                             guard let renderer else { return }
-                            let removedIDs = gameState.restart()
-                            for id in removedIDs {
+                            let result = gameState.restart()
+                            for id in result.towerIDs {
                                 renderer.removeTower(id: id)
+                            }
+                            for coord in result.removedTerrainCoords {
+                                renderer.removeTerrainCell(at: coord)
+                            }
+                            for cell in result.seedCells {
+                                renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
                             }
                             renderer.removeAllEnemies()
                             renderer.removeAllProjectiles()
@@ -345,6 +362,7 @@ struct ContentView: View {
                             renderer.removeAllBowlingBalls()
                             renderer.removeAllBlades()
                             renderer.removeAllBonusIndicators()
+                            renderer.removeAllSlowAuraIndicators()
                             if let endCell = gameState.endCell {
                                 let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
                                 renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos)
@@ -360,10 +378,14 @@ struct ContentView: View {
                             .foregroundColor(.green)
 
                         Button("Next Round") {
-                            gameState.returnToPlacing()
+                            let newCells = gameState.returnToPlacing()
                             showRoundOverMessage = false
-                            // Show indicators for any bonus tiles (including newly assigned ones)
                             if let renderer {
+                                // Add new terrain tile(s) to the scene
+                                for cell in newCells {
+                                    renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                                }
+                                // Show indicators for any bonus tiles (including newly assigned ones)
                                 for cell in gameState.bonusCells {
                                     let pos = cell.coord.worldPosition(spacing: gameState.spacing)
                                     renderer.showBonusIndicator(for: cell, at: SIMD3(pos.x, cell.height, pos.y))
@@ -375,6 +397,63 @@ struct ContentView: View {
                 }
             }
             .padding(.top, 16)
+
+            // Slow aura target pick prompt — center top banner
+            if gameState.pendingSlowAuraTower != nil {
+                VStack(spacing: 6) {
+                    Text("Slow Aura — Pick a Target")
+                        .font(.headline)
+                        .foregroundColor(.cyan)
+                    Text("Click any path tile to apply the slow effect there and to the tiles on either side.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
+            // Ring bonus target pick prompt — center top banner
+            if gameState.pendingRingBonus {
+                VStack(spacing: 6) {
+                    Text("Ring Bonus — Pick a Cell")
+                        .font(.headline)
+                        .foregroundColor(.green)
+                    Text("Click any cell to expand a full ring of terrain around it.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
+            // Sell mode prompt — center top banner
+            if gameState.pendingSellBonus {
+                VStack(spacing: 6) {
+                    Text("Resale Deed — Pick a Tower")
+                        .font(.headline)
+                        .foregroundColor(.mint)
+                    Text("Click any tower to sell it and receive a full refund.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
 
             // Bonus tile dialog — right side
             if let bonusCell = selectedBonusCell, let bonus = bonusCell.bonusType {
@@ -417,10 +496,45 @@ struct ContentView: View {
                 .padding(.trailing, 16)
             }
 
+            // Slow aura path cell dialog — right side
+            if selectedAuraCell != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Slow Aura")
+                        .font(.headline)
+                        .foregroundColor(.cyan)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Divider().background(.white.opacity(0.3))
+
+                    Text("Enemies on this tile are slowed to 80% speed by a nearby tower's Slow Aura.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Button("Close") {
+                        selectedAuraCell = nil
+                        if let renderer {
+                            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                            renderer.updateSelection(deselected: deselected, selected: nil)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.75))
+                .cornerRadius(10)
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
+
             // Tower info dialog — right side
             if let tower = selectedTower {
                 VStack(alignment: .leading, spacing: 6) {
-                    let _ = dialogRefresh  // trigger re-render
 
                     Text("\(towerTypeName(tower.type)) Tower  Lv.\(tower.level)")
                         .font(.headline)
@@ -487,6 +601,28 @@ struct ContentView: View {
 
                     Divider().background(.white.opacity(0.3))
 
+                    // Max-level laser: priority enemy type selector
+                    if tower.type == .laser && tower.level == Tower.maxLevel {
+                        Text("Priority Target")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                            .frame(maxWidth: .infinity, alignment: .center)
+
+                        Picker("", selection: Binding(
+                            get: { tower.priorityEnemyType },
+                            set: { tower.priorityEnemyType = $0; dialogRefresh += 1 }
+                        )) {
+                            Text("None").tag(EnemyType?.none)
+                            ForEach(EnemyType.allCases, id: \.self) { type in
+                                Text(type.displayName).tag(Optional(type))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                        Divider().background(.white.opacity(0.3))
+                    }
+
                     Text("Targeting")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
@@ -509,6 +645,28 @@ struct ContentView: View {
                         .tint(tower.targetingMode == mode ? .blue : .gray)
                     }
 
+                    Divider().background(.white.opacity(0.3))
+
+                    HStack(spacing: 16) {
+                        VStack(spacing: 2) {
+                            Text("\(tower.totalKills)")
+                                .font(.system(.body, design: .monospaced).bold())
+                                .foregroundColor(.yellow)
+                            Text("Kills")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.5))
+                        }
+                        VStack(spacing: 2) {
+                            Text(formatDamage(tower.totalDamageDealt))
+                                .font(.system(.body, design: .monospaced).bold())
+                                .foregroundColor(.orange)
+                            Text("Damage")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.5))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+
                     Button("Close") {
                         selectedTower = nil
                         selectedBonusCell = nil
@@ -530,6 +688,124 @@ struct ContentView: View {
                 .padding(.trailing, 16)
             }
         }
+        .onChange(of: gameState.selectedTowerType) { _, _ in
+            if let renderer {
+                renderer.removeGhostTower()
+                renderer.removeRangeHighlights()
+            }
+            hoveredPlacementCoord = nil
+        }
+        .onChange(of: gameState.phase) { _, phase in
+            if phase != .placing, let renderer {
+                renderer.removeGhostTower()
+                renderer.removeRangeHighlights()
+                hoveredPlacementCoord = nil
+            }
+        }
+        .sheet(isPresented: $showingStats) {
+            StatsView(gameState: gameState)
+        }
+    }
+
+    // MARK: - Placement Preview Hover
+
+    private func handlePlacementHover(phase: HoverPhase) {
+        guard let renderer else { return }
+        guard gameState.phase == .placing, let towerType = gameState.selectedTowerType else {
+            if hoveredPlacementCoord != nil {
+                hoveredPlacementCoord = nil
+                renderer.removeGhostTower()
+                renderer.removeRangeHighlights()
+            }
+            return
+        }
+
+        switch phase {
+        case .active(let point):
+            guard let coord = hexCoordFromScreenPoint(point) else {
+                if hoveredPlacementCoord != nil {
+                    hoveredPlacementCoord = nil
+                    renderer.removeGhostTower()
+                    renderer.removeRangeHighlights()
+                }
+                return
+            }
+            // Only update when entering a new cell
+            guard coord != hoveredPlacementCoord else { return }
+
+            guard gameState.isValidPlacement(at: coord) else {
+                if hoveredPlacementCoord != nil {
+                    hoveredPlacementCoord = nil
+                    renderer.removeGhostTower()
+                    renderer.removeRangeHighlights()
+                }
+                return
+            }
+
+            hoveredPlacementCoord = coord
+            let cell = gameState.hexGrid.cell(at: coord)
+            renderer.showGhostTower(type: towerType, at: coord, cellHeight: cell?.height ?? 1.0, spacing: gameState.spacing)
+            let rangeCells = gameState.allCellsInFireRange(from: coord, type: towerType)
+            renderer.showRangeHighlights(coords: rangeCells.map { $0.coord })
+
+        case .ended:
+            hoveredPlacementCoord = nil
+            renderer.removeGhostTower()
+            renderer.removeRangeHighlights()
+        @unknown default:
+            break
+        }
+    }
+
+    /// Projects a view-space screen point to the nearest hex coord via ray-plane intersection.
+    private func hexCoordFromScreenPoint(_ point: CGPoint) -> HexCoord? {
+        // Camera world position (matches updateCamera math)
+        let camX = cameraTarget.x + cameraDistance * cos(cameraPitch) * sin(cameraYaw)
+        let camY = cameraTarget.y + cameraDistance * sin(cameraPitch)
+        let camZ = cameraTarget.z + cameraDistance * cos(cameraPitch) * cos(cameraYaw)
+        let camPos = SIMD3<Float>(camX, camY, camZ)
+
+        // Camera basis vectors
+        let forward = normalize(cameraTarget - camPos)
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        let right = normalize(cross(forward, worldUp))
+        let up = cross(right, forward)
+
+        // NDC coords (-1..1)
+        let ndcX =  Float(point.x / viewSize.width)  * 2 - 1
+        let ndcY = -Float(point.y / viewSize.height) * 2 + 1  // flip Y
+
+        // Perspective ray (default RealityKit vertical FOV ≈ 60°)
+        let tanHalf = tan(Float(60) * .pi / 360)  // tan(30°)
+        let aspect  = Float(viewSize.width / viewSize.height)
+        let rayDir  = normalize(forward + right * (ndcX * tanHalf * aspect) + up * (ndcY * tanHalf))
+
+        // Intersect with approximate terrain plane (y ≈ 1.0)
+        let planeY: Float = 1.0
+        guard abs(rayDir.y) > 1e-4 else { return nil }
+        let t = (planeY - camPos.y) / rayDir.y
+        guard t > 0 else { return nil }
+
+        let worldX = camPos.x + rayDir.x * t
+        let worldZ = camPos.z + rayDir.z * t
+
+        // Inverse of HexCoord.worldPosition(spacing:)
+        let s = gameState.spacing
+        let qF = worldX / (s * 1.5)
+        let rF = worldZ / (s * Float(3).squareRoot()) - qF / 2
+        return roundedHexCoord(qF: qF, rF: rF)
+    }
+
+    /// Rounds fractional axial coordinates to the nearest HexCoord.
+    private func roundedHexCoord(qF: Float, rF: Float) -> HexCoord {
+        let sF = -qF - rF
+        var q = Int(qF.rounded()); var r = Int(rF.rounded()); var s = Int(sF.rounded())
+        let dq = abs(Float(q) - qF); let dr = abs(Float(r) - rF); let ds = abs(Float(s) - sF)
+        if dq > dr && dq > ds { q = -r - s }
+        else if dr > ds        { r = -q - s }
+        else                   { s = -q - r }  // s unused but keeps cube coords consistent
+        _ = s
+        return HexCoord(q: q, r: r)
     }
 
     private func updateCamera() {
@@ -633,6 +909,16 @@ struct ContentView: View {
         }
     }
 
+    private func formatDamage(_ damage: Float) -> String {
+        if damage >= 1_000_000 {
+            return String(format: "%.1fM", damage / 1_000_000)
+        } else if damage >= 1_000 {
+            return String(format: "%.1fk", damage / 1_000)
+        } else {
+            return String(format: "%.0f", damage)
+        }
+    }
+
     private func towerTypeName(_ type: TowerType) -> String {
         switch type {
         case .projectile: return "Projectile"
@@ -645,8 +931,47 @@ struct ContentView: View {
         }
     }
 
+    private func refreshSlowAuraIndicators() {
+        guard let renderer else { return }
+        renderer.removeAllSlowAuraIndicators()
+        for coord in gameState.slowAuraPathCoords {
+            guard let cell = gameState.hexGrid.cell(at: coord) else { continue }
+            renderer.showSlowAuraIndicator(at: coord, height: cell.height, spacing: gameState.spacing)
+        }
+    }
+
     private func handleTap(entity: Entity) {
         guard let renderer, let coord = renderer.coord(for: entity) else { return }
+
+        // Ring bonus: next tap on any existing cell expands terrain around it
+        if gameState.pendingRingBonus {
+            if gameState.hexGrid.cell(at: coord) != nil {
+                let newCells = gameState.applyRingBonus(at: coord)
+                for cell in newCells {
+                    renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                    if cell.isBonus {
+                        let pos = cell.coord.worldPosition(spacing: gameState.spacing)
+                        renderer.showBonusIndicator(for: cell, at: SIMD3(pos.x, cell.height, pos.y))
+                    }
+                }
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
+            }
+            // Non-existent cell: ignore, stay in ring mode
+            return
+        }
+
+        // Sell mode: next tower tap sells it for a full refund
+        if gameState.pendingSellBonus {
+            if let tower = gameState.tower(at: coord) {
+                gameState.sellTower(tower)  // also clears pendingSellBonus
+                renderer.removeTower(id: tower.id)
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
+            }
+            // Non-tower tap: stay in sell mode until a tower is picked
+            return
+        }
 
         // Check if tapping an existing tower
         if let tower = gameState.tower(at: coord) {
@@ -657,25 +982,52 @@ struct ContentView: View {
             return
         }
 
+        // If a slow aura tower is waiting for a target, let the user pick a path tile
+        if gameState.pendingSlowAuraTower != nil {
+            let cell = gameState.hexGrid.cell(at: coord)
+            if cell?.type == .path || cell?.type == .start {
+                gameState.applySlowAuraTarget(pathCoord: coord)
+                refreshSlowAuraIndicators()
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
+                return
+            }
+            // Tapped a non-path tile — ignore until a valid pick is made
+            return
+        }
+
         // Dismiss any open dialogs
-        if selectedTower != nil || selectedBonusCell != nil {
+        if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil {
             selectedTower = nil
             selectedBonusCell = nil
+            selectedAuraCell = nil
             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
             renderer.updateSelection(deselected: deselected, selected: nil)
         }
 
         if gameState.phase == .placing {
             // Try to place a tower
-            if let tower = gameState.placeTower(at: coord) {
+            if let (tower, newTerrain) = gameState.placeTower(at: coord) {
                 let cell = gameState.hexGrid.cell(at: coord)
                 renderer.createTower(tower, cellHeight: cell?.height ?? 1.0, spacing: gameState.spacing)
                 renderer.removeBonusIndicator(for: coord)
                 selectedBonusCell = nil
+                // Add terrain tiles that expanded around the placed tower
+                for terrainCell in newTerrain {
+                    renderer.addTerrainCell(terrainCell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                    if terrainCell.isBonus {
+                        let pos = terrainCell.coord.worldPosition(spacing: gameState.spacing)
+                        renderer.showBonusIndicator(for: terrainCell, at: SIMD3(pos.x, terrainCell.height, pos.y))
+                    }
+                }
                 // If tower got a free upgrade to max, add the dome
                 if tower.level == Tower.maxLevel {
                     renderer.addMaxLevelDome(for: tower)
                 }
+                hoveredPlacementCoord = nil
+                renderer.removeGhostTower()
+                renderer.removeRangeHighlights()
+                // Don't refresh aura indicators yet — user must pick a target path tile first
                 return
             }
         }
@@ -688,8 +1040,133 @@ struct ContentView: View {
             return
         }
 
+        // Check if tapping a slowed path tile — show the aura info dialog
+        if let cell = gameState.hexGrid.cell(at: coord),
+           (cell.type == .path || cell.type == .start),
+           gameState.slowAuraPathCoords.contains(coord) {
+            selectedAuraCell = cell
+            let (deselected, selected) = gameState.selectCell(at: coord)
+            renderer.updateSelection(deselected: deselected, selected: selected)
+            return
+        }
+
         let (deselected, selected) = gameState.selectCell(at: coord)
         renderer.updateSelection(deselected: deselected, selected: selected)
+    }
+}
+
+// MARK: - Stats View
+
+struct StatsView: View {
+    let gameState: GameState
+    @Environment(\.dismiss) private var dismiss
+
+    private let enemyTypes = EnemyType.allCases
+
+    // Column widths
+    private let typeW: CGFloat  = 96
+    private let numW: CGFloat   = 64
+    private let enemyW: CGFloat = 56
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title bar
+            HStack {
+                Text("Tower Statistics")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Close") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding()
+
+            Divider()
+
+            ScrollView([.horizontal, .vertical]) {
+                VStack(spacing: 0) {
+                    headerRow
+                    Divider()
+                    ForEach(gameState.allTowerStats) { stat in
+                        dataRow(stat)
+                        Divider().opacity(0.25)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(minWidth: 900, minHeight: 280)
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 0) {
+            hCell("Tower",    width: typeW)
+            hCell("Built",    width: numW)
+            hCell("Kills",    width: numW)
+            hCell("Avg K",    width: numW)
+            hCell("Damage",   width: numW)
+            hCell("Avg Dmg",  width: numW)
+            ForEach(enemyTypes, id: \.self) { hCell(abbrev($0), width: enemyW) }
+        }
+        .background(Color.primary.opacity(0.07))
+    }
+
+    private func dataRow(_ stat: GameState.TowerTypeStats) -> some View {
+        HStack(spacing: 0) {
+            dCell(stat.typeName,                              width: typeW, align: .leading, color: .primary)
+            dCell("\(stat.built)",                           width: numW)
+            dCell("\(stat.kills)",                           width: numW, color: stat.kills > 0 ? .yellow : .secondary)
+            dCell(fmtAvg(stat.avgKills),                     width: numW)
+            dCell(fmtDmg(stat.damage),                       width: numW, color: stat.damage > 0 ? .orange : .secondary)
+            dCell(fmtDmg(stat.avgDamage),                    width: numW)
+            ForEach(enemyTypes, id: \.self) { enemyType in
+                let n = stat.killsByEnemy[enemyType, default: 0]
+                dCell(n > 0 ? "\(n)" : "·", width: enemyW, color: n > 0 ? .primary : .secondary)
+            }
+        }
+    }
+
+    private func hCell(_ text: String, width: CGFloat) -> some View {
+        Text(text)
+            .font(.caption.bold())
+            .foregroundColor(.secondary)
+            .frame(width: width, alignment: .center)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+    }
+
+    private func dCell(_ text: String, width: CGFloat,
+                       align: Alignment = .center,
+                       color: Color = .primary) -> some View {
+        Text(text)
+            .font(.system(.callout, design: .monospaced))
+            .foregroundColor(color)
+            .frame(width: width, alignment: align)
+            .padding(.vertical, 5)
+            .padding(.horizontal, 4)
+    }
+
+    private func abbrev(_ type: EnemyType) -> String {
+        switch type {
+        case .basic:        return "Basic"
+        case .tank:         return "Tank"
+        case .fastTank:     return "F.Tank"
+        case .boss:         return "Boss"
+        case .exploder:     return "Expl."
+        case .superExploder:return "S.Expl"
+        case .shield:       return "Shield"
+        case .hopper:       return "Hopper"
+        case .superHopper:  return "S.Hop"
+        }
+    }
+
+    private func fmtDmg(_ v: Float) -> String {
+        if v >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
+        if v >= 1_000     { return String(format: "%.1fk", v / 1_000) }
+        return v > 0 ? String(format: "%.0f", v) : "·"
+    }
+
+    private func fmtAvg(_ v: Float) -> String {
+        v > 0 ? String(format: "%.1f", v) : "·"
     }
 }
 

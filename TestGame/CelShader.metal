@@ -38,5 +38,14 @@ void celSurfaceShader(realitykit::surface_parameters params)
         color = mix(color, color * 1.4h + glowColor * (half)rim * 0.5h, half(selection));
     }
 
+    // Range highlight: custom.value[1] = 1 when cell is within tower fire range
+    float rangeGlow = params.uniforms().custom_parameter()[1];
+    if (rangeGlow > 0.5) {
+        float rim = 1.0 - max(0.0, dot(normal, normalize(float3(0, 1, 0))));
+        rim = pow(rim, 3.0);
+        half3 rangeColor = half3(0.3h, 0.75h, 1.0h); // cool blue
+        color = color * 1.15h + rangeColor * (half)(rim * 0.5 + 0.12);
+    }
+
     params.surface().set_emissive_color(color);
 }

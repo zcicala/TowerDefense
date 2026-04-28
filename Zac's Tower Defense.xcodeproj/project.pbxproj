@@ -24,15 +24,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		11A2DEA92F89AC7100E77393 /* TestGame.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TestGame.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		11A2DEB82F89AC7200E77393 /* TestGameTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TestGameTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		11A2DEC22F89AC7200E77393 /* TestGameUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TestGameUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		11A2DEA92F89AC7100E77393 /* Zac's Tower Defense.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Zac's Tower Defense.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		11A2DEB82F89AC7200E77393 /* Zac's Tower DefenseTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Zac's Tower DefenseTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		11A2DEC22F89AC7200E77393 /* Zac's Tower DefenseUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Zac's Tower DefenseUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		11A2DEAB2F89AC7100E77393 /* TestGame */ = {
+		11A2DEAB2F89AC7100E77393 /* Tower Defense */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = TestGame;
+			path = "Tower Defense";
 			sourceTree = "<group>";
 		};
 		11A2DEBB2F89AC7200E77393 /* TestGameTests */ = {
@@ -75,7 +75,7 @@
 		11A2DEA02F89AC7100E77393 = {
 			isa = PBXGroup;
 			children = (
-				11A2DEAB2F89AC7100E77393 /* TestGame */,
+				11A2DEAB2F89AC7100E77393 /* Tower Defense */,
 				11A2DEBB2F89AC7200E77393 /* TestGameTests */,
 				11A2DEC52F89AC7200E77393 /* TestGameUITests */,
 				11A2DEAA2F89AC7100E77393 /* Products */,
@@ -85,9 +85,9 @@
 		11A2DEAA2F89AC7100E77393 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				11A2DEA92F89AC7100E77393 /* TestGame.app */,
-				11A2DEB82F89AC7200E77393 /* TestGameTests.xctest */,
-				11A2DEC22F89AC7200E77393 /* TestGameUITests.xctest */,
+				11A2DEA92F89AC7100E77393 /* Zac's Tower Defense.app */,
+				11A2DEB82F89AC7200E77393 /* Zac's Tower DefenseTests.xctest */,
+				11A2DEC22F89AC7200E77393 /* Zac's Tower DefenseUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		11A2DEA82F89AC7100E77393 /* TestGame */ = {
+		11A2DEA82F89AC7100E77393 /* Zac's Tower Defense */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 11A2DECC2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGame" */;
+			buildConfigurationList = 11A2DECC2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower Defense" */;
 			buildPhases = (
 				11A2DEA52F89AC7100E77393 /* Sources */,
 				11A2DEA62F89AC7100E77393 /* Frameworks */,
@@ -108,18 +108,18 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				11A2DEAB2F89AC7100E77393 /* TestGame */,
+				11A2DEAB2F89AC7100E77393 /* Tower Defense */,
 			);
-			name = TestGame;
+			name = "Zac's Tower Defense";
 			packageProductDependencies = (
 			);
 			productName = TestGame;
-			productReference = 11A2DEA92F89AC7100E77393 /* TestGame.app */;
+			productReference = 11A2DEA92F89AC7100E77393 /* Zac's Tower Defense.app */;
 			productType = "com.apple.product-type.application";
 		};
-		11A2DEB72F89AC7200E77393 /* TestGameTests */ = {
+		11A2DEB72F89AC7200E77393 /* Zac's Tower DefenseTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 11A2DECF2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGameTests" */;
+			buildConfigurationList = 11A2DECF2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower DefenseTests" */;
 			buildPhases = (
 				11A2DEB42F89AC7200E77393 /* Sources */,
 				11A2DEB52F89AC7200E77393 /* Frameworks */,
@@ -133,16 +133,16 @@
 			fileSystemSynchronizedGroups = (
 				11A2DEBB2F89AC7200E77393 /* TestGameTests */,
 			);
-			name = TestGameTests;
+			name = "Zac's Tower DefenseTests";
 			packageProductDependencies = (
 			);
 			productName = TestGameTests;
-			productReference = 11A2DEB82F89AC7200E77393 /* TestGameTests.xctest */;
+			productReference = 11A2DEB82F89AC7200E77393 /* Zac's Tower DefenseTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		11A2DEC12F89AC7200E77393 /* TestGameUITests */ = {
+		11A2DEC12F89AC7200E77393 /* Zac's Tower DefenseUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 11A2DED22F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGameUITests" */;
+			buildConfigurationList = 11A2DED22F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower DefenseUITests" */;
 			buildPhases = (
 				11A2DEBE2F89AC7200E77393 /* Sources */,
 				11A2DEBF2F89AC7200E77393 /* Frameworks */,
@@ -156,11 +156,11 @@
 			fileSystemSynchronizedGroups = (
 				11A2DEC52F89AC7200E77393 /* TestGameUITests */,
 			);
-			name = TestGameUITests;
+			name = "Zac's Tower DefenseUITests";
 			packageProductDependencies = (
 			);
 			productName = TestGameUITests;
-			productReference = 11A2DEC22F89AC7200E77393 /* TestGameUITests.xctest */;
+			productReference = 11A2DEC22F89AC7200E77393 /* Zac's Tower DefenseUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 11A2DEA42F89AC7100E77393 /* Build configuration list for PBXProject "TestGame" */;
+			buildConfigurationList = 11A2DEA42F89AC7100E77393 /* Build configuration list for PBXProject "Zac's Tower Defense" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -200,9 +200,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				11A2DEA82F89AC7100E77393 /* TestGame */,
-				11A2DEB72F89AC7200E77393 /* TestGameTests */,
-				11A2DEC12F89AC7200E77393 /* TestGameUITests */,
+				11A2DEA82F89AC7100E77393 /* Zac's Tower Defense */,
+				11A2DEB72F89AC7200E77393 /* Zac's Tower DefenseTests */,
+				11A2DEC12F89AC7200E77393 /* Zac's Tower DefenseUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		11A2DEBA2F89AC7200E77393 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 11A2DEA82F89AC7100E77393 /* TestGame */;
+			target = 11A2DEA82F89AC7100E77393 /* Zac's Tower Defense */;
 			targetProxy = 11A2DEB92F89AC7200E77393 /* PBXContainerItemProxy */;
 		};
 		11A2DEC42F89AC7200E77393 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 11A2DEA82F89AC7100E77393 /* TestGame */;
+			target = 11A2DEA82F89AC7100E77393 /* Zac's Tower Defense */;
 			targetProxy = 11A2DEC32F89AC7200E77393 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -465,7 +465,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TestGame.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TestGame";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zac's Tower Defense.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zac's Tower Defense";
 			};
 			name = Debug;
 		};
@@ -485,7 +485,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TestGame.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TestGame";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zac's Tower Defense.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zac's Tower Defense";
 			};
 			name = Release;
 		};
@@ -528,7 +528,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		11A2DEA42F89AC7100E77393 /* Build configuration list for PBXProject "TestGame" */ = {
+		11A2DEA42F89AC7100E77393 /* Build configuration list for PBXProject "Zac's Tower Defense" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				11A2DECA2F89AC7200E77393 /* Debug */,
@@ -537,7 +537,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		11A2DECC2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGame" */ = {
+		11A2DECC2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower Defense" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				11A2DECD2F89AC7200E77393 /* Debug */,
@@ -546,7 +546,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		11A2DECF2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGameTests" */ = {
+		11A2DECF2F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower DefenseTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				11A2DED02F89AC7200E77393 /* Debug */,
@@ -555,7 +555,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		11A2DED22F89AC7200E77393 /* Build configuration list for PBXNativeTarget "TestGameUITests" */ = {
+		11A2DED22F89AC7200E77393 /* Build configuration list for PBXNativeTarget "Zac's Tower DefenseUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				11A2DED32F89AC7200E77393 /* Debug */,

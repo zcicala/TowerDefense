@@ -19,7 +19,7 @@ class GameState {
 
     let hexRadius: Float = 0.5
     let gap: Float = 0.05
-    let pathLength = 35
+    let pathLength = 30
     let terrainRings = 2
 
     var spacing: Float { hexRadius + gap / 2 }
@@ -28,7 +28,7 @@ class GameState {
 
     private(set) var phase: GamePhase = .placing
     private(set) var round: Int = 0
-    private(set) var money: Int = 120
+    private(set) var money: Int = 140
     let killReward: Int = 8
     var selectedTowerType: TowerType? = nil
 
@@ -57,10 +57,10 @@ class GameState {
     }
 
     var allTowerStats: [TowerTypeStats] {
-        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer]
+        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer, .fireball]
         let names: [TowerType: String] = [
             .projectile: "Projectile", .laser: "Laser", .fire: "Fire", .ice: "Ice",
-            .bowler: "Bowler", .sword: "Sword", .healer: "Healer"
+            .bowler: "Bowler", .sword: "Sword", .healer: "Healer", .fireball: "Fireball"
         ]
         return allTypes.map { type in
             let built  = statsTowerBuilt[type, default: 0]
@@ -83,12 +83,13 @@ class GameState {
         let base: Int
         switch type {
         case .projectile: base = 50
-        case .laser: base = 60
+        case .laser: base = 80
         case .fire: base = 80
         case .ice: base = 100
         case .bowler: base = 60
         case .sword: base = 25
         case .healer: base = 150
+        case .fireball: base = 300
         }
         let count = towerPlacedCount[type, default: 0]
         return Int(Double(base) * pow(1.1, Double(count)))
@@ -97,6 +98,17 @@ class GameState {
     // MARK: - Towers
 
     private(set) var towers: [Tower] = []
+
+    /// A hidden Tower used to drive base tower shooting — not in the towers array.
+    private var baseSentinelTower: Tower?
+
+    private func ensureBaseSentinel() {
+        guard baseSentinelTower == nil, let end = endCell else { return }
+        let t = Tower(coord: end.coord, type: .projectile,
+                      detectionRadius: 4, fireRadius: 4,
+                      projectileSpeed: 6.0, damage: 50, cooldown: 1.5)
+        baseSentinelTower = t
+    }
 
     // MARK: - Enemies
 
@@ -132,7 +144,7 @@ class GameState {
 
     func generateMap() {
         generatePath()
-        seedTerrainAroundBase()
+        pendingRingBonus = true
     }
 
     /// Adds a ring of terrain tiles around the base tower (end cell) as the starting board.
@@ -237,6 +249,9 @@ class GameState {
             terrainHeight = avg * Float.random(in: 0.80...1.20)
         }
         let cell = HexCell(coord: coord, height: terrainHeight, type: .terrain)
+        if let end = endCell, coord.distance(to: end.coord) == 1 {
+            cell.bonusType = BonusType.allCases.randomElement()
+        }
         hexGrid.addCell(cell)
         return cell
     }
@@ -305,6 +320,8 @@ class GameState {
             tower = Tower.makeSword(coord: coord)
         case .healer:
             tower = Tower.makeHealer(coord: coord)
+        case .fireball:
+            tower = Tower.makeFireball(coord: coord)
         }
         tower.moneySpent = cost
 
@@ -404,18 +421,24 @@ class GameState {
     private struct EnemySpawnConfig {
         let type: EnemyType
         let minRound: Int
+        let maxRound: Int
         let weight: Float
+        init(type: EnemyType, minRound: Int, maxRound: Int = Int.max, weight: Float) {
+            self.type = type; self.minRound = minRound; self.maxRound = maxRound; self.weight = weight
+        }
     }
 
     private let spawnConfigs: [EnemySpawnConfig] = [
-        .init(type: .basic,         minRound: 0,  weight: 10),
-        .init(type: .tank,          minRound: 5,  weight: 4),
-        .init(type: .hopper,        minRound: 8,  weight: 5),
-        .init(type: .exploder,      minRound: 10, weight: 3),
-        .init(type: .shield,        minRound: 15, weight: 3),
-        .init(type: .fastTank,      minRound: 20, weight: 3),
-        .init(type: .superHopper,   minRound: 25, weight: 3),
-        .init(type: .superExploder, minRound: 30, weight: 2),
+        .init(type: .basic,         minRound: 0,  maxRound: 15, weight: 10),
+        .init(type: .tank,          minRound: 6,  maxRound: 20, weight: 4),
+        .init(type: .mirroid,       minRound: 12,               weight: 3),
+        .init(type: .hopper,        minRound: 8,  maxRound: 25, weight: 5),
+        .init(type: .exploder,      minRound: 10, maxRound: 30, weight: 3),
+        .init(type: .shield,        minRound: 15,               weight: 3),
+        .init(type: .fastTank,      minRound: 20,               weight: 3),
+        .init(type: .superHopper,   minRound: 25,               weight: 3),
+        .init(type: .superExploder, minRound: 30,               weight: 2),
+        .init(type: .hive,          minRound: 18,               weight: 2),
     ]
 
     /// Creates an enemy of the given type using scaled base HP and speed for the round.
@@ -425,9 +448,11 @@ class GameState {
             let fast = Bool.random()
             return Enemy(type: .basic, hitPoints: hp, speed: speed * (fast ? 2.0 : 1.0))
         case .tank:
-            return Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 0.6, baseDamage: 2)
+            return Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
+        case .mirroid:
+            return Enemy(type: .mirroid, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
         case .fastTank:
-            return Enemy(type: .fastTank, hitPoints: hp * 4, speed: speed, baseDamage: 2)
+            return Enemy(type: .fastTank, hitPoints: hp * 4, speed: speed * 1.4, baseDamage: 2)
         case .exploder:
             return Enemy(type: .exploder, hitPoints: hp * 0.8, speed: speed * 1.5,
                          explosionRadius: 1, explosionDamage: 1)
@@ -435,21 +460,25 @@ class GameState {
             return Enemy(type: .superExploder, hitPoints: hp * 1.2, speed: speed * 1.2,
                          explosionRadius: 2, explosionDamage: 2)
         case .shield:
-            let shieldAmt = Float(225 + 75 * round)
+            let shieldAmt = Float(270 + 120 * round)
             return Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt)
         case .hopper:
             return Enemy(type: .hopper, hitPoints: hp * 0.7, speed: speed)
         case .superHopper:
             return Enemy(type: .superHopper, hitPoints: hp * 1.5, speed: speed * 1.2)
         case .boss:
-            let bossHP = 50 + hp * Float(round)
+            let bossHP = 100 + hp * Float(round)
             return Enemy(type: .boss, hitPoints: bossHP, speed: speed * 0.5, baseDamage: 5)
+        case .hive:
+            let e = Enemy(type: .hive, hitPoints: hp * 9, speed: speed * 0.6, baseDamage: 2)
+            e.additionalHoverOffset = 1.5
+            return e
         }
     }
 
     /// Picks a random enemy type from eligible configs using weighted sampling.
     private func pickSpawnType() -> EnemyType {
-        let eligible = spawnConfigs.filter { $0.minRound <= round }
+        let eligible = spawnConfigs.filter { $0.minRound <= round && $0.maxRound >= round }
         let totalWeight = eligible.reduce(0.0) { $0 + $1.weight }
         var roll = Float.random(in: 0..<totalWeight)
         for config in eligible {
@@ -468,7 +497,7 @@ class GameState {
 
         let enemyCount = 2 + Int(Float(round) * 1.5)
         let hp: Float = 25 + Float(round) * 20
-        let speed: Float = 1.0
+        let speed: Float = 1.2
 
         enemiesToSpawn = enemyCount
         spawnInterval = Float.random(in: 0.5...1.5)
@@ -547,6 +576,27 @@ class GameState {
             } else {
                 moveEnemy(enemy, deltaTime: deltaTime)
             }
+            // Hive periodically drops a hopper while alive
+            if enemy.enemyType == .hive {
+                enemy.hiveSpawnTimer -= deltaTime
+                if enemy.hiveSpawnTimer <= 0 {
+                    enemy.hiveSpawnTimer = 4.0
+                    let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
+                    let hp: Float = 20 + Float(round) * 15
+                    let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
+                    hopper.currentCell = enemy.currentCell
+                    hopper.progress = enemy.progress
+                    hopper.isDroppingFromHive = true
+                    hopper.hiveDropFromY = hiveWorldY
+                    hopper.hiveDropProgress = 0
+                    let angle = Float.random(in: 0..<(2 * .pi))
+                    hopper.hiveDropLateralOffset = SIMD2<Float>(cos(angle) * 0.35, sin(angle) * 0.35)
+                    hopper.active = true
+                    enemies.append(hopper)
+                    events.spawnedEnemies.append(hopper)
+                }
+            }
+
             if enemy.reachedEnd {
                 damageBaseTower(damage: enemy.baseDamage, events: &events)
                 events.killedEnemies.append(enemy)
@@ -557,6 +607,19 @@ class GameState {
 
         // Update bowling balls
         updateBowlingBalls(deltaTime: deltaTime, events: &events)
+
+        // Base tower shoots like a projectile tower
+        ensureBaseSentinel()
+        if let sentinel = baseSentinelTower {
+            sentinel.cooldownRemaining = max(0, sentinel.cooldownRemaining - deltaTime)
+            if sentinel.cooldownRemaining <= 0 {
+                if let projectile = tryFire(tower: sentinel) {
+                    sentinel.cooldownRemaining = sentinel.cooldown
+                    projectiles.append(projectile)
+                    events.firedProjectiles.append(projectile)
+                }
+            }
+        }
 
         // Update tower aiming and firing
         for tower in towers {
@@ -786,9 +849,10 @@ class GameState {
                         tower.hasTarget = true
                     }
 
-                    let beamCells = beamCellCoords(for: tower)
                     let killCountBefore = events.killedEnemies.count
-                    applyAreaDamage(cells: beamCells, dps: tower.beamDamagePerSecond, deltaTime: deltaTime, tower: tower, events: &events)
+                    if let target = lockedTarget {
+                        _ = dealDamage(tower.beamDamagePerSecond * deltaTime, to: target, tower: tower, events: &events)
+                    }
 
                     if events.killedEnemies.count > killCountBefore {
                         // Target killed — end beam, enter cooldown
@@ -856,14 +920,31 @@ class GameState {
         for projectile in completedProjectiles {
             let sourceTower = projectile.sourceTowerID.flatMap { id in towers.first { $0.id == id } }
             if let enemy = enemies.first(where: { $0.id == projectile.targetEnemyID && $0.active }) {
-                dealDamage(projectile.damage, to: enemy, tower: sourceTower, events: &events)
+                if projectile.burnOnImpact {
+                    // Fireball: AoE damage + burn to all enemies within splash radius of target
+                    if let targetCoord = enemyNearestCoord(enemy) {
+                        for splashTarget in enemies where splashTarget.active {
+                            guard let splashCoord = enemyNearestCoord(splashTarget) else { continue }
+                            if splashCoord.distance(to: targetCoord) <= projectile.splashRadius {
+                                let hit = dealDamage(projectile.damage, to: splashTarget, tower: sourceTower, events: &events)
+                                if hit {
+                                    splashTarget.burning = true
+                                    splashTarget.burnDPS = projectile.impactBurnDPS
+                                    splashTarget.burnTimer = max(splashTarget.burnTimer, projectile.impactBurnDuration)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    dealDamage(projectile.damage, to: enemy, tower: sourceTower, events: &events)
 
-                // Max-level projectile tower: AoE explosion hits all enemies on same tile
-                if projectile.isAoE, let coord = enemyNearestCoord(enemy) {
-                    for other in enemies where other.active && other.id != enemy.id {
-                        guard let otherCoord = enemyNearestCoord(other) else { continue }
-                        if otherCoord == coord {
-                            dealDamage(projectile.damage, to: other, tower: sourceTower, events: &events)
+                    // Max-level projectile tower: AoE explosion hits all enemies on same tile
+                    if projectile.isAoE, let coord = enemyNearestCoord(enemy) {
+                        for other in enemies where other.active && other.id != enemy.id {
+                            guard let otherCoord = enemyNearestCoord(other) else { continue }
+                            if otherCoord == coord {
+                                dealDamage(projectile.damage, to: other, tower: sourceTower, events: &events)
+                            }
                         }
                     }
                 }
@@ -871,6 +952,30 @@ class GameState {
             events.completedProjectiles.append(projectile)
         }
         projectiles.removeAll { $0.isComplete }
+
+        // Process hive deaths — spawn 5 hoppers that drop from hive's elevated position
+        for enemy in events.killedEnemies where enemy.enemyType == .hive {
+            let spawnCell = enemy.currentCell
+            let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
+            let hp: Float = 25 + Float(round) * 20
+            let scatterRadius: Float = 0.4
+            for i in 0..<5 {
+                let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
+                hopper.currentCell = spawnCell
+                hopper.progress = enemy.progress + Float(i) * 0.06
+                hopper.isDroppingFromHive = true
+                hopper.hiveDropFromY = hiveWorldY
+                hopper.hiveDropProgress = 0
+                let angle = Float(i) * (2 * .pi / 5)
+                hopper.hiveDropLateralOffset = SIMD2<Float>(
+                    cos(angle) * scatterRadius,
+                    sin(angle) * scatterRadius
+                )
+                hopper.active = true
+                enemies.append(hopper)
+                events.spawnedEnemies.append(hopper)
+            }
+        }
 
         // Process exploder deaths — damage nearby towers
         for enemy in events.killedEnemies where enemy.explosionRadius > 0 {
@@ -1023,7 +1128,19 @@ class GameState {
         let distance = simd_distance(currentPos, nextPos)
 
         let effectiveSpeed = enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed
-        enemy.progress += (effectiveSpeed * deltaTime) / distance
+        let distanceMoved = effectiveSpeed * deltaTime
+        enemy.progress += distanceMoved / distance
+
+        // Rolling: angular velocity = linear speed / visual radius
+        let visualRadius = enemyVisualRadius(for: enemy.enemyType)
+        enemy.rollDeltaAngle = distanceMoved / visualRadius
+        // Roll axis is perpendicular to movement direction in XZ plane
+        let dx = nextPos.x - currentPos.x
+        let dz = nextPos.y - currentPos.y   // worldPosition .y is world Z
+        let dirLen = sqrt(dx * dx + dz * dz)
+        if dirLen > 0.001 {
+            enemy.rollAxis = SIMD3(dz / dirLen, 0, -dx / dirLen)
+        }
 
         if enemy.progress >= 1.0 {
             enemy.progress -= 1.0
@@ -1036,8 +1153,47 @@ class GameState {
         }
     }
 
+    /// Returns the visual sphere/box radius used when rendering this enemy type.
+    private func enemyVisualRadius(for type: EnemyType) -> Float {
+        switch type {
+        case .basic:         return enemyRadius
+        case .hopper:        return enemyRadius * 1.1
+        case .tank:          return enemyRadius * 2.0
+        case .mirroid:       return enemyRadius * 2.0
+        case .fastTank:      return enemyRadius * 2.0
+        case .shield:        return enemyRadius * 1.5
+        case .superHopper:   return enemyRadius * 1.5
+        case .boss:          return enemyRadius * 1.5   // half of box width (3r)
+        case .exploder:      return enemyRadius * 1.1   // half of box width (2.2r)
+        case .superExploder: return enemyRadius * 1.5   // half of box width (3r)
+        case .hive:          return enemyRadius * 2.5
+        }
+    }
+
     private func updateHopper(_ enemy: Enemy, deltaTime: Float) {
+        if enemy.isDroppingFromHive {
+            let dropDuration: Float = 0.55
+            enemy.hiveDropProgress = min(1.0, enemy.hiveDropProgress + deltaTime / dropDuration)
+            if enemy.hiveDropProgress >= 1.0 {
+                enemy.isDroppingFromHive = false
+                enemy.hopperJumpTimer = Float.random(in: enemy.hopperJumpInterval)
+            }
+            return
+        }
+
         if enemy.isJumping {
+            // Spin during the jump arc based on horizontal distance
+            if let from = enemy.jumpFromPos, let to = enemy.jumpToPos {
+                let dx = to.x - from.x
+                let dz = to.z - from.z
+                let horizDist = sqrt(dx * dx + dz * dz)
+                let horizSpeed = horizDist / enemy.jumpDuration
+                let visualRadius = enemyVisualRadius(for: enemy.enemyType)
+                enemy.rollDeltaAngle = (horizSpeed * deltaTime) / visualRadius
+                if horizDist > 0.001 {
+                    enemy.rollAxis = SIMD3(dz / horizDist, 0, -dx / horizDist)
+                }
+            }
             enemy.jumpProgress = min(1.0, enemy.jumpProgress + deltaTime / enemy.jumpDuration)
             if enemy.jumpProgress >= 1.0 {
                 // Landed — clear jump state and set next timer
@@ -1062,19 +1218,50 @@ class GameState {
 
     private func triggerHopperJump(_ enemy: Enemy) {
         guard let current = enemy.currentCell else { return }
-        let jumpDist = Int.random(in: enemy.hopperJumpRange)
-        var target: HexCell? = current
-        for _ in 0..<jumpDist { target = target?.next }
+        let jumpRadius = Int.random(in: enemy.hopperJumpRange)
 
         let fromPos = enemyWorldPosition(enemy) ?? {
             let p = current.coord.worldPosition(spacing: spacing)
             return SIMD3(p.x, current.height + enemyRadius + enemyHoverOffset, p.y)
         }()
 
-        guard let landCell = target else {
-            // Jumped past the end
-            enemy.reachedEnd = true
-            enemy.active = false
+        let landCell: HexCell?
+
+        if enemy.enemyType == .superHopper {
+            // Super hopper: search all path cells within hex radius, jump to the
+            // one furthest ahead on the path toward the end tower.
+            let currentDepth = pathDepth(of: current)
+            var best: HexCell? = nil
+            var bestDepth = currentDepth
+
+            for cell in hexGrid.cells.values {
+                guard cell.type == .path || cell.type == .end else { continue }
+                guard cell.coord.distance(to: current.coord) <= jumpRadius else { continue }
+                guard cell.coord != current.coord else { continue }
+                let depth = pathDepth(of: cell)
+                if depth > bestDepth {
+                    bestDepth = depth
+                    best = cell
+                }
+            }
+            landCell = best
+        } else {
+            // Normal hopper: walk forward along path by jumpRadius steps.
+            var target: HexCell? = current
+            for _ in 0..<jumpRadius { target = target?.next }
+            landCell = target
+
+            if landCell == nil {
+                // Walked past the end
+                enemy.reachedEnd = true
+                enemy.active = false
+                return
+            }
+        }
+
+        guard let landCell else {
+            // Super hopper found no valid target — skip this jump
+            enemy.hopperJumpTimer = Float.random(in: enemy.hopperJumpInterval)
             return
         }
 
@@ -1088,6 +1275,18 @@ class GameState {
         enemy.jumpProgress = 0
     }
 
+    /// Returns the number of steps from the start of the path to this cell
+    /// by walking the `.previous` chain.
+    private func pathDepth(of cell: HexCell) -> Int {
+        var depth = 0
+        var walker: HexCell? = cell
+        while let prev = walker?.previous {
+            depth += 1
+            walker = prev
+        }
+        return depth
+    }
+
     /// Computes world position for an enemy using Catmull-Rom interpolation.
     func enemyWorldPosition(_ enemy: Enemy) -> SIMD3<Float>? {
         // Hopper arc override while mid-jump
@@ -1099,6 +1298,18 @@ class GameState {
             let arcHeight: Float = 1.8
             let y = from.y + (to.y - from.y) * t + arcHeight * sin(.pi * t)
             return [x, y, z]
+        }
+
+        // Drop-from-hive animation: scatter outward from hive, converge to path on land
+        if enemy.isDroppingFromHive, let current = enemy.currentCell {
+            let pos = current.coord.worldPosition(spacing: spacing)
+            let targetY = current.height + enemyRadius + enemyHoverOffset
+            let t = enemy.hiveDropProgress * enemy.hiveDropProgress  // ease-in (gravity feel)
+            let y = enemy.hiveDropFromY + (targetY - enemy.hiveDropFromY) * t
+            let fade = 1 - enemy.hiveDropProgress  // lateral offset fades to zero as they land
+            let ox = enemy.hiveDropLateralOffset.x * fade
+            let oz = enemy.hiveDropLateralOffset.y * fade
+            return [pos.x + ox, y, pos.y + oz]
         }
 
         guard let current = enemy.currentCell else { return nil }
@@ -1135,9 +1346,9 @@ class GameState {
             let z = catmullRom(p0Pos.y, p1Pos.y, p2Pos.y, p3Pos.y, t)
             let y = catmullRom(p0Y, p1Y, p2Y, p3Y, t)
 
-            return [x, y, z]
+            return [x, y + enemy.additionalHoverOffset, z]
         } else {
-            return [p1Pos.x, p1Y, p1Pos.y]
+            return [p1Pos.x, p1Y + enemy.additionalHoverOffset, p1Pos.y]
         }
     }
 
@@ -1286,22 +1497,28 @@ class GameState {
             // Predict where enemy will be when projectile arrives
             guard let prediction = predictEnemyPosition(enemy, afterTime: estimatedFlightTime) else { continue }
 
-            // Check if predicted position is within fire radius
+            // Check if predicted position is within fire radius (and outside minimum range for fireball)
             let predictedHexDist = tower.coord.distance(to: prediction.coord)
             if predictedHexDist > tower.fireRadius { continue }
+            if tower.type == .fireball && predictedHexDist < 2 { continue }
 
             // Refine: compute actual flight time to predicted position
             let actualDist = simd_distance(towerOrigin, prediction.position)
             let actualFlightTime = actualDist / tower.projectileSpeed
 
+            let isFireball = tower.type == .fireball
             return Projectile(
                 origin: towerOrigin,
                 target: prediction.position,
                 totalFlightTime: actualFlightTime,
                 damage: tower.damage,
                 targetEnemyID: enemy.id,
-                isAoE: tower.level == Tower.maxLevel,
-                sourceTowerID: tower.id
+                isAoE: !isFireball && tower.level == Tower.maxLevel,
+                sourceTowerID: tower.id,
+                burnOnImpact: isFireball,
+                impactBurnDPS: isFireball ? tower.fireDamagePerSecond : 0,
+                impactBurnDuration: isFireball ? tower.fireDuration : 0,
+                splashRadius: isFireball ? tower.splashRadius : 0
             )
         }
 
@@ -1326,6 +1543,7 @@ class GameState {
     @discardableResult
     private func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, events: inout GameEvents) -> Bool {
         guard enemy.active else { return false }
+        if let tower, enemy.immuneTowerTypes.contains(tower.type) { return false }
         let baseReward = enemy.enemyType == .boss ? 5 * round : killReward
         let reward = tower?.hasMoneyDoubler == true ? baseReward * 2 : baseReward
 
@@ -1389,6 +1607,7 @@ class GameState {
 
     private func applyBurning(cells: [HexCoord]) {
         for enemy in enemies where enemy.active {
+            guard !enemy.immuneTowerTypes.contains(.fire) else { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             if cells.contains(enemyCoord) {
                 enemy.burning = true
@@ -1701,7 +1920,7 @@ class GameState {
         pendingSlowAuraTower = nil
     }
 
-    /// Assigns a random bonus to a random unoccupied terrain cell every 5 rounds.
+    /// Assigns a random bonus to a random unoccupied terrain cell.
     private func assignBonusTile() {
         let candidates = hexGrid.cells.values.filter {
             $0.type == .terrain && !$0.hasTower && $0.bonusType == nil
@@ -1733,6 +1952,7 @@ class GameState {
         case .bowler:     radius = 5
         case .sword:      radius = 1
         case .healer:     radius = 1
+        case .fireball:   radius = 4
         }
         if hexGrid.cell(at: coord)?.bonusType == .rangeExtender { radius += 1 }
         return hexGrid.cells.values.filter { coord.distance(to: $0.coord) <= radius }
@@ -1741,7 +1961,9 @@ class GameState {
     /// Transitions back to placing phase. Returns any newly added terrain cells.
     func returnToPlacing() -> [HexCell] {
         guard phase == .roundOver else { return [] }
-        if round % 4 == 0 {
+        // After the first boss (round 5), give 2 bonus tiles every 5 rounds
+        if round % 5 == 0 && round >= 5 {
+            assignBonusTile()
             assignBonusTile()
         }
         phase = .placing
@@ -1786,6 +2008,7 @@ class GameState {
         baseTowerHP = baseTowerMaxHP
         baseTowerBlocksRemaining = 5
         baseTowerDamageAccumulated = 0
+        baseSentinelTower = nil
         pendingSlowAuraTower = nil
         towers.removeAll()
         enemies.removeAll()
@@ -1797,10 +2020,8 @@ class GameState {
         statsDamage.removeAll()
         statsKillsByEnemy.removeAll()
         pendingSellBonus = false
-        pendingRingBonus = false
-        // Re-seed a ring of terrain around the base tower
-        let seedCells = seedTerrainAroundBase()
-        return (towerIDs, terrainCoords, seedCells)
+        pendingRingBonus = true
+        return (towerIDs, terrainCoords, [])
     }
 
     // MARK: - Selection

@@ -11,12 +11,14 @@ import Metal
 @MainActor
 class SceneRenderer {
     private let surfaceShader: CustomMaterial.SurfaceShader
+    private let watercolorShader: CustomMaterial.SurfaceShader
     private var entityMap: [HexCoord: Entity] = [:]
     private var content: (any RealityViewContentProtocol)?
 
     init?() {
         guard let library = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary() else { return nil }
-        surfaceShader = CustomMaterial.SurfaceShader(named: "celSurfaceShader", in: library)
+        surfaceShader      = CustomMaterial.SurfaceShader(named: "celSurfaceShader",      in: library)
+        watercolorShader   = CustomMaterial.SurfaceShader(named: "watercolorSurfaceShader", in: library)
     }
 
     /// Builds all entities for the current game state and adds them to the scene.
@@ -84,6 +86,11 @@ class SceneRenderer {
     /// Looks up the HexCoord for a tapped entity.
     func coord(for entity: Entity) -> HexCoord? {
         entityMap.first { $0.value === entity }?.key
+    }
+
+    /// Looks up the enemy ID for a tapped entity.
+    func enemyID(for entity: Entity) -> UUID? {
+        enemyEntities.first { $0.value === entity }?.key
     }
 
     // MARK: - Bonus Cell Indicators
@@ -200,6 +207,7 @@ class SceneRenderer {
         case .bowler:     (br, bg, bb, tr, tg, tb) = (0.75, 0.75, 0.75, 0.3, 0.3, 0.3)
         case .sword:      (br, bg, bb, tr, tg, tb) = (0.35, 0.45, 0.35, 0.85, 0.85, 0.95)
         case .healer:     (br, bg, bb, tr, tg, tb) = (0.3, 0.6, 0.4, 0.9, 1.0, 0.9)
+        case .fireball:   (br, bg, bb, tr, tg, tb) = (0.6, 0.2, 0.05, 1.0, 0.45, 0.0)
         }
 
         let root = Entity()
@@ -283,6 +291,7 @@ class SceneRenderer {
         case .bowler: tint = .init(red: 0.75, green: 0.75, blue: 0.75, alpha: 1)
         case .sword:  tint = .init(red: 0.35, green: 0.45, blue: 0.35, alpha: 1)
         case .healer: tint = .init(red: 0.3, green: 0.6, blue: 0.4, alpha: 1)  // soft green base
+        case .fireball: tint = .init(red: 0.6, green: 0.2, blue: 0.05, alpha: 1)
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
@@ -324,6 +333,7 @@ class SceneRenderer {
         case .bowler: turretTint = .init(red: 0.3, green: 0.3, blue: 0.3, alpha: 1)
         case .sword:  turretTint = .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1)  // silver top
         case .healer: turretTint = .init(red: 0.9, green: 1.0, blue: 0.9, alpha: 1)    // pale green top
+        case .fireball: turretTint = .init(red: 1.0, green: 0.45, blue: 0.0, alpha: 1)
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
 
@@ -777,7 +787,7 @@ class SceneRenderer {
         guard let content else { return }
 
         let mesh: MeshResource
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var material = try! CustomMaterial(surfaceShader: watercolorShader, lightingModel: .unlit)
 
         switch enemy.enemyType {
         case .boss:
@@ -810,10 +820,42 @@ class SceneRenderer {
         case .basic:
             mesh = MeshResource.generateSphere(radius: radius)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.3, blue: 0.2, alpha: 1))
+        case .hive:
+            mesh = MeshResource.generateSphere(radius: radius * 2.5)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.45, green: 0.1, blue: 0.65, alpha: 1))
+        case .mirroid:
+            mesh = MeshResource.generateSphere(radius: radius * 2)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.0, green: 0.0, blue: 0.0, alpha: 1)) // placeholder, overridden below
         }
 
         let entity = Entity()
-        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+
+        if enemy.enemyType == .mirroid {
+            var pbr = PhysicallyBasedMaterial()
+            pbr.baseColor = .init(tint: .init(red: 0.85, green: 0.9, blue: 0.95, alpha: 1))
+            pbr.metallic = .init(floatLiteral: 1.0)
+            pbr.roughness = .init(floatLiteral: 0.05)
+            entity.components.set(ModelComponent(mesh: mesh, materials: [pbr]))
+        } else {
+            entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        }
+        let collisionRadius: Float
+        switch enemy.enemyType {
+        case .basic:         collisionRadius = radius
+        case .hopper:        collisionRadius = radius * 1.1
+        case .tank:          collisionRadius = radius * 2
+        case .fastTank:      collisionRadius = radius * 2
+        case .shield:        collisionRadius = radius * 1.5
+        case .superHopper:   collisionRadius = radius * 1.5
+        case .boss:          collisionRadius = radius * 2
+        case .exploder:      collisionRadius = radius * 1.5
+        case .superExploder: collisionRadius = radius * 2
+        case .hive:          collisionRadius = radius * 2.5
+        case .mirroid:       collisionRadius = radius * 2
+        }
+        entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: collisionRadius)]))
+        entity.components.set(InputTargetComponent())
+
         entity.position = position
         content.add(entity)
         enemyEntities[enemy.id] = entity
@@ -830,6 +872,17 @@ class SceneRenderer {
         let hpRatio = max(0, enemy.hitPoints / enemy.maxHitPoints)
         let s = 0.25 + 0.75 * hpRatio
         entity.scale = [s, s, s]
+
+        // Apply incremental rolling rotation each frame
+        let dAngle = enemy.rollDeltaAngle
+        if dAngle > 0.0001 {
+            let axis = enemy.rollAxis
+            let axisLen = simd_length(axis)
+            if axisLen > 0.001 {
+                let deltaRot = simd_quatf(angle: dAngle, axis: axis / axisLen)
+                entity.orientation = deltaRot * entity.orientation
+            }
+        }
     }
 
     func removeEnemy(_ enemy: Enemy) {
@@ -960,15 +1013,81 @@ class SceneRenderer {
 
     func createProjectile(_ projectile: Projectile) {
         guard let content else { return }
-        let mesh = MeshResource.generateSphere(radius: 0.05)
+        let isFB = projectile.burnOnImpact
+        let mesh = MeshResource.generateSphere(radius: isFB ? 0.13 : 0.05)
         var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
-        material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.3, alpha: 1))
+        material.baseColor = CustomMaterial.BaseColor(tint: isFB
+            ? .init(red: 1.0, green: 0.35, blue: 0.0, alpha: 1)
+            : .init(red: 1.0, green: 0.9, blue: 0.3, alpha: 1))
 
         let entity = Entity()
         entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
         entity.position = projectile.origin
+
+        if isFB {
+            var trail = ParticleEmitterComponent()
+            trail.emitterShape = .point
+            trail.speed = 1
+            trail.speedVariation = 0.8
+            trail.mainEmitter.birthRate = 150
+            trail.mainEmitter.lifeSpan = 0.5
+            trail.mainEmitter.lifeSpanVariation = 0.15
+            trail.mainEmitter.size = 0.2
+            trail.mainEmitter.sizeMultiplierAtEndOfLifespan = 5.0
+            trail.mainEmitter.sizeVariation = 0.04
+            trail.mainEmitter.spreadingAngle = 0.5
+            trail.mainEmitter.color = .evolving(
+                start: .single(.init(red: 1.0, green: 0.75, blue: 0.1, alpha: 1.0)),
+                end:   .single(.init(red: 1.0, green: 0.15, blue: 0.0, alpha: 0.0))
+            )
+            trail.mainEmitter.blendMode = .additive
+            trail.timing = .once(warmUp: 0.5, emit: .init(duration: 60))
+
+            // Orient emitter so +Y faces backward (toward the tower that fired)
+            let trailEntity = Entity()
+            let travelDir = projectile.target - projectile.origin
+            let len = simd_length(travelDir)
+            if len > 0.001 {
+                let backward = -(travelDir / len)
+                trailEntity.orientation = simd_quatf(from: [0, 1, 0], to: backward)
+            }
+            trailEntity.components.set(trail)
+            entity.addChild(trailEntity)
+        }
+
         content.add(entity)
         projectileEntities[projectile.id] = entity
+    }
+
+    func createFireballExplosion(at position: SIMD3<Float>) {
+        guard let content else { return }
+
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .sphere
+        emitter.emitterShapeSize = [0.2, 0.2, 0.2]
+        emitter.speed = 4.0
+        emitter.speedVariation = 2.0
+        emitter.mainEmitter.birthRate = 800
+        emitter.mainEmitter.lifeSpan = 0.8
+        emitter.mainEmitter.lifeSpanVariation = 0.3
+        emitter.mainEmitter.size = 0.1
+        emitter.mainEmitter.sizeVariation = 0.05
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 1.0, green: 0.7, blue: 0.1, alpha: 1.0)),
+            end:   .single(.init(red: 1.0, green: 0.1, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .once(warmUp: 0, emit: .init(duration: 0.15))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = position
+        content.add(entity)
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            entity.removeFromParent()
+        }
     }
 
     func updateProjectilePosition(_ projectile: Projectile) {

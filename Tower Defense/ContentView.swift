@@ -28,6 +28,7 @@ struct ContentView: View {
     @State private var showRoundOverMessage: Bool = false
     @State private var showingStats: Bool = false
     @State private var selectedTower: Tower?
+    @State private var selectedEnemy: Enemy?
     @State private var selectedBonusCell: HexCell?
     @State private var selectedAuraCell: HexCell?
     @State private var dialogRefresh: Int = 0
@@ -112,6 +113,7 @@ struct ContentView: View {
                     for enemy in events.killedEnemies {
                         renderer.removeShieldDome(for: enemy)
                         renderer.removeEnemy(enemy)
+                        if selectedEnemy?.id == enemy.id { selectedEnemy = nil }
                     }
 
                     // Spawn projectile entities
@@ -127,6 +129,9 @@ struct ContentView: View {
                     // Remove completed projectiles
                     for projectile in events.completedProjectiles {
                         renderer.removeProjectile(projectile)
+                        if projectile.burnOnImpact {
+                            renderer.createFireballExplosion(at: projectile.target)
+                        }
                     }
 
                     // Bowling balls
@@ -229,6 +234,7 @@ struct ContentView: View {
                         renderer.removeAllCones()
                         renderer.removeAllBowlingBalls()
                         renderer.removeAllBlades()
+                        selectedEnemy = nil
                     }
                 }
             }
@@ -308,9 +314,10 @@ struct ContentView: View {
                         Text("Bowler ($\(gameState.costForTower(.bowler)))").tag(TowerType?.some(.bowler))
                         Text("Sword ($\(gameState.costForTower(.sword)))").tag(TowerType?.some(.sword))
                         Text("Healer ($\(gameState.costForTower(.healer)))").tag(TowerType?.some(.healer))
+                        Text("Fireball ($\(gameState.costForTower(.fireball)))").tag(TowerType?.some(.fireball))
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 560)
+                    .frame(width: 640)
 
                     Text(gameState.selectedTowerType == nil ? "Click cells to inspect or select a tower to place" : "Tap terrain cells to place towers")
                         .font(.caption)
@@ -687,6 +694,14 @@ struct ContentView: View {
                 .padding(.top, 16)
                 .padding(.trailing, 16)
             }
+
+            // Enemy info panel — top left
+            if let enemy = selectedEnemy, enemy.active {
+                enemyInfoPanel(enemy)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(.top, 16)
+                    .padding(.leading, 16)
+            }
         }
         .onChange(of: gameState.selectedTowerType) { _, _ in
             if let renderer {
@@ -895,6 +910,17 @@ struct ContentView: View {
                     statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
                 }
             }
+        case .fireball:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Burn DPS", "\(String(format: "%.0f", tower.fireDamagePerSecond))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Burn Dur", "\(String(format: "%.1f", tower.fireDuration))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
         }
     }
 
@@ -919,6 +945,82 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func enemyInfoPanel(_ enemy: Enemy) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(enemy.enemyType.displayName)
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            // HP bar
+            let hpRatio = max(0, enemy.hitPoints / enemy.maxHitPoints)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("HP")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.6))
+                    Spacer()
+                    Text("\(Int(enemy.hitPoints)) / \(Int(enemy.maxHitPoints))")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.8))
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(.white.opacity(0.15))
+                            .frame(height: 6)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(hpRatio > 0.5 ? Color.green : hpRatio > 0.25 ? .yellow : .red)
+                            .frame(width: geo.size.width * CGFloat(hpRatio), height: 6)
+                    }
+                }
+                .frame(height: 6)
+            }
+
+            Divider().background(.white.opacity(0.3))
+
+            // Speed + status
+            HStack(spacing: 12) {
+                Label(String(format: "%.1f spd", enemy.speed), systemImage: "hare")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.8))
+                if enemy.burning {
+                    Label(String(format: "%.0fs", enemy.burnTimer), systemImage: "flame.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                if enemy.slowed {
+                    Label(String(format: "%.0fs", enemy.slowTimer), systemImage: "snowflake")
+                        .font(.caption)
+                        .foregroundColor(.cyan)
+                }
+            }
+
+            // Immunities
+            let immunities = enemy.immuneTowerTypes
+            if !immunities.isEmpty {
+                Divider().background(.white.opacity(0.3))
+                HStack(spacing: 4) {
+                    Text("Immune:")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.5))
+                    Text(immunities.map { towerTypeName($0) }.sorted().joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundColor(.red.opacity(0.85))
+                }
+            }
+
+            Button("Close") { selectedEnemy = nil }
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(12)
+        .background(.black.opacity(0.75))
+        .cornerRadius(10)
+        .fixedSize()
+    }
+
     private func towerTypeName(_ type: TowerType) -> String {
         switch type {
         case .projectile: return "Projectile"
@@ -928,6 +1030,7 @@ struct ContentView: View {
         case .bowler: return "Bowler"
         case .sword: return "Sword"
         case .healer: return "Healer"
+        case .fireball: return "Fireball"
         }
     }
 
@@ -941,7 +1044,16 @@ struct ContentView: View {
     }
 
     private func handleTap(entity: Entity) {
-        guard let renderer, let coord = renderer.coord(for: entity) else { return }
+        guard let renderer else { return }
+
+        // Check if tapping an enemy — show its stats panel
+        if let id = renderer.enemyID(for: entity),
+           let enemy = gameState.enemies.first(where: { $0.id == id && $0.active }) {
+            selectedEnemy = enemy
+            return
+        }
+
+        guard let coord = renderer.coord(for: entity) else { return }
 
         // Ring bonus: next tap on any existing cell expands terrain around it
         if gameState.pendingRingBonus {
@@ -997,10 +1109,11 @@ struct ContentView: View {
         }
 
         // Dismiss any open dialogs
-        if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil {
+        if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil || selectedEnemy != nil {
             selectedTower = nil
             selectedBonusCell = nil
             selectedAuraCell = nil
+            selectedEnemy = nil
             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
             renderer.updateSelection(deselected: deselected, selected: nil)
         }
@@ -1156,6 +1269,8 @@ struct StatsView: View {
         case .shield:       return "Shield"
         case .hopper:       return "Hopper"
         case .superHopper:  return "S.Hop"
+        case .hive:         return "Hive"
+        case .mirroid:      return "Mirroid"
         }
     }
 

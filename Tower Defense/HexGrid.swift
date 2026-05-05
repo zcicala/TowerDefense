@@ -57,34 +57,40 @@ enum BonusType: CaseIterable {
     case slowAura
     case repair
     case moneyDoubler
-    case sell
     case rangeExtender
+    case pauseControl
+    case damageAura
+    case moveTower
 
     var displayName: String {
         switch self {
-        case .freeUpgrade: return "Free Upgrades"
-        case .invulnerable: return "Invulnerable"
-        case .doubleRing: return "Ring Bonus"
-        case .goldCache: return "Gold Cache ($150)"
-        case .slowAura: return "Slow Aura"
-        case .repair: return "Repair (+1 HP) to Main Tower"
-        case .moneyDoubler: return "Money Doubler"
-        case .sell: return "Resale Deed"
+        case .freeUpgrade:   return "Free Upgrades"
+        case .invulnerable:  return "Invulnerable"
+        case .doubleRing:    return "Ring Bonus"
+        case .goldCache:     return "Gold Cache ($150)"
+        case .slowAura:      return "Slow Aura"
+        case .repair:        return "Repair (+1 HP)"
+        case .moneyDoubler:  return "Money Doubler"
         case .rangeExtender: return "Range Extender"
+        case .pauseControl:  return "Pause Control"
+        case .damageAura:    return "Damage Aura"
+        case .moveTower:     return "Move Tower"
         }
     }
 
     var description: String {
         switch self {
-        case .freeUpgrade: return "Place a tower here to instantly gain 3 free upgrade levels!"
-        case .invulnerable: return "Place a tower here to make it immune to exploder damage!"
-        case .doubleRing: return "Place a tower here, then pick any cell to expand a full ring of terrain around it!"
-        case .goldCache: return "Place a tower here to receive $150!"
-        case .slowAura: return "Place a tower here to slow enemies on adjacent path tiles by 20%!"
-        case .repair: return "Place a tower here to restore 1 HP to the base tower!"
-        case .moneyDoubler: return "Place a tower here to earn double money for every enemy it kills!"
-        case .sell: return "Place a tower here to unlock selling it for a full refund at any time!"
+        case .freeUpgrade:   return "Place a tower here to instantly gain 3 free upgrade levels!"
+        case .invulnerable:  return "Place a tower here to make it immune to exploder damage!"
+        case .doubleRing:    return "Place a tower here to add 2 Ring Bonus items to your inventory!"
+        case .goldCache:     return "Place a tower here to receive $150!"
+        case .slowAura:      return "Place a tower here to slow enemies on adjacent path tiles by 20%!"
+        case .repair:        return "Place a tower here to add a Repair item to your inventory. Use it to restore 1 HP to the base tower!"
+        case .moneyDoubler:  return "Place a tower here to earn double money for every enemy it kills!"
         case .rangeExtender: return "Place a tower here to extend its detection and firing range by +1!"
+        case .pauseControl:  return "Place a tower here to unlock Spacebar pause — freeze time during combat!"
+        case .damageAura:    return "Place a tower here to boost all damage dealt to enemies on adjacent path tiles by 40%!"
+        case .moveTower:     return "Place a tower here to add a Move Tower item to your inventory. Use it to reposition any placed tower!"
         }
     }
 }
@@ -123,6 +129,7 @@ enum TowerType {
     case sword
     case healer
     case fireball
+    case antiAir
 }
 
 enum EnemyType: CaseIterable {
@@ -137,6 +144,7 @@ enum EnemyType: CaseIterable {
     case superHopper
     case hive
     case mirroid
+    case wisp
 
     var displayName: String {
         switch self {
@@ -151,6 +159,7 @@ enum EnemyType: CaseIterable {
         case .superHopper:  return "Super Hopper"
         case .hive:         return "Hive"
         case .mirroid:      return "Mirroid"
+        case .wisp:         return "Wisp"
         }
     }
 }
@@ -166,7 +175,7 @@ enum TargetingMode: String, CaseIterable {
 @Observable
 class Tower {
     let id: UUID = UUID()
-    let coord: HexCoord
+    var coord: HexCoord
     let type: TowerType
     var targetingMode: TargetingMode = .closest
     var level: Int = 1
@@ -186,12 +195,16 @@ class Tower {
     var isInvulnerable: Bool = false
     var hasSlowAura: Bool = false   // tower has slow aura bonus; slowedCoords stores the chosen tiles
     var slowedCoords: Set<HexCoord> = []  // the 3 path tiles this tower slows
+    var hasDamageAura: Bool = false
+    var damageAuraCoords: Set<HexCoord> = []  // the 3 path tiles this tower boosts damage on
     var hasMoneyDoubler: Bool = false    // kills by this tower earn 2× the normal reward
     var moneySpent: Int = 0             // total money spent on this tower (placement + upgrades)
     var totalKills: Int = 0             // enemies killed by this tower
     var totalDamageDealt: Float = 0     // total damage dealt to enemies (not shields)
     /// Max-level laser only: when set, prioritises this enemy type for targeting.
     var priorityEnemyType: EnemyType? = nil
+    /// If non-empty, this tower only targets enemies of these types.
+    var targetTypeRestrictions: Set<EnemyType> = []
 
     // Healer-specific state
     var healCharges: Int = 1      // remaining heal charges this round
@@ -256,7 +269,7 @@ class Tower {
         Tower(coord: coord, type: .fire,
               detectionRadius: 2, fireRadius: 1,
               projectileSpeed: 0, damage: 0, cooldown: 0.5,
-              fireDuration: 3.5, fireDamagePerSecond: 33.0)
+              fireDuration: 3.5, fireDamagePerSecond: 60.0)
     }
 
     static func makeIce(coord: HexCoord) -> Tower {
@@ -269,7 +282,7 @@ class Tower {
     static func makeSword(coord: HexCoord) -> Tower {
         Tower(coord: coord, type: .sword,
               detectionRadius: 1, fireRadius: 1,
-              projectileSpeed: 0, damage: 74, cooldown: 0.84,
+              projectileSpeed: 0, damage: 90, cooldown: 0.84,
               beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
               fireDuration: 0.28, fireDamagePerSecond: 0)
     }
@@ -289,6 +302,16 @@ class Tower {
                       beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
                       fireDuration: 2.0, fireDamagePerSecond: 40.0)
         t.splashRadius = 1
+        return t
+    }
+
+    static func makeAntiAir(coord: HexCoord) -> Tower {
+        let t = Tower(coord: coord, type: .antiAir,
+                      detectionRadius: 9, fireRadius: 9,
+                      projectileSpeed: 5.5, damage: 260, cooldown: 3.5,
+                      beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
+                      fireDuration: 0, fireDamagePerSecond: 0)
+        t.targetTypeRestrictions = [.hive, .wisp]
         return t
     }
 
@@ -316,16 +339,17 @@ class Tower {
         case .bowler: base = 20
         case .sword: base = 18
         case .healer: base = 30
-        case .fireball: base = 35
+        case .fireball: base = 53
+        case .antiAir:  base = 35
         }
         return base * level
     }
 
-    /// Applies the next level upgrade, boosting stats by ~25%.
+    /// Applies the next level upgrade, boosting stats by 33%.
     func applyUpgrade() {
         guard canUpgrade else { return }
         level += 1
-        let boost: Float = 1.25
+        let boost: Float = 1.33
 
         switch type {
         case .projectile:
@@ -361,20 +385,28 @@ class Tower {
             if level == Tower.maxLevel {
                 splashRadius += 1
             }
+        case .antiAir:
+            damage *= boost
+            cooldown *= 0.88
+            if level == Tower.maxLevel {
+                detectionRadius += 1
+                fireRadius += 1
+            }
         }
     }
 
     /// Summary of what the next upgrade improves.
     var upgradeDescription: String {
         switch type {
-        case .projectile: return level == Tower.maxLevel - 1 ? "+25% dmg, -12% cooldown, +AoE Shots" : "+25% dmg, -12% cooldown"
-        case .laser: return level == Tower.maxLevel - 1 ? "+25% DPS, -20% cooldown, +Target Priority" : "+25% DPS, -20% cooldown"
-        case .fire: return level == Tower.maxLevel - 1 ? "+25% DPS, +15% duration, +Burning DOT" : "+25% DPS, +15% duration"
+        case .projectile: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +AoE Shots" : "+33% dmg, -12% cooldown"
+        case .laser: return level == Tower.maxLevel - 1 ? "+33% DPS, -20% cooldown, +Target Priority" : "+33% DPS, -20% cooldown"
+        case .fire: return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
         case .ice: return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +Double Slow" : "+20% duration, -18% cooldown"
-        case .bowler: return level == Tower.maxLevel - 1 ? "+25% dmg, -12% cooldown, +Ball Bounce" : "+25% dmg, -12% cooldown"
-        case .sword: return level == Tower.maxLevel - 1 ? "+25% dmg, -12% cooldown, +Swipe Arc" : "+25% dmg, -12% cooldown"
+        case .bowler: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
+        case .sword: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
         case .healer: return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
-        case .fireball: return level == Tower.maxLevel - 1 ? "+25% dmg, +25% burn DPS, -12% cooldown, +Splash Radius" : "+25% dmg, +25% burn DPS, -12% cooldown"
+        case .fireball: return level == Tower.maxLevel - 1 ? "+33% dmg, +33% burn DPS, -12% cooldown, +Splash Radius" : "+33% dmg, +33% burn DPS, -12% cooldown"
+        case .antiAir:  return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
         }
     }
 }
@@ -425,8 +457,9 @@ class Enemy {
     /// Tower types that cannot damage this enemy.
     var immuneTowerTypes: Set<TowerType> {
         switch enemyType {
-        case .hive:    return [.fire, .ice, .sword, .bowler, .fireball]
+        case .hive:    return [.fire, .ice, .sword, .bowler, .fireball, .projectile]
         case .mirroid: return [.laser]
+        case .wisp:    return [.fire, .ice, .sword, .bowler, .fireball, .projectile]
         default: return []
         }
     }
@@ -455,11 +488,11 @@ class Enemy {
         switch type {
         case .hopper:
             self.hopperJumpRange = 2...5
-            self.hopperJumpInterval = 0.6...1.6
-            self.hopperJumpTimer = Float.random(in: 0.5...1.2)
+            self.hopperJumpInterval = 0.3...1.0
+            self.hopperJumpTimer = Float.random(in: 0.5...0.8)
         case .superHopper:
-            self.hopperJumpRange = 2...6
-            self.hopperJumpInterval = 0.5...1.0
+            self.hopperJumpRange = 2...4
+            self.hopperJumpInterval = 0.3...0.8
             self.hopperJumpTimer = Float.random(in: 0.4...0.8)
         default:
             self.hopperJumpRange = 2...5
@@ -485,11 +518,12 @@ class Projectile {
     let impactBurnDPS: Float    // burn damage per second
     let impactBurnDuration: Float   // burn duration in seconds
     let splashRadius: Int       // hex radius of AoE (0 = same tile only)
+    let arcHeight: Float        // parabolic arc peak height (0 = straight line)
 
     init(origin: SIMD3<Float>, target: SIMD3<Float>, totalFlightTime: Float,
          damage: Float, targetEnemyID: UUID, isAoE: Bool = false, sourceTowerID: UUID? = nil,
          burnOnImpact: Bool = false, impactBurnDPS: Float = 0, impactBurnDuration: Float = 0,
-         splashRadius: Int = 0) {
+         splashRadius: Int = 0, arcHeight: Float = 1.0) {
         self.origin = origin
         self.target = target
         self.totalFlightTime = totalFlightTime
@@ -501,13 +535,14 @@ class Projectile {
         self.impactBurnDPS = impactBurnDPS
         self.impactBurnDuration = impactBurnDuration
         self.splashRadius = splashRadius
+        self.arcHeight = arcHeight
     }
 
     var currentPosition: SIMD3<Float> {
         let t = min(elapsed / totalFlightTime, 1.0)
         var pos = origin + (target - origin) * t
         // Arc: parabolic height offset peaking at midpoint
-        let arc = 4 * t * (1 - t) * 1.0 // 1.0 unit arc height
+        let arc = 4 * t * (1 - t) * arcHeight
         pos.y += arc
         return pos
     }

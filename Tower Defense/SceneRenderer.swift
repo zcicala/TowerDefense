@@ -172,6 +172,46 @@ class SceneRenderer {
         slowAuraIndicatorEntities.removeAll()
     }
 
+    // MARK: - Damage Aura Indicators
+
+    private var damageAuraIndicatorEntities: [HexCoord: Entity] = [:]
+
+    func showDamageAuraIndicator(at coord: HexCoord, height: Float, spacing: Float) {
+        guard let content, damageAuraIndicatorEntities[coord] == nil else { return }
+        let pos = coord.worldPosition(spacing: spacing)
+
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .torus
+        emitter.emitterShapeSize = [0.25, 0.04, 0.25]
+        emitter.speed = 0.5
+        emitter.speedVariation = 0.1
+        emitter.mainEmitter.birthRate = 40
+        emitter.mainEmitter.lifeSpan = 1.0
+        emitter.mainEmitter.size = 0.08
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 1.0, green: 0.3, blue: 0.05, alpha: 1.0)),
+            end:   .single(.init(red: 0.8, green: 0.1, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = SIMD3(pos.x, height + 0.08, pos.y)
+        content.add(entity)
+        damageAuraIndicatorEntities[coord] = entity
+    }
+
+    func removeDamageAuraIndicator(at coord: HexCoord) {
+        damageAuraIndicatorEntities[coord]?.removeFromParent()
+        damageAuraIndicatorEntities.removeValue(forKey: coord)
+    }
+
+    func removeAllDamageAuraIndicators() {
+        for entity in damageAuraIndicatorEntities.values { entity.removeFromParent() }
+        damageAuraIndicatorEntities.removeAll()
+    }
+
     // MARK: - Placement Preview
 
     private var ghostTowerType: TowerType? = nil
@@ -208,6 +248,7 @@ class SceneRenderer {
         case .sword:      (br, bg, bb, tr, tg, tb) = (0.35, 0.45, 0.35, 0.85, 0.85, 0.95)
         case .healer:     (br, bg, bb, tr, tg, tb) = (0.3, 0.6, 0.4, 0.9, 1.0, 0.9)
         case .fireball:   (br, bg, bb, tr, tg, tb) = (0.6, 0.2, 0.05, 1.0, 0.45, 0.0)
+        case .antiAir:    (br, bg, bb, tr, tg, tb) = (0.2, 0.35, 0.15, 0.75, 0.78, 0.8)
         }
 
         let root = Entity()
@@ -292,6 +333,7 @@ class SceneRenderer {
         case .sword:  tint = .init(red: 0.35, green: 0.45, blue: 0.35, alpha: 1)
         case .healer: tint = .init(red: 0.3, green: 0.6, blue: 0.4, alpha: 1)  // soft green base
         case .fireball: tint = .init(red: 0.6, green: 0.2, blue: 0.05, alpha: 1)
+        case .antiAir:  tint = .init(red: 0.2, green: 0.35, blue: 0.15, alpha: 1)
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
@@ -334,6 +376,7 @@ class SceneRenderer {
         case .sword:  turretTint = .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1)  // silver top
         case .healer: turretTint = .init(red: 0.9, green: 1.0, blue: 0.9, alpha: 1)    // pale green top
         case .fireball: turretTint = .init(red: 1.0, green: 0.45, blue: 0.0, alpha: 1)
+        case .antiAir:  turretTint = .init(red: 0.75, green: 0.78, blue: 0.8, alpha: 1)
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
 
@@ -826,6 +869,9 @@ class SceneRenderer {
         case .mirroid:
             mesh = MeshResource.generateSphere(radius: radius * 2)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.0, green: 0.0, blue: 0.0, alpha: 1)) // placeholder, overridden below
+        case .wisp:
+            mesh = MeshResource.generateSphere(radius: radius * 0.9)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.85, blue: 1.0, alpha: 1))
         }
 
         let entity = Entity()
@@ -852,6 +898,7 @@ class SceneRenderer {
         case .superExploder: collisionRadius = radius * 2
         case .hive:          collisionRadius = radius * 2.5
         case .mirroid:       collisionRadius = radius * 2
+        case .wisp:          collisionRadius = radius * 0.9
         }
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: collisionRadius)]))
         entity.components.set(InputTargetComponent())
@@ -1112,6 +1159,12 @@ class SceneRenderer {
         turretEntities.removeValue(forKey: id)
     }
 
+    func moveTowerEntity(id: UUID, to coord: HexCoord, cellHeight: Float, spacing: Float) {
+        guard let entity = towerEntities[id] else { return }
+        let pos = coord.worldPosition(spacing: spacing)
+        entity.position = [pos.x, cellHeight, pos.y]
+    }
+
     func rebuildBaseTower(cellHeight: Float, position: SIMD2<Float>) {
         baseTowerRoot?.removeFromParent()
         baseTowerRoot = nil
@@ -1137,6 +1190,33 @@ class SceneRenderer {
         entity.scale = [0.1, 0.1, 0.1]
         content.add(entity)
         // Animate from 1/10 scale to full size over 0.25 seconds
+        let target = Transform(scale: [1, 1, 1], rotation: entity.transform.rotation,
+                               translation: entity.transform.translation)
+        entity.move(to: target, relativeTo: nil, duration: 0.25, timingFunction: .easeOut)
+        entityMap[cell.coord] = entity
+    }
+
+    /// Adds a path or start cell entity to the scene (for dynamically grown branch paths).
+    func addPathCell(_ cell: HexCell, spacing: Float, hexRadius: Float) {
+        guard let content else { return }
+        let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
+        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        let tint: SimpleMaterial.Color
+        if cell.type == .start {
+            tint = SimpleMaterial.Color(red: 0.2, green: 0.6, blue: 0.25, alpha: 1)
+        } else {
+            let t = max(0, min(1, cell.height))
+            tint = colorForHeight(t, isPath: true)
+        }
+        material.baseColor = CustomMaterial.BaseColor(tint: tint)
+        let pos = cell.coord.worldPosition(spacing: spacing)
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        entity.components.set(CollisionComponent(shapes: [.generateBox(size: [hexRadius * 2, cell.height, hexRadius * 2])]))
+        entity.components.set(InputTargetComponent())
+        entity.position = [pos.x, cell.height / 2, pos.y]
+        entity.scale = [0.1, 0.1, 0.1]
+        content.add(entity)
         let target = Transform(scale: [1, 1, 1], rotation: entity.transform.rotation,
                                translation: entity.transform.translation)
         entity.move(to: target, relativeTo: nil, duration: 0.25, timingFunction: .easeOut)

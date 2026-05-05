@@ -31,6 +31,7 @@ struct ContentView: View {
     @State private var selectedEnemy: Enemy?
     @State private var selectedBonusCell: HexCell?
     @State private var selectedAuraCell: HexCell?
+    @State private var selectedDamageAuraCell: HexCell?
     @State private var dialogRefresh: Int = 0
     @State private var viewSize: CGSize = CGSize(width: 800, height: 600)
     @State private var hoveredPlacementCoord: HexCoord? = nil
@@ -214,13 +215,17 @@ struct ContentView: View {
                         renderer.removeCone(for: tower)
                         renderer.removeTower(id: tower.id)
                         if tower.hasSlowAura { needsAuraRefresh = true }
+                        if tower.hasDamageAura { needsAuraRefresh = true }
                         if selectedTower?.id == tower.id {
                             selectedTower = nil
                             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                             renderer.updateSelection(deselected: deselected, selected: nil)
                         }
                     }
-                    if needsAuraRefresh { refreshSlowAuraIndicators() }
+                    if needsAuraRefresh {
+                        refreshSlowAuraIndicators()
+                        refreshDamageAuraIndicators()
+                    }
 
                     // Base tower block explosions
                     for _ in 0..<events.baseTowerBlocksDestroyed {
@@ -247,6 +252,10 @@ struct ContentView: View {
             .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d")], phases: .up) { press in
                 keysPressed.remove(press.characters)
                 return .handled
+            }
+            .onKeyPress(.space, phases: .down) { _ in
+                gameState.togglePause()
+                return gameState.hasPauseControl ? .handled : .ignored
             }
             .gesture(DragGesture()
                 .onChanged { value in
@@ -291,6 +300,15 @@ struct ContentView: View {
                     Text("$\(gameState.money)")
                     Text("HP: \(gameState.baseTowerHP)/\(gameState.baseTowerMaxHP)")
                         .foregroundColor(gameState.baseTowerHP <= 3 ? .red : .white)
+                    if gameState.isPaused {
+                        Text("⏸ PAUSED")
+                            .foregroundColor(.yellow)
+                            .fontWeight(.bold)
+                    } else if gameState.hasPauseControl && gameState.phase == .combat {
+                        Text("Space to pause")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.45))
+                    }
                     Divider().frame(height: 14)
                     Button("Stats") { showingStats = true }
                         .font(.caption)
@@ -315,22 +333,59 @@ struct ContentView: View {
                         Text("Sword ($\(gameState.costForTower(.sword)))").tag(TowerType?.some(.sword))
                         Text("Healer ($\(gameState.costForTower(.healer)))").tag(TowerType?.some(.healer))
                         Text("Fireball ($\(gameState.costForTower(.fireball)))").tag(TowerType?.some(.fireball))
+                        Text("Anti Air ($\(gameState.costForTower(.antiAir)))").tag(TowerType?.some(.antiAir))
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 640)
+                    .frame(width: 720)
 
                     Text(gameState.selectedTowerType == nil ? "Click cells to inspect or select a tower to place" : "Tap terrain cells to place towers")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
 
+                    let anyPending = gameState.pendingRingBonus
+                        || gameState.isSelectingTowerForSlowAura || gameState.pendingSlowAuraTower != nil
+                        || gameState.isSelectingTowerForDamageAura || gameState.pendingDamageAuraTower != nil
+                        || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
+                    HStack(spacing: 10) {
+                        Text("Inventory:")
+                            .font(.caption)
+                            .foregroundColor(.white)
+
+                        Button("Ring ×\(gameState.ringItemCount)") { gameState.activateRingItem() }
+                            .buttonStyle(.borderedProminent).tint(.green)
+                            .disabled(gameState.ringItemCount == 0 || anyPending)
+
+                        Button("Repair ×\(gameState.repairItemCount)") { gameState.useRepairItem() }
+                            .buttonStyle(.borderedProminent).tint(.mint)
+                            .disabled(gameState.repairItemCount == 0 || gameState.baseTowerHP >= gameState.baseTowerMaxHP)
+
+                        Button("Slow Aura ×\(gameState.slowAuraItemCount)") { gameState.activateSlowAuraItem() }
+                            .buttonStyle(.borderedProminent).tint(.cyan)
+                            .disabled(gameState.slowAuraItemCount == 0 || anyPending)
+
+                        Button("Dmg Aura ×\(gameState.damageAuraItemCount)") { gameState.activateDamageAuraItem() }
+                            .buttonStyle(.borderedProminent).tint(.orange)
+                            .disabled(gameState.damageAuraItemCount == 0 || anyPending)
+
+                        Button("Move Tower ×\(gameState.moveTowerItemCount)") { gameState.activateMoveTower() }
+                            .buttonStyle(.borderedProminent).tint(.yellow)
+                            .disabled(gameState.moveTowerItemCount == 0 || anyPending)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.55))
+                    .cornerRadius(8)
+
                     Button("Start Round") {
                         gameState.cancelPendingSlowAura()
-                        gameState.cancelPendingSellBonus()
+                        gameState.cancelPendingDamageAura()
                         gameState.cancelPendingRingBonus()
+                        gameState.cancelPendingMoveTower()
                         gameState.startRound()
                         showRoundOverMessage = false
                     }
                     .buttonStyle(.borderedProminent)
+
                 }
 
                 if gameState.phase == .combat {
@@ -388,9 +443,12 @@ struct ContentView: View {
                             let newCells = gameState.returnToPlacing()
                             showRoundOverMessage = false
                             if let renderer {
-                                // Add new terrain tile(s) to the scene
                                 for cell in newCells {
-                                    renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                                    if cell.type == .path || cell.type == .start {
+                                        renderer.addPathCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                                    } else {
+                                        renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                                    }
                                 }
                                 // Show indicators for any bonus tiles (including newly assigned ones)
                                 for cell in gameState.bonusCells {
@@ -405,23 +463,60 @@ struct ContentView: View {
             }
             .padding(.top, 16)
 
-            // Slow aura target pick prompt — center top banner
+            // Slow aura — select tower prompt
+            if gameState.isSelectingTowerForSlowAura {
+                VStack(spacing: 6) {
+                    Text("Slow Aura — Select a Tower")
+                        .font(.headline).foregroundColor(.cyan)
+                    Text("Click any placed tower to apply the slow aura to it.")
+                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingSlowAura() }
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
+                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
+            }
+
+            // Slow aura — pick target path tile
             if gameState.pendingSlowAuraTower != nil {
                 VStack(spacing: 6) {
                     Text("Slow Aura — Pick a Target")
-                        .font(.headline)
-                        .foregroundColor(.cyan)
+                        .font(.headline).foregroundColor(.cyan)
                     Text("Click any path tile to apply the slow effect there and to the tiles on either side.")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
+                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingSlowAura(); refreshSlowAuraIndicators() }
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
                 }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
+                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
+                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
+            }
+
+            // Damage aura — select tower prompt
+            if gameState.isSelectingTowerForDamageAura {
+                VStack(spacing: 6) {
+                    Text("Damage Aura — Select a Tower")
+                        .font(.headline).foregroundColor(.orange)
+                    Text("Click any placed tower to apply the damage aura to it.")
+                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingDamageAura() }
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
+                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
+            }
+
+            // Damage aura — pick target path tile
+            if gameState.pendingDamageAuraTower != nil {
+                VStack(spacing: 6) {
+                    Text("Damage Aura — Pick a Target")
+                        .font(.headline).foregroundColor(.orange)
+                    Text("Click any path tile to boost damage dealt to enemies there and the tiles on either side by 40%.")
+                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingDamageAura(); refreshDamageAuraIndicators() }
+                        .font(.caption).foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
+                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
             }
 
             // Ring bonus target pick prompt — center top banner
@@ -434,6 +529,9 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingRingBonus() }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .padding(12)
                 .background(.black.opacity(0.8))
@@ -443,16 +541,41 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
-            // Sell mode prompt — center top banner
-            if gameState.pendingSellBonus {
+            // Move tower — select tower prompt
+            if gameState.isSelectingTowerToMove {
                 VStack(spacing: 6) {
-                    Text("Resale Deed — Pick a Tower")
+                    Text("Move Tower — Select a Tower")
                         .font(.headline)
-                        .foregroundColor(.mint)
-                    Text("Click any tower to sell it and receive a full refund.")
+                        .foregroundColor(.yellow)
+                    Text("Click any placed tower to pick it up.")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingMoveTower() }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
+            // Move tower — pick destination prompt
+            if let movingTower = gameState.pendingMoveTower {
+                VStack(spacing: 6) {
+                    Text("Move Tower — Pick a Destination")
+                        .font(.headline)
+                        .foregroundColor(.yellow)
+                    Text("Click a valid terrain cell to place \(movingTower.type) tower.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingMoveTower() }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .padding(12)
                 .background(.black.opacity(0.8))
@@ -521,6 +644,42 @@ struct ContentView: View {
 
                     Button("Close") {
                         selectedAuraCell = nil
+                        if let renderer {
+                            let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                            renderer.updateSelection(deselected: deselected, selected: nil)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(12)
+                .background(.black.opacity(0.75))
+                .cornerRadius(10)
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 16)
+                .padding(.trailing, 16)
+            }
+
+            // Damage aura path cell dialog — right side
+            if selectedDamageAuraCell != nil {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Damage Aura")
+                        .font(.headline)
+                        .foregroundColor(.orange)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Divider().background(.white.opacity(0.3))
+
+                    Text("All damage dealt to enemies on this tile is boosted by 40% by a nearby tower's Damage Aura.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                    Button("Close") {
+                        selectedDamageAuraCell = nil
                         if let renderer {
                             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                             renderer.updateSelection(deselected: deselected, selected: nil)
@@ -921,6 +1080,17 @@ struct ContentView: View {
                     statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
                 }
             }
+        case .antiAir:
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Target", "Air only", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    statRow("Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                }
+            }
         }
     }
 
@@ -1031,6 +1201,7 @@ struct ContentView: View {
         case .sword: return "Sword"
         case .healer: return "Healer"
         case .fireball: return "Fireball"
+        case .antiAir:  return "Anti Air"
         }
     }
 
@@ -1040,6 +1211,15 @@ struct ContentView: View {
         for coord in gameState.slowAuraPathCoords {
             guard let cell = gameState.hexGrid.cell(at: coord) else { continue }
             renderer.showSlowAuraIndicator(at: coord, height: cell.height, spacing: gameState.spacing)
+        }
+    }
+
+    private func refreshDamageAuraIndicators() {
+        guard let renderer else { return }
+        renderer.removeAllDamageAuraIndicators()
+        for coord in gameState.damageAuraPathCoords {
+            guard let cell = gameState.hexGrid.cell(at: coord) else { continue }
+            renderer.showDamageAuraIndicator(at: coord, height: cell.height, spacing: gameState.spacing)
         }
     }
 
@@ -1073,15 +1253,42 @@ struct ContentView: View {
             return
         }
 
-        // Sell mode: next tower tap sells it for a full refund
-        if gameState.pendingSellBonus {
+        // Move tower — step 1: pick which tower to move
+        if gameState.isSelectingTowerToMove {
             if let tower = gameState.tower(at: coord) {
-                gameState.sellTower(tower)  // also clears pendingSellBonus
-                renderer.removeTower(id: tower.id)
+                gameState.selectTowerToMove(tower)
                 let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                 renderer.updateSelection(deselected: deselected, selected: nil)
             }
-            // Non-tower tap: stay in sell mode until a tower is picked
+            return
+        }
+
+        // Move tower — step 2: pick destination
+        if let movingTower = gameState.pendingMoveTower {
+            if gameState.applyMoveTower(to: coord) {
+                if let cell = gameState.hexGrid.cell(at: coord) {
+                    renderer.moveTowerEntity(id: movingTower.id, to: coord,
+                                            cellHeight: cell.height, spacing: gameState.spacing)
+                }
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
+            }
+            return
+        }
+
+        // Slow aura — step 1: select which tower to apply it to
+        if gameState.isSelectingTowerForSlowAura {
+            if let tower = gameState.tower(at: coord) {
+                gameState.selectTowerForSlowAura(tower)
+            }
+            return
+        }
+
+        // Damage aura — step 1: select which tower to apply it to
+        if gameState.isSelectingTowerForDamageAura {
+            if let tower = gameState.tower(at: coord) {
+                gameState.selectTowerForDamageAura(tower)
+            }
             return
         }
 
@@ -1094,7 +1301,7 @@ struct ContentView: View {
             return
         }
 
-        // If a slow aura tower is waiting for a target, let the user pick a path tile
+        // Slow aura — step 2: pick target path tile
         if gameState.pendingSlowAuraTower != nil {
             let cell = gameState.hexGrid.cell(at: coord)
             if cell?.type == .path || cell?.type == .start {
@@ -1104,15 +1311,28 @@ struct ContentView: View {
                 renderer.updateSelection(deselected: deselected, selected: nil)
                 return
             }
-            // Tapped a non-path tile — ignore until a valid pick is made
+            return
+        }
+
+        // Damage aura — step 2: pick target path tile
+        if gameState.pendingDamageAuraTower != nil {
+            let cell = gameState.hexGrid.cell(at: coord)
+            if cell?.type == .path || cell?.type == .start {
+                gameState.applyDamageAuraTarget(pathCoord: coord)
+                refreshDamageAuraIndicators()
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
+                return
+            }
             return
         }
 
         // Dismiss any open dialogs
-        if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil || selectedEnemy != nil {
+        if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil || selectedDamageAuraCell != nil || selectedEnemy != nil {
             selectedTower = nil
             selectedBonusCell = nil
             selectedAuraCell = nil
+            selectedDamageAuraCell = nil
             selectedEnemy = nil
             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
             renderer.updateSelection(deselected: deselected, selected: nil)
@@ -1158,6 +1378,16 @@ struct ContentView: View {
            (cell.type == .path || cell.type == .start),
            gameState.slowAuraPathCoords.contains(coord) {
             selectedAuraCell = cell
+            let (deselected, selected) = gameState.selectCell(at: coord)
+            renderer.updateSelection(deselected: deselected, selected: selected)
+            return
+        }
+
+        // Check if tapping a damage aura path tile — show the aura info dialog
+        if let cell = gameState.hexGrid.cell(at: coord),
+           (cell.type == .path || cell.type == .start),
+           gameState.damageAuraPathCoords.contains(coord) {
+            selectedDamageAuraCell = cell
             let (deselected, selected) = gameState.selectCell(at: coord)
             renderer.updateSelection(deselected: deselected, selected: selected)
             return
@@ -1271,6 +1501,7 @@ struct StatsView: View {
         case .superHopper:  return "S.Hop"
         case .hive:         return "Hive"
         case .mirroid:      return "Mirroid"
+        case .wisp:         return "Wisp"
         }
     }
 

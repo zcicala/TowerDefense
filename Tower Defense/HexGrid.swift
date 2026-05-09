@@ -118,6 +118,50 @@ class HexCell {
     }
 }
 
+// MARK: - Tower Type-Specific State
+
+struct LaserState {
+    var duration: Float
+    var dps: Float
+    var range: Int
+    var isFiring: Bool = false
+    var timeRemaining: Float = 0
+    var lockedTargetID: UUID? = nil
+}
+
+struct ConeState {
+    var duration: Float
+    var dps: Float              // 0 for ice
+    var isFiring: Bool = false
+    var timeRemaining: Float = 0
+    var targetCoord: HexCoord? = nil
+    var lockedTargetID: UUID? = nil
+}
+
+struct SwordState {
+    var swingDuration: Float
+    var isFiring: Bool = false
+    var timeRemaining: Float = 0
+    var stabTargetCoord: HexCoord? = nil
+    var swipeTargets: [(coord: HexCoord, angle: Float)] = []
+    var swipeStartAngle: Float = 0
+    var swipeEndAngle: Float = 0
+    var sweepProgress: Float = 0
+    var damagedCoords: Set<HexCoord> = []
+    var damageDealt: Bool = false
+}
+
+struct HealerState {
+    var charges: Int
+    var radius: Int
+}
+
+struct FireballState {
+    var splashRadius: Int
+    var burnDuration: Float
+    var burnDPS: Float
+}
+
 // MARK: - Tower
 
 enum TowerType {
@@ -130,6 +174,7 @@ enum TowerType {
     case healer
     case fireball
     case antiAir
+    case targeting
 }
 
 enum EnemyType: CaseIterable {
@@ -180,70 +225,41 @@ class Tower {
     var targetingMode: TargetingMode = .closest
     var level: Int = 1
     static let maxLevel = 6
-    var detectionRadius: Int       // hex steps to detect enemies
-    var fireRadius: Int            // hex steps projectile can reach
-    var projectileSpeed: Float     // world units per second (projectile tower only)
+    var detectionRadius: Int
+    var fireRadius: Int
+    var projectileSpeed: Float
     var damage: Float
-    var cooldown: Float            // seconds between shots
+    var cooldown: Float
     var cooldownRemaining: Float = 0
-    var currentYaw: Float = 0      // current turret facing angle (radians)
-    var targetYaw: Float = 0       // desired turret facing angle
-    var hasTarget: Bool = false     // whether the turret is tracking an enemy
-    let turretRotationSpeed: Float = 3.0 // radians per second
+    var currentYaw: Float = 0
+    var targetYaw: Float = 0
+    var hasTarget: Bool = false
+    let turretRotationSpeed: Float = 3.0
     var hitPoints: Int = 5
     let maxHitPoints: Int = 5
     var isInvulnerable: Bool = false
-    var hasSlowAura: Bool = false   // tower has slow aura bonus; slowedCoords stores the chosen tiles
-    var slowedCoords: Set<HexCoord> = []  // the 3 path tiles this tower slows
+    var hasSlowAura: Bool = false
+    var slowedCoords: Set<HexCoord> = []
     var hasDamageAura: Bool = false
-    var damageAuraCoords: Set<HexCoord> = []  // the 3 path tiles this tower boosts damage on
-    var hasMoneyDoubler: Bool = false    // kills by this tower earn 2× the normal reward
-    var moneySpent: Int = 0             // total money spent on this tower (placement + upgrades)
-    var totalKills: Int = 0             // enemies killed by this tower
-    var totalDamageDealt: Float = 0     // total damage dealt to enemies (not shields)
-    /// Max-level laser only: when set, prioritises this enemy type for targeting.
-    var priorityEnemyType: EnemyType? = nil
-    /// If non-empty, this tower only targets enemies of these types.
+    var damageAuraCoords: Set<HexCoord> = []
+    var hasMoneyDoubler: Bool = false
+    var moneySpent: Int = 0
+    var totalKills: Int = 0
+    var totalDamageDealt: Float = 0
     var targetTypeRestrictions: Set<EnemyType> = []
+    /// Set via a level-2+ Targeting Tower: this tower prioritises this enemy type when selecting targets.
+    var priorityEnemyType: EnemyType? = nil
 
-    // Healer-specific state
-    var healCharges: Int = 1      // remaining heal charges this round
-    var healRadius: Int = 1       // hex distance to reach damaged towers
-
-    // Laser-specific state
-    var beamDuration: Float        // how long the beam fires
-    var beamDamagePerSecond: Float // DPS to enemies in beam path
-    var beamRange: Int             // cells the beam extends
-    var isFiringBeam: Bool = false
-    var beamTimeRemaining: Float = 0
-    var beamTargetID: UUID?  // locked-on enemy ID while firing
-
-    // Fire-specific state
-    var fireDuration: Float        // how long the fire cone lasts
-    var fireDamagePerSecond: Float // DPS to enemies in affected cells
-    var isFiringCone: Bool = false
-    var fireTimeRemaining: Float = 0
-    var fireTargetCoord: HexCoord? // the cell the cone is aimed at
-
-    // Fireball-specific state
-    var splashRadius: Int = 0   // hex radius of AoE on impact
-
-    // Sword-specific state
-    var isFiringBlade: Bool = false
-    var bladeTimeRemaining: Float = 0
-    var bladeTargetCoord: HexCoord?                     // single-stab target
-    var bladeSwipeTargets: [(coord: HexCoord, angle: Float)] = []  // max-level swipe: coord + angle
-    var bladeSwipeStartAngle: Float = 0
-    var bladeSwipeEndAngle: Float = 0
-    var bladeSweepProgress: Float = 0                   // 0...1 over fireDuration
-    var bladeDamagedCoords: Set<HexCoord> = []          // coords already hit this swipe
-    var bladeDamageDealt: Bool = false                  // for single stab
+    // Type-specific state — only the relevant one is non-nil for a given tower
+    var laser: LaserState? = nil
+    var cone: ConeState? = nil       // fire and ice
+    var sword: SwordState? = nil
+    var healer: HealerState? = nil
+    var fireball: FireballState? = nil
 
     init(coord: HexCoord, type: TowerType = .projectile,
          detectionRadius: Int = 5, fireRadius: Int = 4,
-         projectileSpeed: Float = 6.0, damage: Float = 40, cooldown: Float = 1.0,
-         beamDuration: Float = 2.0, beamDamagePerSecond: Float = 1.0, beamRange: Int = 5,
-         fireDuration: Float = 3.0, fireDamagePerSecond: Float = 15.0) {
+         projectileSpeed: Float = 6.0, damage: Float = 40, cooldown: Float = 1.0) {
         self.coord = coord
         self.type = type
         self.detectionRadius = detectionRadius
@@ -251,66 +267,58 @@ class Tower {
         self.projectileSpeed = projectileSpeed
         self.damage = damage
         self.cooldown = cooldown
-        self.beamDuration = beamDuration
-        self.beamDamagePerSecond = beamDamagePerSecond
-        self.beamRange = beamRange
-        self.fireDuration = fireDuration
-        self.fireDamagePerSecond = fireDamagePerSecond
     }
 
     static func makeLaser(coord: HexCoord) -> Tower {
-        Tower(coord: coord, type: .laser,
-              detectionRadius: 7, fireRadius: 6,
-              projectileSpeed: 0, damage: 0, cooldown: 3.0,
-              beamDuration: 3.0, beamDamagePerSecond: 60, beamRange: 6)
+        let t = Tower(coord: coord, type: .laser,
+                      detectionRadius: 7, fireRadius: 6,
+                      projectileSpeed: 0, damage: 0, cooldown: 3.0)
+        t.laser = LaserState(duration: 3.0, dps: 60, range: 6)
+        return t
     }
 
     static func makeFire(coord: HexCoord) -> Tower {
-        Tower(coord: coord, type: .fire,
-              detectionRadius: 2, fireRadius: 1,
-              projectileSpeed: 0, damage: 0, cooldown: 0.5,
-              fireDuration: 3.5, fireDamagePerSecond: 60.0)
+        let t = Tower(coord: coord, type: .fire,
+                      detectionRadius: 2, fireRadius: 1,
+                      projectileSpeed: 0, damage: 0, cooldown: 0.5)
+        t.cone = ConeState(duration: 3.5, dps: 60.0)
+        return t
     }
 
     static func makeIce(coord: HexCoord) -> Tower {
-        Tower(coord: coord, type: .ice,
-              detectionRadius: 2, fireRadius: 1,
-              projectileSpeed: 0, damage: 0, cooldown: 2.0,
-              fireDuration: 3.0, fireDamagePerSecond: 0)
+        let t = Tower(coord: coord, type: .ice,
+                      detectionRadius: 2, fireRadius: 1,
+                      projectileSpeed: 0, damage: 0, cooldown: 2.0)
+        t.cone = ConeState(duration: 3.0, dps: 0)
+        return t
     }
 
     static func makeSword(coord: HexCoord) -> Tower {
-        Tower(coord: coord, type: .sword,
-              detectionRadius: 1, fireRadius: 1,
-              projectileSpeed: 0, damage: 90, cooldown: 0.84,
-              beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
-              fireDuration: 0.28, fireDamagePerSecond: 0)
+        let t = Tower(coord: coord, type: .sword,
+                      detectionRadius: 1, fireRadius: 1,
+                      projectileSpeed: 0, damage: 90, cooldown: 0.84)
+        t.sword = SwordState(swingDuration: 0.28)
+        return t
     }
 
     static func makeBowler(coord: HexCoord) -> Tower {
-        Tower(coord: coord, type: .bowler,
-              detectionRadius: 5, fireRadius: 5,
-              projectileSpeed: 0, damage: 40, cooldown: 4.0,
-              beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
-              fireDuration: 0, fireDamagePerSecond: 0)
+        return Tower(coord: coord, type: .bowler,
+                     detectionRadius: 5, fireRadius: 5,
+                     projectileSpeed: 0, damage: 40, cooldown: 4.0)
     }
 
     static func makeFireball(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .fireball,
                       detectionRadius: 5, fireRadius: 5,
-                      projectileSpeed: 5.0, damage: 100, cooldown: 2.5,
-                      beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
-                      fireDuration: 2.0, fireDamagePerSecond: 40.0)
-        t.splashRadius = 1
+                      projectileSpeed: 5.0, damage: 100, cooldown: 2.5)
+        t.fireball = FireballState(splashRadius: 1, burnDuration: 2.0, burnDPS: 40.0)
         return t
     }
 
     static func makeAntiAir(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .antiAir,
                       detectionRadius: 9, fireRadius: 9,
-                      projectileSpeed: 5.5, damage: 260, cooldown: 3.5,
-                      beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
-                      fireDuration: 0, fireDamagePerSecond: 0)
+                      projectileSpeed: 5.5, damage: 260, cooldown: 3.5)
         t.targetTypeRestrictions = [.hive, .wisp]
         return t
     }
@@ -318,12 +326,15 @@ class Tower {
     static func makeHealer(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .healer,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 0, cooldown: 5.0,
-                      beamDuration: 0, beamDamagePerSecond: 0, beamRange: 0,
-                      fireDuration: 0, fireDamagePerSecond: 0)
-        t.healCharges = 1
-        t.healRadius = 1
+                      projectileSpeed: 0, damage: 0, cooldown: 5.0)
+        t.healer = HealerState(charges: 1, radius: 1)
         return t
+    }
+
+    static func makeTargeting(coord: HexCoord) -> Tower {
+        return Tower(coord: coord, type: .targeting,
+                     detectionRadius: 3, fireRadius: 0,
+                     projectileSpeed: 0, damage: 0, cooldown: 999)
     }
 
     var canUpgrade: Bool { level < Tower.maxLevel }
@@ -333,14 +344,15 @@ class Tower {
         let base: Int
         switch type {
         case .projectile: base = 22
-        case .laser: base = 33
-        case .fire: base = 28
-        case .ice: base = 44
-        case .bowler: base = 20
-        case .sword: base = 18
-        case .healer: base = 30
-        case .fireball: base = 53
-        case .antiAir:  base = 35
+        case .laser:      base = 33
+        case .fire:       base = 28
+        case .ice:        base = 44
+        case .bowler:     base = 20
+        case .sword:      base = 18
+        case .healer:     base = 30
+        case .fireball:   base = 53
+        case .antiAir:    base = 35
+        case .targeting:  base = 25
         }
         return base * level
     }
@@ -356,15 +368,14 @@ class Tower {
             damage *= boost
             cooldown *= 0.88
         case .laser:
-            beamDamagePerSecond *= boost
+            laser!.dps *= boost
             cooldown *= 0.80
-            // Max level bonus: target priority targeting unlocked (priorityEnemyType becomes available)
         case .fire:
-            fireDamagePerSecond *= boost
-            fireDuration *= 1.15
+            cone!.dps *= boost
+            cone!.duration *= 1.15
             cooldown *= 0.88
         case .ice:
-            fireDuration *= 1.2
+            cone!.duration *= 1.2
             cooldown *= 0.82
         case .bowler:
             damage *= boost
@@ -373,18 +384,14 @@ class Tower {
             damage *= boost
             cooldown *= 0.88
         case .healer:
-            healCharges = level  // charges equal to new level
+            healer!.charges = level
             cooldown *= 0.90
-            if level == Tower.maxLevel {
-                healRadius = 2
-            }
+            if level == Tower.maxLevel { healer!.radius = 2 }
         case .fireball:
             damage *= boost
-            fireDamagePerSecond *= boost
+            fireball!.burnDPS *= boost
             cooldown *= 0.88
-            if level == Tower.maxLevel {
-                splashRadius += 1
-            }
+            if level == Tower.maxLevel { fireball!.splashRadius += 1 }
         case .antiAir:
             damage *= boost
             cooldown *= 0.88
@@ -392,6 +399,8 @@ class Tower {
                 detectionRadius += 1
                 fireRadius += 1
             }
+        case .targeting:
+            if level == 3 { detectionRadius += 1 }
         }
     }
 
@@ -399,14 +408,20 @@ class Tower {
     var upgradeDescription: String {
         switch type {
         case .projectile: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +AoE Shots" : "+33% dmg, -12% cooldown"
-        case .laser: return level == Tower.maxLevel - 1 ? "+33% DPS, -20% cooldown, +Target Priority" : "+33% DPS, -20% cooldown"
-        case .fire: return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
-        case .ice: return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +Double Slow" : "+20% duration, -18% cooldown"
-        case .bowler: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
-        case .sword: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
-        case .healer: return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
-        case .fireball: return level == Tower.maxLevel - 1 ? "+33% dmg, +33% burn DPS, -12% cooldown, +Splash Radius" : "+33% dmg, +33% burn DPS, -12% cooldown"
-        case .antiAir:  return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
+        case .laser:      return "+33% DPS, -20% cooldown"
+        case .fire:       return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
+        case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +Double Slow" : "+20% duration, -18% cooldown"
+        case .bowler:     return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
+        case .sword:      return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
+        case .healer:     return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
+        case .fireball:   return level == Tower.maxLevel - 1 ? "+33% dmg, +33% burn DPS, -12% cooldown, +Splash Radius" : "+33% dmg, +33% burn DPS, -12% cooldown"
+        case .antiAir:    return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
+        case .targeting:
+            switch level {
+            case 1: return "Unlocks priority enemy type targeting in radius"
+            case 2: return "+1 radius, smart filter (skip immune enemies)"
+            default: return "TBD"
+            }
         }
     }
 }

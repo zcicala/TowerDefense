@@ -113,19 +113,22 @@ extension GameState {
 
         // Update tower aiming and firing
         for tower in towers {
+            if tower.type == .targeting { continue }
+
             tower.cooldownRemaining = max(0, tower.cooldownRemaining - deltaTime)
 
             // Sword: stabs to an adjacent path tile when an enemy is on it
             if tower.type == .sword {
-                if tower.isFiringBlade {
-                    tower.bladeTimeRemaining -= deltaTime
-                    tower.bladeSweepProgress = 1.0 - max(0, tower.bladeTimeRemaining / tower.fireDuration)
+                var s = tower.sword!
+                if s.isFiring {
+                    s.timeRemaining -= deltaTime
+                    s.sweepProgress = 1.0 - max(0, s.timeRemaining / s.swingDuration)
 
                     if tower.level == Tower.maxLevel {
                         // Apply damage as sweep angle passes each target
-                        let currentAngle = tower.bladeSwipeStartAngle + (tower.bladeSwipeEndAngle - tower.bladeSwipeStartAngle) * tower.bladeSweepProgress
-                        for target in tower.bladeSwipeTargets where !tower.bladeDamagedCoords.contains(target.coord) {
-                            let angleDiff = tower.bladeSwipeEndAngle > tower.bladeSwipeStartAngle
+                        let currentAngle = s.swipeStartAngle + (s.swipeEndAngle - s.swipeStartAngle) * s.sweepProgress
+                        for target in s.swipeTargets where !s.damagedCoords.contains(target.coord) {
+                            let angleDiff = s.swipeEndAngle > s.swipeStartAngle
                                 ? target.angle <= currentAngle
                                 : target.angle >= currentAngle
                             if angleDiff {
@@ -135,28 +138,27 @@ extension GameState {
                                 if let enemy = victim {
                                     dealDamage(tower.damage, to: enemy, tower: tower, events: &events)
                                 }
-                                tower.bladeDamagedCoords.insert(target.coord)
+                                s.damagedCoords.insert(target.coord)
                             }
                         }
+                        tower.sword = s
                         events.bladesUpdated.append(tower)
-                    } else if !tower.bladeDamageDealt, let target = tower.bladeTargetCoord {
+                    } else if !s.damageDealt, let target = s.stabTargetCoord {
                         // Single stab: deal damage once
                         let victim = enemies
                             .filter { $0.active && enemyNearestCoord($0) == target }
                             .max { enemyPathProgress($0) < enemyPathProgress($1) }
                         if let enemy = victim { dealDamage(tower.damage, to: enemy, tower: tower, events: &events) }
-                        tower.bladeDamageDealt = true
+                        s.damageDealt = true
+                        tower.sword = s
                     }
 
-                    if tower.bladeTimeRemaining <= 0 {
-                        tower.isFiringBlade = false
-                        tower.bladeTargetCoord = nil
-                        tower.bladeSwipeTargets = []
-                        tower.bladeDamagedCoords = []
-                        tower.bladeDamageDealt = false
-                        tower.bladeSweepProgress = 0
+                    if s.timeRemaining <= 0 {
+                        tower.sword = SwordState(swingDuration: s.swingDuration)
                         tower.cooldownRemaining = tower.cooldown
                         events.bladesEnded.append(tower)
+                    } else {
+                        tower.sword = s
                     }
                 } else if tower.cooldownRemaining <= 0 {
                     let adjacent = hexGrid.neighbors(of: tower.coord)
@@ -172,15 +174,15 @@ extension GameState {
                         }.sorted { $0.angle < $1.angle }
 
                         if !swipeTargets.isEmpty {
-                            // Add padding so blade starts before and ends after outermost cells
                             let pad: Float = 0.25
-                            tower.bladeSwipeStartAngle = swipeTargets.first!.angle - pad
-                            tower.bladeSwipeEndAngle   = swipeTargets.last!.angle + pad
-                            tower.isFiringBlade = true
-                            tower.bladeTimeRemaining = tower.fireDuration
-                            tower.bladeSwipeTargets = swipeTargets
-                            tower.bladeSweepProgress = 0
-                            tower.bladeDamagedCoords = []
+                            tower.sword = SwordState(
+                                swingDuration: s.swingDuration,
+                                isFiring: true,
+                                timeRemaining: s.swingDuration,
+                                swipeTargets: swipeTargets,
+                                swipeStartAngle: swipeTargets.first!.angle - pad,
+                                swipeEndAngle: swipeTargets.last!.angle + pad
+                            )
                             events.bladesStarted.append(tower)
                         }
                     } else {
@@ -188,11 +190,12 @@ extension GameState {
                             enemies.contains { $0.active && enemyNearestCoord($0) == cell.coord }
                         }
                         if let targetCell = target {
-                            tower.isFiringBlade = true
-                            tower.bladeTimeRemaining = tower.fireDuration
-                            tower.bladeTargetCoord = targetCell.coord
-                            tower.bladeSwipeTargets = []
-                            tower.bladeDamageDealt = false
+                            tower.sword = SwordState(
+                                swingDuration: s.swingDuration,
+                                isFiring: true,
+                                timeRemaining: s.swingDuration,
+                                stabTargetCoord: targetCell.coord
+                            )
                             events.bladesStarted.append(tower)
                         }
                     }
@@ -227,15 +230,15 @@ extension GameState {
 
             // Healer: automatically heals a nearby damaged tower each cooldown
             if tower.type == .healer {
-                if tower.cooldownRemaining <= 0 && tower.healCharges > 0 {
+                if tower.cooldownRemaining <= 0 && tower.healer!.charges > 0 {
                     let target = towers.first {
                         $0.id != tower.id &&
                         $0.hitPoints < $0.maxHitPoints &&
-                        $0.coord.distance(to: tower.coord) <= tower.healRadius
+                        $0.coord.distance(to: tower.coord) <= tower.healer!.radius
                     }
                     if let target {
                         target.hitPoints = min(target.hitPoints + 1, target.maxHitPoints)
-                        tower.healCharges -= 1
+                        tower.healer!.charges -= 1
                         tower.cooldownRemaining = tower.cooldown
                         events.healedTowers.append(target)
                     }
@@ -244,24 +247,23 @@ extension GameState {
             }
 
             // Fire/Ice cone: track enemies and apply effects
-            if (tower.type == .fire || tower.type == .ice) && tower.isFiringCone {
-                tower.fireTimeRemaining -= deltaTime
-                if tower.fireTimeRemaining <= 0 {
-                    tower.isFiringCone = false
-                    tower.fireTargetCoord = nil
-                    tower.beamTargetID = nil
+            if (tower.type == .fire || tower.type == .ice) && tower.cone!.isFiring {
+                tower.cone!.timeRemaining -= deltaTime
+                if tower.cone!.timeRemaining <= 0 {
+                    tower.cone!.isFiring = false
+                    tower.cone!.targetCoord = nil
+                    tower.cone!.lockedTargetID = nil
                     tower.cooldownRemaining = tower.cooldown
                     events.conesEnded.append(tower)
                     continue
                 } else {
                     let coneCells = fireConeCoords(for: tower)
                     if tower.type == .fire {
-                        applyAreaDamage(cells: coneCells, dps: tower.fireDamagePerSecond, deltaTime: deltaTime, tower: tower, events: &events)
-                        // Max-level fire tower applies burning DOT
+                        applyAreaDamage(cells: coneCells, dps: tower.cone!.dps, deltaTime: deltaTime, tower: tower, events: &events)
                         if tower.level == Tower.maxLevel {
                             applyBurning(cells: coneCells)
                         }
-                    } else if tower.type == .ice, let target = tower.fireTargetCoord {
+                    } else if tower.type == .ice, let target = tower.cone!.targetCoord {
                         applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
                     }
                     // Falls through to enemy detection and rotation below
@@ -272,8 +274,9 @@ extension GameState {
             let towerPos2D = tower.coord.worldPosition(spacing: spacing)
             let closestEnemy: Enemy?
 
-            let isFiring = tower.isFiringCone || tower.isFiringBeam
-            if isFiring, let lockedID = tower.beamTargetID,
+            let isFiring = tower.cone?.isFiring == true || tower.laser?.isFiring == true
+            let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID
+            if isFiring, let lockedID,
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
                 closestEnemy = locked
             } else {
@@ -304,33 +307,30 @@ extension GameState {
             }
 
             // Update fire/ice cone target tracking locked enemy
-            if (tower.type == .fire || tower.type == .ice) && tower.isFiringCone {
+            if (tower.type == .fire || tower.type == .ice) && tower.cone!.isFiring {
                 if let target = closestEnemy, let coord = enemyNearestCoord(target) {
-                    tower.fireTargetCoord = coord
+                    tower.cone!.targetCoord = coord
                 }
                 events.conesUpdated.append(tower)
                 continue
             }
 
             // Laser beam: lock onto target, track it, end on kill/loss/timeout
-            if tower.type == .laser && tower.isFiringBeam {
-                tower.beamTimeRemaining -= deltaTime
+            if tower.type == .laser && tower.laser!.isFiring {
+                tower.laser!.timeRemaining -= deltaTime
 
-                // Check if locked target is still valid
-                let lockedTarget = tower.beamTargetID.flatMap { id in
+                let lockedTarget = tower.laser!.lockedTargetID.flatMap { id in
                     enemies.first(where: { $0.id == id && $0.active })
                 }
 
-                if tower.beamTimeRemaining <= 0 || lockedTarget == nil {
-                    // Beam ends: timeout or target lost/killed
-                    tower.isFiringBeam = false
-                    tower.beamTimeRemaining = 0
-                    tower.beamTargetID = nil
+                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil {
+                    tower.laser!.isFiring = false
+                    tower.laser!.timeRemaining = 0
+                    tower.laser!.lockedTargetID = nil
                     tower.cooldownRemaining = tower.cooldown
                     tower.hasTarget = false
                     events.beamsEnded.append(tower)
                 } else {
-                    // Track the locked target for turret aiming
                     if let target = lockedTarget, let targetPos = enemyWorldPosition(target) {
                         let towerPos2D = tower.coord.worldPosition(spacing: spacing)
                         let dx = targetPos.x - towerPos2D.x
@@ -341,14 +341,13 @@ extension GameState {
 
                     let killCountBefore = events.killedEnemies.count
                     if let target = lockedTarget {
-                        _ = dealDamage(tower.beamDamagePerSecond * deltaTime, to: target, tower: tower, events: &events)
+                        _ = dealDamage(tower.laser!.dps * deltaTime, to: target, tower: tower, events: &events)
                     }
 
                     if events.killedEnemies.count > killCountBefore {
-                        // Target killed — end beam, enter cooldown
-                        tower.isFiringBeam = false
-                        tower.beamTimeRemaining = 0
-                        tower.beamTargetID = nil
+                        tower.laser!.isFiring = false
+                        tower.laser!.timeRemaining = 0
+                        tower.laser!.lockedTargetID = nil
                         tower.cooldownRemaining = tower.cooldown
                         tower.hasTarget = false
                         events.beamsEnded.append(tower)
@@ -374,17 +373,16 @@ extension GameState {
 
             if tower.cooldownRemaining <= 0 && isAimed {
                 if tower.type == .laser {
-                    tower.isFiringBeam = true
-                    tower.beamTimeRemaining = tower.beamDuration
-                    tower.beamTargetID = closestEnemy?.id
+                    tower.laser!.isFiring = true
+                    tower.laser!.timeRemaining = tower.laser!.duration
+                    tower.laser!.lockedTargetID = closestEnemy?.id
                     events.beamsStarted.append(tower)
                 } else if tower.type == .fire || tower.type == .ice {
-                    // Find the target enemy's nearest coord for the cone center
                     if let target = closestEnemy, let coord = enemyNearestCoord(target) {
-                        tower.isFiringCone = true
-                        tower.fireTimeRemaining = tower.fireDuration
-                        tower.fireTargetCoord = coord
-                        tower.beamTargetID = target.id
+                        tower.cone!.isFiring = true
+                        tower.cone!.timeRemaining = tower.cone!.duration
+                        tower.cone!.targetCoord = coord
+                        tower.cone!.lockedTargetID = target.id
                         events.conesStarted.append(tower)
                     }
                 } else {
@@ -490,9 +488,8 @@ extension GameState {
             if let cell = hexGrid.cell(at: tower.coord) {
                 cell.hasTower = false
             }
-            // Stop any active effects
-            if tower.isFiringBeam { events.beamsEnded.append(tower) }
-            if tower.isFiringCone { events.conesEnded.append(tower) }
+            if tower.laser?.isFiring == true { events.beamsEnded.append(tower) }
+            if tower.cone?.isFiring == true { events.conesEnded.append(tower) }
         }
         towers.removeAll { t in events.destroyedTowers.contains(where: { $0.id == t.id }) }
 
@@ -509,7 +506,7 @@ extension GameState {
             phase = .roundOver
             events.roundOver = true
             for tower in towers where tower.type == .healer {
-                tower.healCharges = tower.level
+                tower.healer!.charges = tower.level
             }
         }
 
@@ -863,52 +860,39 @@ extension GameState {
         return -steps
     }
 
-    /// Selects the best enemy target for a tower based on its targeting mode.
+    /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
     private func selectTarget(for tower: Tower) -> Enemy? {
-        // Gather enemies in detection radius
+        let tLevel = targetingLevel(for: tower)
+
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
+            // Level 3+: skip enemies this tower type cannot damage
+            if tLevel >= 3 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             let dist = tower.coord.distance(to: enemyCoord)
-            if dist <= tower.detectionRadius {
-                candidates.append((enemy, dist))
-            }
+            if dist <= tower.detectionRadius { candidates.append((enemy, dist)) }
         }
         guard !candidates.isEmpty else { return nil }
 
-        // Laser max-level: if a priority enemy type is set, target it first.
-        // If multiple match, the normal targeting mode breaks the tie.
-        // If none are in range, fall through to standard logic.
-        if let priorityType = tower.priorityEnemyType {
+        let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
+
+        // Level 2+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 2, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
-            if !priorityMatches.isEmpty {
-                switch tower.targetingMode {
-                case .closest:
-                    return priorityMatches.min(by: { $0.dist < $1.dist })?.enemy
-                case .furthestAhead:
-                    return priorityMatches.max(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
-                case .furthestBehind:
-                    return priorityMatches.min(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
-                case .mostHealth:
-                    return priorityMatches.max(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
-                case .leastHealth:
-                    return priorityMatches.min(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
-                }
-            }
+            if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
 
-        switch tower.targetingMode {
-        case .closest:
-            return candidates.min(by: { $0.dist < $1.dist })?.enemy
-        case .furthestAhead:
-            return candidates.max(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
-        case .furthestBehind:
-            return candidates.min(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
-        case .mostHealth:
-            return candidates.max(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
-        case .leastHealth:
-            return candidates.min(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
+        return applyTargetingMode(mode, to: candidates)
+    }
+
+    private func applyTargetingMode(_ mode: TargetingMode, to candidates: [(enemy: Enemy, dist: Int)]) -> Enemy? {
+        switch mode {
+        case .closest:       return candidates.min(by: { $0.dist < $1.dist })?.enemy
+        case .furthestAhead: return candidates.max(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
+        case .furthestBehind:return candidates.min(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
+        case .mostHealth:    return candidates.max(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
+        case .leastHealth:   return candidates.min(by: { $0.enemy.hitPoints < $1.enemy.hitPoints })?.enemy
         }
     }
 
@@ -1007,9 +991,9 @@ extension GameState {
                 isAoE: !isFireball && tower.level == Tower.maxLevel,
                 sourceTowerID: tower.id,
                 burnOnImpact: isFireball,
-                impactBurnDPS: isFireball ? tower.fireDamagePerSecond : 0,
-                impactBurnDuration: isFireball ? tower.fireDuration : 0,
-                splashRadius: isFireball ? tower.splashRadius : 0,
+                impactBurnDPS: isFireball ? tower.fireball!.burnDPS : 0,
+                impactBurnDuration: isFireball ? tower.fireball!.burnDuration : 0,
+                splashRadius: isFireball ? tower.fireball!.splashRadius : 0,
                 arcHeight: isAntiAir ? 0.0 : 1.0
             )
         }

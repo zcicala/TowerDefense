@@ -249,6 +249,7 @@ class SceneRenderer {
         case .healer:     (br, bg, bb, tr, tg, tb) = (0.3, 0.6, 0.4, 0.9, 1.0, 0.9)
         case .fireball:   (br, bg, bb, tr, tg, tb) = (0.6, 0.2, 0.05, 1.0, 0.45, 0.0)
         case .antiAir:    (br, bg, bb, tr, tg, tb) = (0.2, 0.35, 0.15, 0.75, 0.78, 0.8)
+        case .targeting:  (br, bg, bb, tr, tg, tb) = (0.35, 0.2, 0.55, 0.65, 0.4, 0.9)
         }
 
         let root = Entity()
@@ -333,7 +334,8 @@ class SceneRenderer {
         case .sword:  tint = .init(red: 0.35, green: 0.45, blue: 0.35, alpha: 1)
         case .healer: tint = .init(red: 0.3, green: 0.6, blue: 0.4, alpha: 1)  // soft green base
         case .fireball: tint = .init(red: 0.6, green: 0.2, blue: 0.05, alpha: 1)
-        case .antiAir:  tint = .init(red: 0.2, green: 0.35, blue: 0.15, alpha: 1)
+        case .antiAir:   tint = .init(red: 0.2, green: 0.35, blue: 0.15, alpha: 1)
+        case .targeting: tint = .init(red: 0.35, green: 0.2, blue: 0.55, alpha: 1)
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
@@ -376,7 +378,8 @@ class SceneRenderer {
         case .sword:  turretTint = .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1)  // silver top
         case .healer: turretTint = .init(red: 0.9, green: 1.0, blue: 0.9, alpha: 1)    // pale green top
         case .fireball: turretTint = .init(red: 1.0, green: 0.45, blue: 0.0, alpha: 1)
-        case .antiAir:  turretTint = .init(red: 0.75, green: 0.78, blue: 0.8, alpha: 1)
+        case .antiAir:   turretTint = .init(red: 0.75, green: 0.78, blue: 0.8, alpha: 1)
+        case .targeting: turretTint = .init(red: 0.65, green: 0.4, blue: 0.9, alpha: 1)
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
 

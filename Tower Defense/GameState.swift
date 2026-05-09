@@ -57,10 +57,11 @@ class GameState {
     }
 
     var allTowerStats: [TowerTypeStats] {
-        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer, .fireball, .antiAir]
+        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer, .fireball, .antiAir, .targeting]
         let names: [TowerType: String] = [
             .projectile: "Projectile", .laser: "Laser", .fire: "Fire", .ice: "Ice",
-            .bowler: "Bowler", .sword: "Sword", .healer: "Healer", .fireball: "Fireball", .antiAir: "Anti Air"
+            .bowler: "Bowler", .sword: "Sword", .healer: "Healer", .fireball: "Fireball",
+            .antiAir: "Anti Air", .targeting: "Targeting"
         ]
         return allTypes.map { type in
             let built  = statsTowerBuilt[type, default: 0]
@@ -90,7 +91,8 @@ class GameState {
         case .sword: base = 25
         case .healer: base = 150
         case .fireball: base = 300
-        case .antiAir:  base = 150
+        case .antiAir:   base = 150
+        case .targeting: base = 75
         }
         let count = towerPlacedCount[type, default: 0]
         return Int(Double(base) * pow(1.1, Double(count)))
@@ -109,6 +111,15 @@ class GameState {
                       detectionRadius: 4, fireRadius: 4,
                       projectileSpeed: 6.0, damage: 50, cooldown: 1.5)
         baseSentinelTower = t
+    }
+
+    /// Returns the level of the highest-level Targeting Tower whose radius covers the given tower.
+    /// Returns 0 if no Targeting Tower is in range.
+    func targetingLevel(for tower: Tower) -> Int {
+        towers
+            .filter { $0.type == .targeting && $0.id != tower.id }
+            .compactMap { t in t.coord.distance(to: tower.coord) <= t.detectionRadius ? t.level : nil }
+            .max() ?? 0
     }
 
     // MARK: - Enemies

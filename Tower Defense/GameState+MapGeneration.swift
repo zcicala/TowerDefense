@@ -7,6 +7,7 @@ extension GameState {
     func generateMap() {
         generatePath()
         ringItemCount = 1
+        moveTowerItemCount = 1
     }
 
     /// Adds a ring of terrain tiles around the base tower (end cell) as the starting board.
@@ -126,9 +127,6 @@ extension GameState {
             terrainHeight = avg * Float.random(in: 0.80...1.20)
         }
         let cell = HexCell(coord: coord, height: terrainHeight, type: .terrain)
-        if let end = endCell, coord.distance(to: end.coord) == 1 {
-            cell.bonusType = BonusType.allCases.randomElement()
-        }
         hexGrid.addCell(cell)
         return cell
     }
@@ -201,6 +199,8 @@ extension GameState {
             tower = Tower.makeFireball(coord: coord)
         case .antiAir:
             tower = Tower.makeAntiAir(coord: coord)
+        case .targeting:
+            tower = Tower.makeTargeting(coord: coord)
         }
         tower.moneySpent = cost
 
@@ -230,7 +230,7 @@ extension GameState {
             case .rangeExtender:
                 tower.detectionRadius += 1
                 tower.fireRadius += 1
-                if tower.type == .laser { tower.beamRange += 1 }
+                if tower.type == .laser { tower.laser?.range += 1 }
             case .pauseControl:
                 hasPauseControl = true
             }
@@ -454,6 +454,7 @@ extension GameState {
         case .healer:     radius = 1
         case .fireball:   radius = 4
         case .antiAir:    radius = 9
+        case .targeting:  radius = 3
         }
         if hexGrid.cell(at: coord)?.bonusType == .rangeExtender { radius += 1 }
         return hexGrid.cells.values.filter { coord.distance(to: $0.coord) <= radius }
@@ -473,18 +474,20 @@ extension GameState {
         projectiles.removeAll()
         bowlingBalls.removeAll()
         for tower in towers {
-            tower.isFiringBeam = false
-            tower.beamTimeRemaining = 0
-            tower.beamTargetID = nil
-            tower.isFiringCone = false
-            tower.fireTimeRemaining = 0
-            tower.fireTargetCoord = nil
-            tower.isFiringBlade = false
-            tower.bladeTimeRemaining = 0
-            tower.bladeTargetCoord = nil
-            tower.bladeSwipeTargets = []
-            tower.bladeDamagedCoords = []
-            tower.bladeSweepProgress = 0
+            if tower.laser?.isFiring == true {
+                tower.laser!.isFiring = false
+                tower.laser!.timeRemaining = 0
+                tower.laser!.lockedTargetID = nil
+            }
+            if tower.cone?.isFiring == true {
+                tower.cone!.isFiring = false
+                tower.cone!.timeRemaining = 0
+                tower.cone!.targetCoord = nil
+                tower.cone!.lockedTargetID = nil
+            }
+            if tower.sword?.isFiring == true {
+                tower.sword = SwordState(swingDuration: tower.sword!.swingDuration)
+            }
         }
         // Add one terrain tile adjacent to the path each round
         var newCells: [HexCell] = []
@@ -589,7 +592,7 @@ extension GameState {
         repairItemCount = 0
         slowAuraItemCount = 0
         damageAuraItemCount = 0
-        moveTowerItemCount = 0
+        moveTowerItemCount = 1
         isSelectingTowerForSlowAura = false
         isSelectingTowerForDamageAura = false
         isSelectingTowerToMove = false

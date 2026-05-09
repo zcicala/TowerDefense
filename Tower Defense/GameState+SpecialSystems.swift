@@ -7,7 +7,7 @@ extension GameState {
 
     /// Returns the target cell and all its neighbors as the fire cone area.
     func fireConeCoords(for tower: Tower) -> [HexCoord] {
-        guard let target = tower.fireTargetCoord else { return [] }
+        guard let target = tower.cone?.targetCoord else { return [] }
         var coords = [target]
         for dir in 0..<6 {
             coords.append(target.neighbor(dir))
@@ -32,7 +32,7 @@ extension GameState {
 
     /// World position of the fire cone's target cell center.
     func fireTargetPosition(for tower: Tower) -> SIMD3<Float>? {
-        guard let targetCoord = tower.fireTargetCoord,
+        guard let targetCoord = tower.cone?.targetCoord,
               let cell = hexGrid.cell(at: targetCoord) else { return nil }
         let pos = targetCoord.worldPosition(spacing: spacing)
         return SIMD3<Float>(pos.x, cell.height + 0.05, pos.y)
@@ -100,15 +100,14 @@ extension GameState {
         let bladeY = towerCell.height + 0.45
         let origin = SIMD3<Float>(towerPos.x, bladeY, towerPos.y)
 
-        if tower.level == Tower.maxLevel && tower.isFiringBlade {
-            // Single blade at current sweep angle
-            let currentAngle = tower.bladeSwipeStartAngle + (tower.bladeSwipeEndAngle - tower.bladeSwipeStartAngle) * tower.bladeSweepProgress
-            // Scale: extend in first 15%, full during middle, retract in last 15%
+        guard let s = tower.sword else { return [] }
+        if tower.level == Tower.maxLevel && s.isFiring {
+            let currentAngle = s.swipeStartAngle + (s.swipeEndAngle - s.swipeStartAngle) * s.sweepProgress
             let scaleT: Float
-            if tower.bladeSweepProgress < 0.15 {
-                scaleT = tower.bladeSweepProgress / 0.15
-            } else if tower.bladeSweepProgress > 0.85 {
-                scaleT = (1.0 - tower.bladeSweepProgress) / 0.15
+            if s.sweepProgress < 0.15 {
+                scaleT = s.sweepProgress / 0.15
+            } else if s.sweepProgress > 0.85 {
+                scaleT = (1.0 - s.sweepProgress) / 0.15
             } else {
                 scaleT = 1.0
             }
@@ -119,7 +118,7 @@ extension GameState {
                 towerPos.y + cos(currentAngle) * len
             )
             return [(origin, tip)]
-        } else if let coord = tower.bladeTargetCoord {
+        } else if let coord = s.stabTargetCoord {
             guard let cell = hexGrid.cell(at: coord) else { return [] }
             let pos = coord.worldPosition(spacing: spacing)
             let dx = pos.x - towerPos.x
@@ -160,7 +159,7 @@ extension GameState {
         var coords: [HexCoord] = []
         let towerPos = tower.coord.worldPosition(spacing: spacing)
 
-        for step in 1...tower.beamRange {
+        for step in 1...tower.laser!.range {
             // Sample a world point along the beam line
             let sampleX = towerPos.x + dirX * spacing * 1.5 * Float(step)
             let sampleZ = towerPos.y + dirZ * spacing * 1.5 * Float(step)
@@ -195,7 +194,7 @@ extension GameState {
     /// Computes the world-space beam endpoint — the locked beam target's position.
     func beamEndpoint(for tower: Tower) -> SIMD3<Float> {
         // Use the locked beam target if present — this matches what's actually being damaged.
-        if let lockedID = tower.beamTargetID,
+        if let lockedID = tower.laser?.lockedTargetID,
            let enemy = enemies.first(where: { $0.id == lockedID && $0.active }),
            let pos = enemyWorldPosition(enemy) {
             return pos
@@ -220,7 +219,7 @@ extension GameState {
         // Fallback: project beam forward from barrel
         let origin = beamOrigin(for: tower)
         let yaw = tower.currentYaw + .pi
-        let beamLength = spacing * 1.5 * Float(tower.beamRange)
+        let beamLength = spacing * 1.5 * Float(tower.laser!.range)
         return SIMD3<Float>(
             origin.x + sin(yaw) * beamLength,
             origin.y,

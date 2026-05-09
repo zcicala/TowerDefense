@@ -298,29 +298,15 @@ extension GameState {
     }
 
     func activateSlowAuraItem() {
-        guard slowAuraItemCount > 0, !isSelectingTowerForSlowAura, pendingSlowAuraTower == nil else { return }
+        guard slowAuraItemCount > 0, !isPendingSlowAura else { return }
         slowAuraItemCount -= 1
-        isSelectingTowerForSlowAura = true
-    }
-
-    func selectTowerForSlowAura(_ tower: Tower) {
-        guard isSelectingTowerForSlowAura else { return }
-        tower.hasSlowAura = true
-        pendingSlowAuraTower = tower
-        isSelectingTowerForSlowAura = false
+        isPendingSlowAura = true
     }
 
     func activateDamageAuraItem() {
-        guard damageAuraItemCount > 0, !isSelectingTowerForDamageAura, pendingDamageAuraTower == nil else { return }
+        guard damageAuraItemCount > 0, !isPendingDamageAura else { return }
         damageAuraItemCount -= 1
-        isSelectingTowerForDamageAura = true
-    }
-
-    func selectTowerForDamageAura(_ tower: Tower) {
-        guard isSelectingTowerForDamageAura else { return }
-        tower.hasDamageAura = true
-        pendingDamageAuraTower = tower
-        isSelectingTowerForDamageAura = false
+        isPendingDamageAura = true
     }
 
     func activateMoveTower() {
@@ -367,57 +353,46 @@ extension GameState {
         hexGrid.cells.values.filter { $0.isBonus }
     }
 
-    /// Path cell coords currently slowed by any placed slow-aura tower.
+    /// All path cell coords currently under a slow aura effect.
     var slowAuraPathCoords: Set<HexCoord> {
-        towers.reduce(into: Set<HexCoord>()) { $0.formUnion($1.slowedCoords) }
+        var coords = towers.reduce(into: Set<HexCoord>()) { $0.formUnion($1.slowedCoords) }
+        coords.formUnion(globalSlowAuraCoords)
+        return coords
     }
 
-    /// Called when the user picks a path tile for a pending slow-aura tower.
-    /// Slows the chosen tile plus the one before and after it on the path.
+    /// Applies a slow aura to the picked path tile and its neighbours, then clears the pending state.
     func applySlowAuraTarget(pathCoord: HexCoord) {
-        guard let tower = pendingSlowAuraTower,
-              let cell = hexGrid.cell(at: pathCoord) else { return }
-        var slowed = Set<HexCoord>()
-        slowed.insert(pathCoord)
-        if let prev = cell.previous { slowed.insert(prev.coord) }
-        if let next = cell.next     { slowed.insert(next.coord) }
-        tower.slowedCoords = slowed
-        pendingSlowAuraTower = nil
+        guard isPendingSlowAura, let cell = hexGrid.cell(at: pathCoord) else { return }
+        globalSlowAuraCoords.insert(pathCoord)
+        if let prev = cell.previous { globalSlowAuraCoords.insert(prev.coord) }
+        if let next = cell.next     { globalSlowAuraCoords.insert(next.coord) }
+        isPendingSlowAura = false
     }
 
     func cancelPendingSlowAura() {
-        if isSelectingTowerForSlowAura || pendingSlowAuraTower != nil {
-            slowAuraItemCount += 1
-            pendingSlowAuraTower?.hasSlowAura = false
-        }
-        isSelectingTowerForSlowAura = false
-        pendingSlowAuraTower = nil
+        if isPendingSlowAura { slowAuraItemCount += 1 }
+        isPendingSlowAura = false
     }
 
-    /// Path cell coords in a damage aura zone from any placed damage-aura tower.
+    /// All path cell coords currently under a damage aura effect.
     var damageAuraPathCoords: Set<HexCoord> {
-        towers.reduce(into: Set<HexCoord>()) { $0.formUnion($1.damageAuraCoords) }
+        var coords = towers.reduce(into: Set<HexCoord>()) { $0.formUnion($1.damageAuraCoords) }
+        coords.formUnion(globalDamageAuraCoords)
+        return coords
     }
 
-    /// Called when the user picks a path tile for a pending damage-aura tower.
+    /// Applies a damage aura to the picked path tile and its neighbours, then clears the pending state.
     func applyDamageAuraTarget(pathCoord: HexCoord) {
-        guard let tower = pendingDamageAuraTower,
-              let cell = hexGrid.cell(at: pathCoord) else { return }
-        var boosted = Set<HexCoord>()
-        boosted.insert(pathCoord)
-        if let prev = cell.previous { boosted.insert(prev.coord) }
-        if let next = cell.next     { boosted.insert(next.coord) }
-        tower.damageAuraCoords = boosted
-        pendingDamageAuraTower = nil
+        guard isPendingDamageAura, let cell = hexGrid.cell(at: pathCoord) else { return }
+        globalDamageAuraCoords.insert(pathCoord)
+        if let prev = cell.previous { globalDamageAuraCoords.insert(prev.coord) }
+        if let next = cell.next     { globalDamageAuraCoords.insert(next.coord) }
+        isPendingDamageAura = false
     }
 
     func cancelPendingDamageAura() {
-        if isSelectingTowerForDamageAura || pendingDamageAuraTower != nil {
-            damageAuraItemCount += 1
-            pendingDamageAuraTower?.hasDamageAura = false
-        }
-        isSelectingTowerForDamageAura = false
-        pendingDamageAuraTower = nil
+        if isPendingDamageAura { damageAuraItemCount += 1 }
+        isPendingDamageAura = false
     }
 
     /// Assigns a random bonus to a random unoccupied terrain cell.
@@ -573,8 +548,6 @@ extension GameState {
         baseTowerBlocksRemaining = 5
         baseTowerDamageAccumulated = 0
         baseSentinelTower = nil
-        pendingSlowAuraTower = nil
-        pendingDamageAuraTower = nil
         towers.removeAll()
         enemies.removeAll()
         projectiles.removeAll()
@@ -590,8 +563,10 @@ extension GameState {
         slowAuraItemCount = 0
         damageAuraItemCount = 0
         moveTowerItemCount = 0
-        isSelectingTowerForSlowAura = false
-        isSelectingTowerForDamageAura = false
+        isPendingSlowAura = false
+        isPendingDamageAura = false
+        globalSlowAuraCoords = []
+        globalDamageAuraCoords = []
         isSelectingTowerToMove = false
         pendingMoveTower = nil
         hasPauseControl = false

@@ -37,9 +37,12 @@ extension GameState {
             enemy.shieldHP = min(enemy.shieldMaxHP, enemy.shieldHP + enemy.shieldRegen * deltaTime)
         }
 
-        // Apply slow aura from any towers that have chosen target coords
+        // Apply slow aura from towers and global inventory aura zones
         for tower in towers where !tower.slowedCoords.isEmpty {
             applyAreaSlow(cells: Array(tower.slowedCoords), slowFactor: 0.8)
+        }
+        if !globalSlowAuraCoords.isEmpty {
+            applyAreaSlow(cells: Array(globalSlowAuraCoords), slowFactor: 0.8)
         }
 
         // Move enemies and apply burn DOT

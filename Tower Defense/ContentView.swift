@@ -343,8 +343,7 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.8))
 
                     let anyPending = gameState.pendingRingBonus
-                        || gameState.isSelectingTowerForSlowAura || gameState.pendingSlowAuraTower != nil
-                        || gameState.isSelectingTowerForDamageAura || gameState.pendingDamageAuraTower != nil
+                        || gameState.isPendingSlowAura || gameState.isPendingDamageAura
                         || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
                     HStack(spacing: 10) {
                         Text("Inventory:")
@@ -463,26 +462,12 @@ struct ContentView: View {
             }
             .padding(.top, 16)
 
-            // Slow aura — select tower prompt
-            if gameState.isSelectingTowerForSlowAura {
-                VStack(spacing: 6) {
-                    Text("Slow Aura — Select a Tower")
-                        .font(.headline).foregroundColor(.cyan)
-                    Text("Click any placed tower to apply the slow aura to it.")
-                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
-                    Button("Cancel") { gameState.cancelPendingSlowAura() }
-                        .font(.caption).foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
-                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
-            }
-
             // Slow aura — pick target path tile
-            if gameState.pendingSlowAuraTower != nil {
+            if gameState.isPendingSlowAura {
                 VStack(spacing: 6) {
                     Text("Slow Aura — Pick a Target")
                         .font(.headline).foregroundColor(.cyan)
-                    Text("Click any path tile to apply the slow effect there and to the tiles on either side.")
+                    Text("Click any path tile to slow enemies there and the tiles on either side.")
                         .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
                     Button("Cancel") { gameState.cancelPendingSlowAura(); refreshSlowAuraIndicators() }
                         .font(.caption).foregroundColor(.white.opacity(0.7))
@@ -491,22 +476,8 @@ struct ContentView: View {
                 .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
             }
 
-            // Damage aura — select tower prompt
-            if gameState.isSelectingTowerForDamageAura {
-                VStack(spacing: 6) {
-                    Text("Damage Aura — Select a Tower")
-                        .font(.headline).foregroundColor(.orange)
-                    Text("Click any placed tower to apply the damage aura to it.")
-                        .font(.caption).foregroundColor(.white.opacity(0.85)).multilineTextAlignment(.center)
-                    Button("Cancel") { gameState.cancelPendingDamageAura() }
-                        .font(.caption).foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
-                .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
-            }
-
             // Damage aura — pick target path tile
-            if gameState.pendingDamageAuraTower != nil {
+            if gameState.isPendingDamageAura {
                 VStack(spacing: 6) {
                     Text("Damage Aura — Pick a Target")
                         .font(.headline).foregroundColor(.orange)
@@ -1276,18 +1247,26 @@ struct ContentView: View {
             return
         }
 
-        // Slow aura — step 1: select which tower to apply it to
-        if gameState.isSelectingTowerForSlowAura {
-            if let tower = gameState.tower(at: coord) {
-                gameState.selectTowerForSlowAura(tower)
+        // Slow aura — pick target path tile
+        if gameState.isPendingSlowAura {
+            let cell = gameState.hexGrid.cell(at: coord)
+            if cell?.type == .path || cell?.type == .start {
+                gameState.applySlowAuraTarget(pathCoord: coord)
+                refreshSlowAuraIndicators()
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
             }
             return
         }
 
-        // Damage aura — step 1: select which tower to apply it to
-        if gameState.isSelectingTowerForDamageAura {
-            if let tower = gameState.tower(at: coord) {
-                gameState.selectTowerForDamageAura(tower)
+        // Damage aura — pick target path tile
+        if gameState.isPendingDamageAura {
+            let cell = gameState.hexGrid.cell(at: coord)
+            if cell?.type == .path || cell?.type == .start {
+                gameState.applyDamageAuraTarget(pathCoord: coord)
+                refreshDamageAuraIndicators()
+                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
+                renderer.updateSelection(deselected: deselected, selected: nil)
             }
             return
         }
@@ -1298,32 +1277,6 @@ struct ContentView: View {
             selectedBonusCell = nil
             let (deselected, selected) = gameState.selectCell(at: tower.coord)
             renderer.updateSelection(deselected: deselected, selected: selected)
-            return
-        }
-
-        // Slow aura — step 2: pick target path tile
-        if gameState.pendingSlowAuraTower != nil {
-            let cell = gameState.hexGrid.cell(at: coord)
-            if cell?.type == .path || cell?.type == .start {
-                gameState.applySlowAuraTarget(pathCoord: coord)
-                refreshSlowAuraIndicators()
-                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
-                renderer.updateSelection(deselected: deselected, selected: nil)
-                return
-            }
-            return
-        }
-
-        // Damage aura — step 2: pick target path tile
-        if gameState.pendingDamageAuraTower != nil {
-            let cell = gameState.hexGrid.cell(at: coord)
-            if cell?.type == .path || cell?.type == .start {
-                gameState.applyDamageAuraTarget(pathCoord: coord)
-                refreshDamageAuraIndicators()
-                let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
-                renderer.updateSelection(deselected: deselected, selected: nil)
-                return
-            }
             return
         }
 

@@ -125,12 +125,12 @@ class GameState {
 
     let baseTowerMaxHP: Int = 10
     var baseTowerHP: Int = 10
-    /// Tower that just received a slow aura bonus and is waiting for the user to pick a target path tile.
-    var pendingSlowAuraTower: Tower? = nil
-    /// Tower that just received a damage aura bonus and is waiting for the user to pick a target path tile.
-    var pendingDamageAuraTower: Tower? = nil
     /// True when a ring item is being used and the user must pick a cell to expand around.
     var pendingRingBonus: Bool = false
+    /// True when a slow aura item is active and the player is picking a path tile target.
+    var isPendingSlowAura: Bool = false
+    /// True when a damage aura item is active and the player is picking a path tile target.
+    var isPendingDamageAura: Bool = false
     /// True once the player has claimed the pause control bonus.
     var hasPauseControl: Bool = false
 
@@ -141,10 +141,10 @@ class GameState {
     var slowAuraItemCount: Int = 0
     var damageAuraItemCount: Int = 0
     var moveTowerItemCount: Int = 0
-    /// True when selecting a tower to apply a slow aura to.
-    var isSelectingTowerForSlowAura: Bool = false
-    /// True when selecting a tower to apply a damage aura to.
-    var isSelectingTowerForDamageAura: Bool = false
+    /// Slow aura zones applied via inventory items (not tied to any tower).
+    var globalSlowAuraCoords: Set<HexCoord> = []
+    /// Damage aura zones applied via inventory items (not tied to any tower).
+    var globalDamageAuraCoords: Set<HexCoord> = []
     /// True when the player has activated a Move Tower item and is selecting which tower to move.
     var isSelectingTowerToMove: Bool = false
     /// Non-nil when a tower has been selected for moving and the player is choosing a destination.

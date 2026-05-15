@@ -213,26 +213,19 @@ extension GameState {
                 tower.applyUpgrade()
             case .invulnerable:
                 tower.isInvulnerable = true
-            case .doubleRing:
-                ringItemCount += 2
-            case .goldCache:
-                money += 150
+            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl:
+                grantRandomInventoryItem()
+                grantRandomInventoryItem()
             case .slowAura:
                 slowAuraItemCount += 1
             case .damageAura:
                 damageAuraItemCount += 1
-            case .repair:
-                repairItemCount += 1
-            case .moveTower:
-                moveTowerItemCount += 1
             case .moneyDoubler:
                 tower.hasMoneyDoubler = true
             case .rangeExtender:
                 tower.detectionRadius += 1
                 tower.fireRadius += 1
                 if tower.type == .laser { tower.laser?.range += 1 }
-            case .pauseControl:
-                hasPauseControl = true
             }
             cell.bonusType = nil
         }
@@ -244,6 +237,17 @@ extension GameState {
 
     func tower(at coord: HexCoord) -> Tower? {
         towers.first(where: { $0.coord == coord })
+    }
+
+    /// Grants one random inventory item chosen from: ring, repair, move tower, or $75 gold.
+    func grantRandomInventoryItem() {
+        let roll = Int.random(in: 0..<4)
+        switch roll {
+        case 0: ringItemCount += 1
+        case 1: repairItemCount += 1
+        case 2: moveTowerItemCount += 1
+        default: money += 75
+        }
     }
 
     /// Upgrades a tower if affordable. Returns true on success.
@@ -418,21 +422,73 @@ extension GameState {
 
     /// Returns path cells within the given tower type's fire range from coord.
     func allCellsInFireRange(from coord: HexCoord, type: TowerType) -> [HexCell] {
-        var radius: Int
-        switch type {
-        case .projectile: radius = 4
-        case .laser:      radius = 7
-        case .fire:       radius = 1
-        case .ice:        radius = 2
-        case .bowler:     radius = 5
-        case .sword:      radius = 1
-        case .healer:     radius = 1
-        case .fireball:   radius = 4
-        case .antiAir:    radius = 9
-        case .targeting:  radius = 3
+        // Use the placed tower's fireRadius when available, otherwise fall back to defaults
+        let radius: Int
+        if let tower = towers.first(where: { $0.coord == coord }) {
+            radius = tower.fireRadius
+        } else {
+            var base: Int
+            switch type {
+            case .projectile: base = 4
+            case .laser:      base = 6
+            case .fire:       base = 1
+            case .ice:        base = 1
+            case .bowler:     base = 5
+            case .sword:      base = 1
+            case .healer:     base = 1
+            case .fireball:   base = 5
+            case .antiAir:    base = 9
+            case .targeting:  base = 3
+            }
+            if hexGrid.cell(at: coord)?.bonusType == .rangeExtender { base += 1 }
+            radius = base
         }
-        if hexGrid.cell(at: coord)?.bonusType == .rangeExtender { radius += 1 }
-        return hexGrid.cells.values.filter { coord.distance(to: $0.coord) <= radius }
+
+        switch type {
+        case .bowler:
+            // Ball rolls in a straight line through a path-adjacent neighbour.
+            // Show all reachable cells along every possible entry direction.
+            return bowlerRangeCells(from: coord, range: radius)
+
+        case .laser, .fireball:
+            // Both have a minimum range of >1 tile — exclude adjacent cells.
+            return hexGrid.cells.values.filter {
+                let d = coord.distance(to: $0.coord)
+                return d > 1 && d <= radius
+            }
+
+        default:
+            return hexGrid.cells.values.filter { coord.distance(to: $0.coord) <= radius }
+        }
+    }
+
+    /// Returns all cells reachable by a bowling ball rolling in a straight line
+    /// through any path-adjacent neighbour of `coord`.
+    private func bowlerRangeCells(from coord: HexCoord, range: Int) -> [HexCell] {
+        let pathNeighbours = hexGrid.neighbors(of: coord)
+            .filter { $0.type == .path || $0.type == .start || $0.type == .end }
+        guard !pathNeighbours.isEmpty else { return [] }
+
+        let towerPos = coord.worldPosition(spacing: spacing)
+        var visited = Set<HexCoord>()
+
+        for entry in pathNeighbours {
+            let ep = entry.coord.worldPosition(spacing: spacing)
+            let dx = ep.x - towerPos.x
+            let dz = ep.y - towerPos.y
+            let len = sqrt(dx * dx + dz * dz)
+            guard len > 0 else { continue }
+            let dirX = dx / len
+            let dirZ = dz / len
+
+            for step in 1...range {
+                let sx = towerPos.x + dirX * spacing * 1.5 * Float(step)
+                let sz = towerPos.y + dirZ * spacing * 1.5 * Float(step)
+                visited.insert(nearestHexCoord(worldX: sx, worldZ: sz))
+            }
+        }
+
+        return visited.compactMap { hexGrid.cell(at: $0) }
     }
 
     /// Transitions back to placing phase. Returns any newly added terrain/path cells.

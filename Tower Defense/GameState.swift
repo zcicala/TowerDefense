@@ -28,7 +28,7 @@ class GameState {
 
     var phase: GamePhase = .placing
     var round: Int = 0
-    var money: Int = 140
+    var money: Int = 100
     let killReward: Int = 8
     var selectedTowerType: TowerType? = nil
 

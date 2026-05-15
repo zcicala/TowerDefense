@@ -73,6 +73,11 @@ struct ContentView: View {
                         }
                     }
 
+                    // Update turret rotations every frame so dish spin works outside combat
+                    for tower in gameState.towers {
+                        renderer.updateTurretRotation(tower)
+                    }
+
                     guard gameState.phase == .combat else {
                         if gameState.phase == .roundOver && !showRoundOverMessage {
                             showRoundOverMessage = true
@@ -82,11 +87,6 @@ struct ContentView: View {
                     }
 
                     let events = gameState.update(deltaTime: dt)
-
-                    // Update turret rotations
-                    for tower in gameState.towers {
-                        renderer.updateTurretRotation(tower)
-                    }
 
                     // Spawn new enemy entities
                     for enemy in events.spawnedEnemies {
@@ -220,6 +220,7 @@ struct ContentView: View {
                             selectedTower = nil
                             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                             renderer.updateSelection(deselected: deselected, selected: nil)
+                            renderer.removeRangeHighlights()
                         }
                     }
                     if needsAuraRefresh {
@@ -323,21 +324,35 @@ struct ContentView: View {
                 .cornerRadius(8)
 
                 if gameState.phase == .placing {
-                    Picker("Tower", selection: $gameState.selectedTowerType) {
-                        Text("None").tag(TowerType?.none)
-                        Text("Projectile ($\(gameState.costForTower(.projectile)))").tag(TowerType?.some(.projectile))
-                        Text("Laser ($\(gameState.costForTower(.laser)))").tag(TowerType?.some(.laser))
-                        Text("Fire ($\(gameState.costForTower(.fire)))").tag(TowerType?.some(.fire))
-                        Text("Ice ($\(gameState.costForTower(.ice)))").tag(TowerType?.some(.ice))
-                        Text("Bowler ($\(gameState.costForTower(.bowler)))").tag(TowerType?.some(.bowler))
-                        Text("Sword ($\(gameState.costForTower(.sword)))").tag(TowerType?.some(.sword))
-                        Text("Healer ($\(gameState.costForTower(.healer)))").tag(TowerType?.some(.healer))
-                        Text("Fireball ($\(gameState.costForTower(.fireball)))").tag(TowerType?.some(.fireball))
-                        Text("Anti Air ($\(gameState.costForTower(.antiAir)))").tag(TowerType?.some(.antiAir))
-                        Text("Targeting ($\(gameState.costForTower(.targeting)))").tag(TowerType?.some(.targeting))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Attack")
+                            .font(.caption.bold())
+                            .foregroundColor(.white.opacity(0.85))
+                        HStack(spacing: 6) {
+                            Button("None") { gameState.selectedTowerType = nil }
+                                .buttonStyle(.bordered)
+                                .tint(gameState.selectedTowerType == nil ? .blue : .gray)
+                            ForEach([TowerType.projectile, .laser, .fire, .bowler, .sword, .fireball, .antiAir], id: \.self) { type in
+                                Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
+                                    gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(gameState.selectedTowerType == type ? .blue : .gray)
+                            }
+                        }
+                        Text("Support")
+                            .font(.caption.bold())
+                            .foregroundColor(.white.opacity(0.85))
+                        HStack(spacing: 6) {
+                            ForEach([TowerType.ice, .healer, .targeting], id: \.self) { type in
+                                Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
+                                    gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(gameState.selectedTowerType == type ? .blue : .gray)
+                            }
+                        }
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 720)
 
                     Text(gameState.selectedTowerType == nil ? "Click cells to inspect or select a tower to place" : "Tap terrain cells to place towers")
                         .font(.caption)
@@ -430,6 +445,7 @@ struct ContentView: View {
                                 renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos)
                             }
                             showRoundOverMessage = false
+                            renderer.removeRangeHighlights()
                             selectedTower = nil
                         }
                         .buttonStyle(.borderedProminent)
@@ -740,10 +756,10 @@ struct ContentView: View {
                     Divider().background(.white.opacity(0.3))
 
                     let tLevel = gameState.targetingLevel(for: tower)
-                    if tLevel >= 1 {
+                    if tLevel >= 2 {
                         Divider().background(.white.opacity(0.3))
 
-                        if tLevel >= 2 {
+                        if tLevel >= 3 {
                             Text("Priority Target")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.7))
@@ -815,6 +831,7 @@ struct ContentView: View {
                         if let renderer {
                             let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                             renderer.updateSelection(deselected: deselected, selected: nil)
+                            renderer.removeRangeHighlights()
                         }
                     }
                         .font(.caption)
@@ -972,109 +989,133 @@ struct ContentView: View {
         let labelColor = Color.white.opacity(0.6)
         let valueColor = Color.white
 
-        switch tower.type {
-        case .projectile:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+        VStack(alignment: .leading, spacing: 6) {
+            // Type-specific stats
+            switch tower.type {
+            case .projectile:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+            case .laser:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("DPS", "\(String(format: "%.0f", tower.laser?.dps ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Duration", "\(String(format: "%.1f", tower.laser?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .fire:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("DPS", "\(String(format: "%.0f", tower.cone?.dps ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Duration", "\(String(format: "%.1f", tower.cone?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .ice:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Slow", "50%", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Duration", "\(String(format: "%.1f", tower.cone?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .bowler:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .sword:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .healer:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Charges", "\(tower.healer?.charges ?? 0)/\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Heal Radius", "\(tower.healer?.radius ?? 0)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .fireball:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Burn DPS", "\(String(format: "%.0f", tower.fireball?.burnDPS ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Burn Dur", "\(String(format: "%.1f", tower.fireball?.burnDuration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .antiAir:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Target", "Air only", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
+            case .targeting:
+                VStack(alignment: .leading, spacing: 4) {
+                    statRow("Aura Radius", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    Text("Active Effects:")
+                        .font(statFont)
+                        .foregroundColor(labelColor)
+                    let effects: [(String, Bool)] = [
+                        ("+1 Detection Range", tower.level >= 1),
+                        ("Targeting Mode", tower.level >= 2),
+                        ("Priority Target", tower.level >= 3),
+                        ("Skip Immune", tower.level >= 4),
+                    ]
+                    ForEach(effects, id: \.0) { label, active in
+                        HStack(spacing: 4) {
+                            Image(systemName: active ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(active ? .green : .gray)
+                                .font(statFont)
+                            Text(label)
+                                .font(statFont)
+                                .foregroundColor(active ? valueColor : .gray)
+                        }
+                    }
                 }
             }
-        case .laser:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("DPS", "\(String(format: "%.0f", tower.laser?.dps ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Duration", "\(String(format: "%.1f", tower.laser?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Range", "\(tower.laser?.range ?? 0)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .fire:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("DPS", "\(String(format: "%.0f", tower.cone?.dps ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Duration", "\(String(format: "%.1f", tower.cone?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .ice:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Slow", "50%", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Duration", "\(String(format: "%.1f", tower.cone?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Detect", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .bowler:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .sword:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Damage", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .healer:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Charges", "\(tower.healer?.charges ?? 0)/\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Radius", "\(tower.healer?.radius ?? 0)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .fireball:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Burn DPS", "\(String(format: "%.0f", tower.fireball?.burnDPS ?? 0))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Burn Dur", "\(String(format: "%.1f", tower.fireball?.burnDuration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .antiAir:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Target", "Air only", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-            }
-        case .targeting:
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    statRow("Radius", "\(tower.detectionRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    let tLevel = gameState.targetingLevel(for: tower)
-                    statRow("Grants", tLevel > 0 ? "Lv\(tLevel) range" : "No aura", label: statFont, labelColor: labelColor, valueColor: valueColor)
+
+            // Fire range and detection range shown for all non-targeting towers
+            if tower.type != .targeting {
+                let tLevel = gameState.targetingLevel(for: tower)
+                let effectiveDetection = tower.detectionRadius + (tLevel >= 1 ? 1 : 0)
+                Divider().background(.white.opacity(0.2))
+                HStack(spacing: 12) {
+                    statRow("Fire Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    statRow("Detect Range", effectiveDetection > tower.detectionRadius
+                            ? "\(tower.detectionRadius)+1" : "\(tower.detectionRadius)",
+                            label: statFont, labelColor: labelColor,
+                            valueColor: effectiveDetection > tower.detectionRadius ? .green : valueColor)
                 }
             }
         }
@@ -1177,20 +1218,7 @@ struct ContentView: View {
         .fixedSize()
     }
 
-    private func towerTypeName(_ type: TowerType) -> String {
-        switch type {
-        case .projectile: return "Projectile"
-        case .laser: return "Laser"
-        case .fire: return "Fire"
-        case .ice: return "Ice"
-        case .bowler: return "Bowler"
-        case .sword: return "Sword"
-        case .healer: return "Healer"
-        case .fireball: return "Fireball"
-        case .antiAir:   return "Anti Air"
-        case .targeting: return "Targeting"
-        }
-    }
+    private func towerTypeName(_ type: TowerType) -> String { type.displayName }
 
     private func refreshSlowAuraIndicators() {
         guard let renderer else { return }
@@ -1293,11 +1321,14 @@ struct ContentView: View {
             selectedBonusCell = nil
             let (deselected, selected) = gameState.selectCell(at: tower.coord)
             renderer.updateSelection(deselected: deselected, selected: selected)
+            let rangeCells = gameState.allCellsInFireRange(from: tower.coord, type: tower.type)
+            renderer.showRangeHighlights(coords: rangeCells.map { $0.coord })
             return
         }
 
         // Dismiss any open dialogs
         if selectedTower != nil || selectedBonusCell != nil || selectedAuraCell != nil || selectedDamageAuraCell != nil || selectedEnemy != nil {
+            if selectedTower != nil { renderer.removeRangeHighlights() }
             selectedTower = nil
             selectedBonusCell = nil
             selectedAuraCell = nil

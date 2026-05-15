@@ -100,6 +100,81 @@ class SceneRenderer {
     func showBonusIndicator(for cell: HexCell, at position: SIMD3<Float>) {
         guard let content, bonusIndicatorEntities[cell.coord] == nil else { return }
 
+        let entity: Entity
+
+        if cell.bonusType?.isInventoryBonus == true {
+            entity = makeTreasureChest(at: position)
+        } else {
+            entity = makeParticleBonusIndicator(at: position)
+        }
+
+        content.add(entity)
+        bonusIndicatorEntities[cell.coord] = entity
+    }
+
+    private func makeTreasureChest(at position: SIMD3<Float>) -> Entity {
+        func mat(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CustomMaterial {
+            var m = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            m.baseColor = CustomMaterial.BaseColor(tint: .init(red: r, green: g, blue: b, alpha: 1))
+            return m
+        }
+
+        let root = Entity()
+        root.position = SIMD3(position.x, position.y, position.z)
+
+        // Body — dark brown box
+        let body = Entity()
+        body.components.set(ModelComponent(
+            mesh: .generateBox(width: 0.22, height: 0.14, depth: 0.18),
+            materials: [mat(0.42, 0.22, 0.08)]))
+        body.position = [0, 0.07, 0]
+        root.addChild(body)
+
+        // Lid box — slightly wider, darker
+        let lid = Entity()
+        lid.components.set(ModelComponent(
+            mesh: .generateBox(width: 0.24, height: 0.06, depth: 0.20),
+            materials: [mat(0.30, 0.14, 0.05)]))
+        lid.position = [0, 0.17, 0]
+        root.addChild(lid)
+
+        // Lid dome — cylinder rotated so its axis runs front-to-back (Z)
+        let dome = Entity()
+        dome.components.set(ModelComponent(
+            mesh: .generateCylinder(height: 0.20, radius: 0.07),
+            materials: [mat(0.30, 0.14, 0.05)]))
+        dome.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+        dome.position = [0, 0.20, 0]
+        root.addChild(dome)
+
+        // Gold rim at the lid join
+        let rim = Entity()
+        rim.components.set(ModelComponent(
+            mesh: .generateBox(width: 0.245, height: 0.018, depth: 0.205),
+            materials: [mat(0.85, 0.65, 0.10)]))
+        rim.position = [0, 0.14, 0]
+        root.addChild(rim)
+
+        // Gold horizontal band across the body centre
+        let band = Entity()
+        band.components.set(ModelComponent(
+            mesh: .generateBox(width: 0.225, height: 0.022, depth: 0.185),
+            materials: [mat(0.85, 0.65, 0.10)]))
+        band.position = [0, 0.07, 0]
+        root.addChild(band)
+
+        // Bright gold clasp on the front face
+        let clasp = Entity()
+        clasp.components.set(ModelComponent(
+            mesh: .generateBox(width: 0.04, height: 0.055, depth: 0.022),
+            materials: [mat(1.0, 0.82, 0.20)]))
+        clasp.position = [0, 0.10, 0.10]
+        root.addChild(clasp)
+
+        return root
+    }
+
+    private func makeParticleBonusIndicator(at position: SIMD3<Float>) -> Entity {
         var emitter = ParticleEmitterComponent()
         emitter.emitterShape = .torus
         emitter.emitterShapeSize = [0.3, 0.05, 0.3]
@@ -118,8 +193,7 @@ class SceneRenderer {
         let entity = Entity()
         entity.components.set(emitter)
         entity.position = SIMD3(position.x, position.y + 0.1, position.z)
-        content.add(entity)
-        bonusIndicatorEntities[cell.coord] = entity
+        return entity
     }
 
     func removeBonusIndicator(for coord: HexCoord) {
@@ -314,6 +388,7 @@ class SceneRenderer {
 
     private var towerEntities: [UUID: Entity] = [:]
     private var turretEntities: [UUID: Entity] = [:]
+    private var dishEntities: [UUID: Entity] = [:]
 
     func createTower(_ tower: Tower, cellHeight: Float, spacing: Float) {
         guard let content else { return }
@@ -339,7 +414,7 @@ class SceneRenderer {
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
-        // Stack of 5 rectangular prisms with rounded edges
+        // Stack of 2 rectangular prisms with rounded edges
         let prismWidth: Float = 0.25
         let prismHeight: Float = 0.3
         let prismGap: Float = 0.02
@@ -420,6 +495,73 @@ class SceneRenderer {
             armV.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.06, height: 0.22, depth: 0.06), materials: [crossMat]))
             armV.position = [0, 0.1, 0]
             turretGroup.addChild(armV)
+        } else if tower.type == .targeting {
+            // Central pivot post rising from the equipment box
+            var pivotMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            pivotMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.30, green: 0.30, blue: 0.32, alpha: 1))
+            let pivot = Entity()
+            pivot.components.set(ModelComponent(
+                mesh: MeshResource.generateCylinder(height: 0.10, radius: 0.025),
+                materials: [pivotMat]))
+            pivot.position = [0, 0.05, 0]
+            turretGroup.addChild(pivot)
+
+            // dishGroup — the whole assembly that spins around Y
+            let dishGroup = Entity()
+            dishGroup.position = [0, 0.12, 0]
+            turretGroup.addChild(dishGroup)
+
+            // Dish face — flat rectangular panel tilted ~50° from horizontal (faces forward+upward)
+            var faceMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            faceMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.62, green: 0.63, blue: 0.65, alpha: 1))
+            let dishFace = Entity()
+            dishFace.components.set(ModelComponent(
+                mesh: MeshResource.generateBox(width: 0.34, height: 0.26, depth: 0.025),
+                materials: [faceMat]))
+            // Tilt the face so it points forward (+Z) and up — rotate -50° around X
+            dishFace.orientation = simd_quatf(angle: -.pi * 0.28, axis: [1, 0, 0])
+            dishFace.position = [0, 0.08, 0.02]
+            dishGroup.addChild(dishFace)
+
+            // Structural frame bars on the back of the dish (children of dishFace so they match tilt)
+            var frameMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            frameMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.28, green: 0.30, blue: 0.28, alpha: 1))
+            let frameH = Entity()  // horizontal bar
+            frameH.components.set(ModelComponent(
+                mesh: MeshResource.generateBox(width: 0.31, height: 0.018, depth: 0.015),
+                materials: [frameMat]))
+            frameH.position = [0, 0, -0.022]
+            dishFace.addChild(frameH)
+            let frameV = Entity()  // vertical bar
+            frameV.components.set(ModelComponent(
+                mesh: MeshResource.generateBox(width: 0.018, height: 0.23, depth: 0.015),
+                materials: [frameMat]))
+            frameV.position = [0, 0, -0.022]
+            dishFace.addChild(frameV)
+
+            // Feed horn arm — thin cylinder extending forward (+Z) from dish face centre
+            // Rotating -90° around X maps the cylinder's Y axis → +Z, so it extends forward
+            var armMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            armMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.22, green: 0.22, blue: 0.25, alpha: 1))
+            let arm = Entity()
+            arm.components.set(ModelComponent(
+                mesh: MeshResource.generateCylinder(height: 0.16, radius: 0.012),
+                materials: [armMat]))
+            arm.orientation = simd_quatf(angle: -.pi / 2, axis: [1, 0, 0])
+            arm.position = [0, 0, 0.09]   // arm centre sits 0.09 in front of dish face
+            dishFace.addChild(arm)
+
+            // Feed horn head — small box at the arm tip
+            var hornMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            hornMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1))
+            let horn = Entity()
+            horn.components.set(ModelComponent(
+                mesh: MeshResource.generateBox(width: 0.045, height: 0.045, depth: 0.06),
+                materials: [hornMat]))
+            horn.position = [0, 0, 0.17]   // at the focal point, beyond arm tip
+            dishFace.addChild(horn)
+
+            dishEntities[tower.id] = dishGroup
         } else {
             let barrelMesh = MeshResource.generateCylinder(height: 0.2, radius: 0.06)
             let barrel = Entity()
@@ -539,6 +681,14 @@ class SceneRenderer {
     func updateTurretRotation(_ tower: Tower) {
         guard let turretGroup = turretEntities[tower.id] else { return }
         turretGroup.orientation = simd_quatf(angle: tower.currentYaw, axis: [0, 1, 0])
+
+        if tower.type == .targeting, let dish = dishEntities[tower.id] {
+            let period = Double.pi * 2.0 / 1.5
+            let t = Date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period)
+            let spinAngle = Float(t * 1.5)
+            // dishGroup spins around Y; the dish face tilt is baked into its child entity
+            dish.orientation = simd_quatf(angle: spinAngle, axis: [0, 1, 0])
+        }
     }
 
     // MARK: - Laser Beams
@@ -1160,6 +1310,7 @@ class SceneRenderer {
         towerEntities[id]?.removeFromParent()
         towerEntities.removeValue(forKey: id)
         turretEntities.removeValue(forKey: id)
+        dishEntities.removeValue(forKey: id)
     }
 
     func moveTowerEntity(id: UUID, to coord: HexCoord, cellHeight: Float, spacing: Float) {

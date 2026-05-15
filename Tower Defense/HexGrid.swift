@@ -78,6 +78,14 @@ enum BonusType: CaseIterable {
         }
     }
 
+    /// True for bonuses that go into the player's inventory or wallet rather than modifying the placed tower.
+    var isInventoryBonus: Bool {
+        switch self {
+        case .doubleRing, .repair, .moveTower, .pauseControl, .goldCache: return true
+        default: return false
+        }
+    }
+
     var description: String {
         switch self {
         case .freeUpgrade:   return "Place a tower here to instantly gain 3 free upgrade levels!"
@@ -175,6 +183,21 @@ enum TowerType {
     case fireball
     case antiAir
     case targeting
+
+    var displayName: String {
+        switch self {
+        case .projectile: return "Projectile"
+        case .laser:      return "Laser"
+        case .fire:       return "Fire"
+        case .ice:        return "Ice"
+        case .bowler:     return "Bowler"
+        case .sword:      return "Sword"
+        case .healer:     return "Healer"
+        case .fireball:   return "Fireball"
+        case .antiAir:    return "Anti Air"
+        case .targeting:  return "Targeting"
+        }
+    }
 }
 
 enum EnemyType: CaseIterable {
@@ -258,7 +281,7 @@ class Tower {
     var fireball: FireballState? = nil
 
     init(coord: HexCoord, type: TowerType = .projectile,
-         detectionRadius: Int = 5, fireRadius: Int = 4,
+         detectionRadius: Int = 4, fireRadius: Int = 4,
          projectileSpeed: Float = 6.0, damage: Float = 40, cooldown: Float = 1.0) {
         self.coord = coord
         self.type = type
@@ -271,7 +294,7 @@ class Tower {
 
     static func makeLaser(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .laser,
-                      detectionRadius: 7, fireRadius: 6,
+                      detectionRadius: 6, fireRadius: 6,
                       projectileSpeed: 0, damage: 0, cooldown: 3.0)
         t.laser = LaserState(duration: 3.0, dps: 60, range: 6)
         return t
@@ -279,7 +302,7 @@ class Tower {
 
     static func makeFire(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .fire,
-                      detectionRadius: 2, fireRadius: 1,
+                      detectionRadius: 1, fireRadius: 1,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
         t.cone = ConeState(duration: 3.5, dps: 60.0)
         return t
@@ -287,7 +310,7 @@ class Tower {
 
     static func makeIce(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .ice,
-                      detectionRadius: 2, fireRadius: 1,
+                      detectionRadius: 1, fireRadius: 1,
                       projectileSpeed: 0, damage: 0, cooldown: 2.0)
         t.cone = ConeState(duration: 3.0, dps: 0)
         return t
@@ -352,7 +375,7 @@ class Tower {
         case .healer:     base = 30
         case .fireball:   base = 53
         case .antiAir:    base = 35
-        case .targeting:  base = 25
+        case .targeting:  base = 75
         }
         return base * level
     }
@@ -400,7 +423,7 @@ class Tower {
                 fireRadius += 1
             }
         case .targeting:
-            if level == 3 { detectionRadius += 1 }
+            if level == 4 { detectionRadius += 1 }
         }
     }
 
@@ -418,8 +441,9 @@ class Tower {
         case .antiAir:    return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
         case .targeting:
             switch level {
-            case 1: return "Unlocks priority enemy type targeting in radius"
-            case 2: return "+1 radius, smart filter (skip immune enemies)"
+            case 1: return "Unlocks targeting mode customization in radius"
+            case 2: return "Unlocks priority enemy type targeting"
+            case 3: return "+1 radius, smart filter (skip immune enemies)"
             default: return "TBD"
             }
         }

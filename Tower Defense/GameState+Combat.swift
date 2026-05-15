@@ -103,7 +103,7 @@ extension GameState {
         if let sentinel = baseSentinelTower {
             sentinel.cooldownRemaining = max(0, sentinel.cooldownRemaining - deltaTime)
             if sentinel.cooldownRemaining <= 0 {
-                if let projectile = tryFire(tower: sentinel) {
+                if let projectile = tryFire(tower: sentinel, targetingLevel: 0) {
                     sentinel.cooldownRemaining = sentinel.cooldown
                     projectiles.append(projectile)
                     events.firedProjectiles.append(projectile)
@@ -270,6 +270,9 @@ extension GameState {
                 }
             }
 
+            // Compute targeting level once — used by selectTarget and tryFire
+            let tLevel = targetingLevel(for: tower)
+
             // Find target enemy — use locked target if actively firing, otherwise select new
             let towerPos2D = tower.coord.worldPosition(spacing: spacing)
             let closestEnemy: Enemy?
@@ -280,7 +283,7 @@ extension GameState {
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
                 closestEnemy = locked
             } else {
-                closestEnemy = selectTarget(for: tower)
+                closestEnemy = selectTarget(for: tower, targetingLevel: tLevel)
             }
 
             if let target = closestEnemy, let targetPos = enemyWorldPosition(target) {
@@ -323,7 +326,11 @@ extension GameState {
                     enemies.first(where: { $0.id == id && $0.active })
                 }
 
-                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil {
+                // Stop if target reached minimum range (≤1 tile)
+                let tooClose = lockedTarget.flatMap { enemyNearestCoord($0) }
+                    .map { tower.coord.distance(to: $0) <= 1 } ?? false
+
+                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose {
                     tower.laser!.isFiring = false
                     tower.laser!.timeRemaining = 0
                     tower.laser!.lockedTargetID = nil
@@ -386,7 +393,7 @@ extension GameState {
                         events.conesStarted.append(tower)
                     }
                 } else {
-                    if let projectile = tryFire(tower: tower) {
+                    if let projectile = tryFire(tower: tower, targetingLevel: tLevel) {
                         projectiles.append(projectile)
                         tower.cooldownRemaining = tower.cooldown
                         events.firedProjectiles.append(projectile)
@@ -861,24 +868,28 @@ extension GameState {
     }
 
     /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
-    private func selectTarget(for tower: Tower) -> Enemy? {
-        let tLevel = targetingLevel(for: tower)
+    private func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
+
+        // Level 1+: detection range extends 1 beyond firing range
+        let effectiveDetection = tLevel >= 1 ? tower.detectionRadius + 1 : tower.detectionRadius
 
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
-            // Level 3+: skip enemies this tower type cannot damage
-            if tLevel >= 3 && enemy.immuneTowerTypes.contains(tower.type) { continue }
+            // Level 4+: skip enemies this tower type cannot damage
+            if tLevel >= 4 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             let dist = tower.coord.distance(to: enemyCoord)
-            if dist <= tower.detectionRadius { candidates.append((enemy, dist)) }
+            if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
+            if dist <= effectiveDetection { candidates.append((enemy, dist)) }
         }
         guard !candidates.isEmpty else { return nil }
 
-        let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
+        // Level 2+: use tower's chosen targeting mode
+        let mode: TargetingMode = tLevel >= 2 ? tower.targetingMode : .closest
 
-        // Level 2+: prioritise a chosen enemy type before applying targeting mode
-        if tLevel >= 2, let priorityType = tower.priorityEnemyType {
+        // Level 3+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 3, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
             if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
@@ -941,19 +952,20 @@ extension GameState {
     }
 
     /// Tries to fire a projectile from the tower. Returns a projectile if targeting succeeds.
-    private func tryFire(tower: Tower) -> Projectile? {
+    private func tryFire(tower: Tower, targetingLevel: Int) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerWorldPos2D = tower.coord.worldPosition(spacing: spacing)
         let towerHeight = (towerCell?.height ?? 1.0) + 0.62 // turret height
         let towerOrigin = SIMD3<Float>(towerWorldPos2D.x, towerHeight, towerWorldPos2D.y)
 
-        // Find enemies within detection radius
+        // Find enemies within detection radius (level 1+ targeting tower extends detection by 1)
+        let effectiveDetection = targetingLevel >= 1 ? tower.detectionRadius + 1 : tower.detectionRadius
         var candidates: [(enemy: Enemy, distance: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             let dist = tower.coord.distance(to: enemyCoord)
-            if dist <= tower.detectionRadius {
+            if dist <= effectiveDetection {
                 candidates.append((enemy, dist))
             }
         }

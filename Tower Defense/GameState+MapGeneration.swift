@@ -213,13 +213,8 @@ extension GameState {
                 tower.applyUpgrade()
             case .invulnerable:
                 tower.isInvulnerable = true
-            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl:
-                grantRandomInventoryItem()
-                grantRandomInventoryItem()
-            case .slowAura:
-                slowAuraItemCount += 1
-            case .damageAura:
-                damageAuraItemCount += 1
+            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl, .slowAura, .damageAura:
+                openChest()
             case .moneyDoubler:
                 tower.hasMoneyDoubler = true
             case .rangeExtender:
@@ -239,18 +234,36 @@ extension GameState {
         towers.first(where: { $0.coord == coord })
     }
 
-    /// Grants one random inventory item chosen from: ring, repair, move tower, or $75 gold.
+    /// Grants 2 random inventory items, with a 20% chance of a bonus third item.
+    func openChest() {
+        grantRandomInventoryItem()
+        grantRandomInventoryItem()
+        if Int.random(in: 0..<5) == 0 { grantRandomInventoryItem() }
+    }
+
+    /// Grants one random inventory item chosen from: ring, repair, tower heal, move tower, slow aura, damage aura, or $75 gold.
     func grantRandomInventoryItem() {
-        let roll = Int.random(in: 0..<4)
+        let roll = Int.random(in: 0..<7)
         switch roll {
         case 0: ringItemCount += 1
         case 1: repairItemCount += 1
-        case 2: moveTowerItemCount += 1
+        case 2: towerHealItemCount += 1
+        case 3: moveTowerItemCount += 1
+        case 4: slowAuraItemCount += 1
+        case 5: damageAuraItemCount += 1
         default: money += 75
         }
     }
 
     /// Upgrades a tower if affordable. Returns true on success.
+
+    /// Heals a specific tower by 2 HP using a tower heal item. Returns true on success.
+    func useTowerHealItem(on tower: Tower) -> Bool {
+        guard towerHealItemCount > 0, tower.hitPoints < tower.maxHitPoints else { return false }
+        towerHealItemCount -= 1
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        return true
+    }
 
     /// Heals a tower by 1 HP for $75. Returns true on success.
     func repairTower(_ tower: Tower) -> Bool {
@@ -313,6 +326,23 @@ extension GameState {
         isPendingDamageAura = true
     }
 
+    func activateTowerHealItem() {
+        guard towerHealItemCount > 0, !isPendingTowerHeal else { return }
+        isPendingTowerHeal = true
+    }
+
+    func cancelPendingTowerHeal() {
+        isPendingTowerHeal = false
+    }
+
+    func applyPendingTowerHeal(on tower: Tower) -> Bool {
+        guard isPendingTowerHeal, tower.hitPoints < tower.maxHitPoints else { return false }
+        towerHealItemCount -= 1
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        isPendingTowerHeal = false
+        return true
+    }
+
     func activateMoveTower() {
         guard moveTowerItemCount > 0, !isSelectingTowerToMove, pendingMoveTower == nil else { return }
         moveTowerItemCount -= 1
@@ -346,6 +376,28 @@ extension GameState {
         oldCell.hasTower = false
         newCell.hasTower = true
         tower.coord = coord
+
+        // Apply and consume any bonus on the destination cell
+        if let bonus = newCell.bonusType {
+            switch bonus {
+            case .freeUpgrade:
+                tower.applyUpgrade()
+                tower.applyUpgrade()
+                tower.applyUpgrade()
+            case .invulnerable:
+                tower.isInvulnerable = true
+            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl, .slowAura, .damageAura:
+                openChest()
+            case .moneyDoubler:
+                tower.hasMoneyDoubler = true
+            case .rangeExtender:
+                tower.detectionRadius += 1
+                tower.fireRadius += 1
+                if tower.type == .laser { tower.laser?.range += 1 }
+            }
+            newCell.bonusType = nil
+        }
+
         pendingMoveTower = nil
         return true
     }
@@ -619,6 +671,7 @@ extension GameState {
         pendingRingBonus = false
         ringItemCount = 1
         repairItemCount = 0
+        towerHealItemCount = 0
         slowAuraItemCount = 0
         damageAuraItemCount = 0
         moveTowerItemCount = 1
@@ -626,6 +679,7 @@ extension GameState {
         isPendingDamageAura = false
         globalSlowAuraCoords = []
         globalDamageAuraCoords = []
+        isPendingTowerHeal = false
         isSelectingTowerToMove = false
         pendingMoveTower = nil
         hasPauseControl = false

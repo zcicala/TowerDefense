@@ -149,6 +149,7 @@ class GameState {
 
     var ringItemCount: Int = 0
     var repairItemCount: Int = 0
+    var towerHealItemCount: Int = 0
     var slowAuraItemCount: Int = 0
     var damageAuraItemCount: Int = 0
     var moveTowerItemCount: Int = 0
@@ -156,6 +157,8 @@ class GameState {
     var globalSlowAuraCoords: Set<HexCoord> = []
     /// Damage aura zones applied via inventory items (not tied to any tower).
     var globalDamageAuraCoords: Set<HexCoord> = []
+    /// True when the player has activated a Tower Heal item and is selecting which tower to heal.
+    var isPendingTowerHeal: Bool = false
     /// True when the player has activated a Move Tower item and is selecting which tower to move.
     var isSelectingTowerToMove: Bool = false
     /// Non-nil when a tower has been selected for moving and the player is choosing a destination.

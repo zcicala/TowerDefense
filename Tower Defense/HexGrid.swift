@@ -81,7 +81,7 @@ enum BonusType: CaseIterable {
     /// True for bonuses that go into the player's inventory or wallet rather than modifying the placed tower.
     var isInventoryBonus: Bool {
         switch self {
-        case .doubleRing, .repair, .moveTower, .pauseControl, .goldCache: return true
+        case .doubleRing, .repair, .moveTower, .pauseControl, .goldCache, .slowAura, .damageAura: return true
         default: return false
         }
     }

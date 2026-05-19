@@ -33,7 +33,7 @@ extension GameState {
             let bossHP = 100 + hp * Float(round)
             return Enemy(type: .boss, hitPoints: bossHP, speed: speed * 0.5, baseDamage: 5)
         case .hive:
-            let e = Enemy(type: .hive, hitPoints: hp * 7.0, speed: speed * 0.6, baseDamage: 2)
+            let e = Enemy(type: .hive, hitPoints: hp * 6.3, speed: speed * 0.6, baseDamage: 2)
             e.additionalHoverOffset = 1.5
             return e
         case .wisp:

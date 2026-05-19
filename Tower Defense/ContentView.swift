@@ -358,43 +358,11 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
 
-                    let anyPending = gameState.pendingRingBonus
-                        || gameState.isPendingSlowAura || gameState.isPendingDamageAura
-                        || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
-                    HStack(spacing: 10) {
-                        Text("Inventory:")
-                            .font(.caption)
-                            .foregroundColor(.white)
-
-                        Button("Ring ×\(gameState.ringItemCount)") { gameState.activateRingItem() }
-                            .buttonStyle(.borderedProminent).tint(.green)
-                            .disabled(gameState.ringItemCount == 0 || anyPending)
-
-                        Button("Repair ×\(gameState.repairItemCount)") { gameState.useRepairItem() }
-                            .buttonStyle(.borderedProminent).tint(.mint)
-                            .disabled(gameState.repairItemCount == 0 || gameState.baseTowerHP >= gameState.baseTowerMaxHP)
-
-                        Button("Slow Aura ×\(gameState.slowAuraItemCount)") { gameState.activateSlowAuraItem() }
-                            .buttonStyle(.borderedProminent).tint(.cyan)
-                            .disabled(gameState.slowAuraItemCount == 0 || anyPending)
-
-                        Button("Dmg Aura ×\(gameState.damageAuraItemCount)") { gameState.activateDamageAuraItem() }
-                            .buttonStyle(.borderedProminent).tint(.orange)
-                            .disabled(gameState.damageAuraItemCount == 0 || anyPending)
-
-                        Button("Move Tower ×\(gameState.moveTowerItemCount)") { gameState.activateMoveTower() }
-                            .buttonStyle(.borderedProminent).tint(.yellow)
-                            .disabled(gameState.moveTowerItemCount == 0 || anyPending)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.55))
-                    .cornerRadius(8)
-
                     Button("Start Round") {
                         gameState.cancelPendingSlowAura()
                         gameState.cancelPendingDamageAura()
                         gameState.cancelPendingRingBonus()
+                        gameState.cancelPendingTowerHeal()
                         gameState.cancelPendingMoveTower()
                         gameState.startRound()
                         showRoundOverMessage = false
@@ -478,6 +446,49 @@ struct ContentView: View {
                 }
             }
             .padding(.top, 16)
+
+            // Inventory panel — left side, placing phase only
+            if gameState.phase == .placing {
+                let anyPending = gameState.pendingRingBonus
+                    || gameState.isPendingSlowAura || gameState.isPendingDamageAura
+                    || gameState.isPendingTowerHeal
+                    || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Inventory")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+
+                    Button("Ring ×\(gameState.ringItemCount)") { gameState.activateRingItem() }
+                        .buttonStyle(.borderedProminent).tint(.green)
+                        .disabled(gameState.ringItemCount == 0 || anyPending)
+
+                    Button("Repair ×\(gameState.repairItemCount)") { gameState.useRepairItem() }
+                        .buttonStyle(.borderedProminent).tint(.mint)
+                        .disabled(gameState.repairItemCount == 0 || gameState.baseTowerHP >= gameState.baseTowerMaxHP)
+
+                    Button("Tower Heal ×\(gameState.towerHealItemCount)") { gameState.activateTowerHealItem() }
+                        .buttonStyle(.borderedProminent).tint(.teal)
+                        .disabled(gameState.towerHealItemCount == 0 || anyPending)
+
+                    Button("Slow Aura ×\(gameState.slowAuraItemCount)") { gameState.activateSlowAuraItem() }
+                        .buttonStyle(.borderedProminent).tint(.cyan)
+                        .disabled(gameState.slowAuraItemCount == 0 || anyPending)
+
+                    Button("Dmg Aura ×\(gameState.damageAuraItemCount)") { gameState.activateDamageAuraItem() }
+                        .buttonStyle(.borderedProminent).tint(.orange)
+                        .disabled(gameState.damageAuraItemCount == 0 || anyPending)
+
+                    Button("Move Tower ×\(gameState.moveTowerItemCount)") { gameState.activateMoveTower() }
+                        .buttonStyle(.borderedProminent).tint(.yellow)
+                        .disabled(gameState.moveTowerItemCount == 0 || anyPending)
+                }
+                .padding(10)
+                .background(.black.opacity(0.6))
+                .cornerRadius(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding(.leading, 16)
+                .padding(.top, 60)
+            }
 
             // Slow aura — pick target path tile
             if gameState.isPendingSlowAura {
@@ -573,6 +584,28 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
+            // Tower heal — select target tower prompt
+            if gameState.isPendingTowerHeal {
+                VStack(spacing: 6) {
+                    Text("Tower Heal — Select a Tower")
+                        .font(.headline)
+                        .foregroundColor(.teal)
+                    Text("Click a damaged tower to restore 2 HP.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingTowerHeal() }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
             // Bonus tile dialog — right side
             if let bonusCell = selectedBonusCell, let bonus = bonusCell.bonusType {
                 VStack(alignment: .leading, spacing: 8) {
@@ -583,16 +616,26 @@ struct ContentView: View {
 
                     Divider().background(.white.opacity(0.3))
 
-                    Text(bonus.displayName)
-                        .font(.subheadline)
-                        .foregroundColor(.yellow)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    Text(bonus.description)
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    if bonus.isInventoryBonus {
+                        Text("Treasure Chest")
+                            .font(.subheadline)
+                            .foregroundColor(.yellow)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        Text("Contains 2 items")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.85))
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        Text(bonus.displayName)
+                            .font(.subheadline)
+                            .foregroundColor(.yellow)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                        Text(bonus.description)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.85))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
 
                     Button("Close") {
                         selectedBonusCell = nil
@@ -750,6 +793,16 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                         .tint(.green)
                         .disabled(gameState.money < 75)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                        Button("Heal +2 HP ×\(gameState.towerHealItemCount)") {
+                            if gameState.useTowerHealItem(on: tower) {
+                                dialogRefresh += 1
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.mint)
+                        .disabled(gameState.towerHealItemCount == 0)
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
 
@@ -1268,6 +1321,16 @@ struct ContentView: View {
             return
         }
 
+        // Tower heal — pick which tower to heal
+        if gameState.isPendingTowerHeal {
+            if let tower = gameState.tower(at: coord) {
+                if gameState.applyPendingTowerHeal(on: tower) {
+                    dialogRefresh += 1
+                }
+            }
+            return
+        }
+
         // Move tower — step 1: pick which tower to move
         if gameState.isSelectingTowerToMove {
             if let tower = gameState.tower(at: coord) {
@@ -1280,11 +1343,13 @@ struct ContentView: View {
 
         // Move tower — step 2: pick destination
         if let movingTower = gameState.pendingMoveTower {
+            let destHadBonus = gameState.hexGrid.cell(at: coord)?.bonusType != nil
             if gameState.applyMoveTower(to: coord) {
                 if let cell = gameState.hexGrid.cell(at: coord) {
                     renderer.moveTowerEntity(id: movingTower.id, to: coord,
                                             cellHeight: cell.height, spacing: gameState.spacing)
                 }
+                if destHadBonus { renderer.removeBonusIndicator(for: coord) }
                 let (deselected, _) = gameState.selectCell(at: HexCoord(q: Int.max, r: Int.max))
                 renderer.updateSelection(deselected: deselected, selected: nil)
             }

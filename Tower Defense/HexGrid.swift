@@ -40,6 +40,12 @@ struct HexCoord: Hashable {
     }
 }
 
+enum TerrainType {
+    case grass   // 80% — regular farm, damage multiplier
+    case rock    // 10% — quarry, accumulates HP for tower
+    case gold    // 10% — bank, generates gold each round
+}
+
 enum HexCellType {
     case path
     case start
@@ -66,7 +72,7 @@ enum BonusType: CaseIterable {
         switch self {
         case .freeUpgrade:   return "Free Upgrades"
         case .invulnerable:  return "Invulnerable"
-        case .doubleRing:    return "Ring Bonus"
+        case .doubleRing:    return "Spawn Tiles"
         case .goldCache:     return "Gold Cache ($150)"
         case .slowAura:      return "Slow Aura"
         case .repair:        return "Repair (+1 HP)"
@@ -90,7 +96,7 @@ enum BonusType: CaseIterable {
         switch self {
         case .freeUpgrade:   return "Place a tower here to instantly gain 3 free upgrade levels!"
         case .invulnerable:  return "Place a tower here to make it immune to exploder damage!"
-        case .doubleRing:    return "Place a tower here to add 2 Ring Bonus items to your inventory!"
+        case .doubleRing:    return "Place a tower here to add 2 Spawn Tiles items to your inventory!"
         case .goldCache:     return "Place a tower here to receive $150!"
         case .slowAura:      return "Place a tower here to slow enemies on adjacent path tiles by 20%!"
         case .repair:        return "Place a tower here to add a Repair item to your inventory. Use it to restore 1 HP to the base tower!"
@@ -112,6 +118,8 @@ class HexCell {
     var isSelected: Bool = false
     var isPassable: Bool = true
     var hasTower: Bool = false
+    var hasFarm: Bool = false
+    var terrainType: TerrainType = .grass
     var bonusType: BonusType? = nil
     var isBonus: Bool { bonusType != nil }
     /// The next cell along the path (toward the end).
@@ -123,6 +131,33 @@ class HexCell {
         self.coord = coord
         self.height = height
         self.type = type
+    }
+}
+
+// MARK: - Farm
+
+enum FarmType {
+    case farm    // on grass — accumulates damage multiplier for tower placed on it
+    case bank    // on gold  — generates gold each round
+    case quarry  // on rock  — accumulates HP to boost the tower placed on it
+}
+
+class Farm {
+    let id: UUID = UUID()
+    var coord: HexCoord
+    var farmType: FarmType
+    var roundsGrown: Int = 0
+
+    // Regular farm fields
+    var accumulatedBonus: Float = 0.0
+    var damageMultiplier: Float { 1.0 + accumulatedBonus }
+
+    // Quarry fields
+    var accumulatedHP: Int = 0
+
+    init(coord: HexCoord, farmType: FarmType = .farm) {
+        self.coord = coord
+        self.farmType = farmType
     }
 }
 
@@ -259,7 +294,7 @@ class Tower {
     var hasTarget: Bool = false
     let turretRotationSpeed: Float = 3.0
     var hitPoints: Int = 5
-    let maxHitPoints: Int = 5
+    var maxHitPoints: Int = 5
     var isInvulnerable: Bool = false
     var hasSlowAura: Bool = false
     var slowedCoords: Set<HexCoord> = []
@@ -302,7 +337,7 @@ class Tower {
 
     static func makeFire(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .fire,
-                      detectionRadius: 1, fireRadius: 1,
+                      detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
         t.cone = ConeState(duration: 3.5, dps: 60.0)
         return t
@@ -473,7 +508,7 @@ class Enemy {
 
     // Shield properties (only used when enemyType == .shield)
     var shieldHP: Float
-    let shieldMaxHP: Float
+    var shieldMaxHP: Float
     let shieldRegen: Float = 10   // HP per second
 
     var shieldActive: Bool { shieldHP > 0 }
@@ -520,8 +555,8 @@ class Enemy {
         self.maxHitPoints = hitPoints
         self.speed = speed
         self.baseDamage = baseDamage
-        self.shieldMaxHP = type == .shield ? shieldAmount : 0
-        self.shieldHP = type == .shield ? shieldAmount : 0
+        self.shieldMaxHP = shieldAmount
+        self.shieldHP = shieldAmount
         self.explosionRadius = explosionRadius
         self.explosionDamage = explosionDamage
         switch type {

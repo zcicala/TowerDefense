@@ -14,7 +14,7 @@ extension GameState {
     @discardableResult
     func seedTerrainAroundBase() -> [HexCell] {
         guard let endCell = hexGrid.cells.values.first(where: { $0.type == .end }) else { return [] }
-        return expandTerrainAround(coord: endCell.coord)
+        return expandTerrainAround(coord: endCell.coord, count: 1)
     }
 
     private func generatePath() {
@@ -127,6 +127,15 @@ extension GameState {
             terrainHeight = avg * Float.random(in: 0.80...1.20)
         }
         let cell = HexCell(coord: coord, height: terrainHeight, type: .terrain)
+        let nearPath = hexGrid.cells.values.contains {
+            ($0.type == .path || $0.type == .start) && $0.coord.distance(to: coord) <= 2
+        }
+        let roll = Float.random(in: 0..<1)
+        if nearPath {
+            cell.terrainType = roll < 0.10 ? .rock : roll < 0.15 ? .gold : .grass
+        } else {
+            cell.terrainType = roll < 0.05 ? .gold : .grass
+        }
         hexGrid.addCell(cell)
         return cell
     }
@@ -149,12 +158,12 @@ extension GameState {
     }
 
     /// Adds up to 2 random terrain tiles among the empty neighbours of a coord. Returns new cells.
-    func expandTerrainAround(coord: HexCoord) -> [HexCell] {
+    func expandTerrainAround(coord: HexCoord, count: Int) -> [HexCell] {
         let emptyNeighbors = (0..<6)
             .map { coord.neighbor($0) }
             .filter { hexGrid.cell(at: $0) == nil }
             .shuffled()
-            .prefix(2)
+            .prefix(count)
         return emptyNeighbors.map { makeTerrainCell(at: $0) }
     }
 
@@ -225,13 +234,81 @@ extension GameState {
             cell.bonusType = nil
         }
 
+        // Consume any farm on this cell and apply its benefit to the tower
+        if let farmIndex = farms.firstIndex(where: { $0.coord == coord }) {
+            let farm = farms[farmIndex]
+            switch farm.farmType {
+            case .farm:
+                let mult = farm.damageMultiplier
+                tower.damage            *= mult
+                tower.laser?.dps        *= mult
+                tower.cone?.dps         *= mult
+                tower.fireball?.burnDPS *= mult
+            case .bank:
+                break  // banks don't benefit towers directly
+            case .quarry:
+                tower.maxHitPoints += farm.accumulatedHP
+                tower.hitPoints = tower.maxHitPoints
+            }
+            cell.hasFarm = false
+            farms.remove(at: farmIndex)
+        }
+
         towers.append(tower)
-        let newTerrain = expandTerrainAround(coord: coord)
+        let newTerrain = expandTerrainAround(coord: coord, count: 0)
         return (tower, newTerrain)
     }
 
     func tower(at coord: HexCoord) -> Tower? {
         towers.first(where: { $0.coord == coord })
+    }
+
+    func farm(at coord: HexCoord) -> Farm? {
+        farms.first(where: { $0.coord == coord })
+    }
+
+    /// Places a farm on the cell. Returns the new terrain cells spawned around it, or nil on failure.
+    func placeFarm(at coord: HexCoord) -> [HexCell]? {
+        guard phase == .placing else { return nil }
+        guard let cell = hexGrid.cell(at: coord),
+              cell.type == .terrain, !cell.hasTower, !cell.hasFarm else { return nil }
+        guard money >= farmCost else { return nil }
+        money -= farmCost
+        cell.hasFarm = true
+        let farmType: FarmType = cell.terrainType == .gold ? .bank
+                               : cell.terrainType == .rock ? .quarry
+                               : .farm
+        farms.append(Farm(coord: coord, farmType: farmType))
+        return expandTerrainAround(coord: coord, count: 2)
+    }
+
+    /// Grows every farm at the end of a round.
+    /// Advances all farms at the end of a round.
+    func advanceFarms() {
+        let farmCoords = Set(farms.map { $0.coord })
+        for farm in farms {
+            let adjacentFarmCount = hexGrid.neighbors(of: farm.coord)
+                .filter { farmCoords.contains($0.coord) }
+                .count
+            farm.roundsGrown += 1
+
+            switch farm.farmType {
+            case .farm:
+                // 3% base growth + 2% per adjacent farm
+                farm.accumulatedBonus += 0.05 + Float(adjacentFarmCount) * 0.03
+
+            case .bank:
+                // 60 gold base + 20 per adjacent farm
+                money += 20 + adjacentFarmCount * 10
+
+            case .quarry:
+                // +1 HP every 4 rounds, reduced by 1 per 2 adjacent farm/quarry/bank (min 1)
+                let interval = max(1, 4 - adjacentFarmCount / 2)
+                if farm.roundsGrown % interval == 0 {
+                    farm.accumulatedHP += 1
+                }
+            }
+        }
     }
 
     /// Grants 2 random inventory items, with a 20% chance of a bonus third item.
@@ -377,6 +454,26 @@ extension GameState {
         newCell.hasTower = true
         tower.coord = coord
 
+        // Consume any farm on the destination cell and apply its benefit to the tower
+        if let farmIndex = farms.firstIndex(where: { $0.coord == coord }) {
+            let farm = farms[farmIndex]
+            switch farm.farmType {
+            case .farm:
+                let mult = farm.damageMultiplier
+                tower.damage            *= mult
+                tower.laser?.dps        *= mult
+                tower.cone?.dps         *= mult
+                tower.fireball?.burnDPS *= mult
+            case .bank:
+                break
+            case .quarry:
+                tower.maxHitPoints += farm.accumulatedHP
+                tower.hitPoints = min(tower.hitPoints + farm.accumulatedHP, tower.maxHitPoints)
+            }
+            newCell.hasFarm = false
+            farms.remove(at: farmIndex)
+        }
+
         // Apply and consume any bonus on the destination cell
         if let bonus = newCell.bonusType {
             switch bonus {
@@ -472,6 +569,16 @@ extension GameState {
         return true
     }
 
+    /// Steps remaining along the path from `coord` to the base (end cell = 0).
+    func pathStepsToBase(from coord: HexCoord) -> Int? {
+        guard let cell = hexGrid.cell(at: coord),
+              cell.type == .path || cell.type == .start || cell.type == .end else { return nil }
+        var steps = 0
+        var current: HexCell? = cell
+        while let c = current { steps += 1; current = c.next }
+        return max(0, steps - 1)
+    }
+
     /// Returns path cells within the given tower type's fire range from coord.
     func allCellsInFireRange(from coord: HexCoord, type: TowerType) -> [HexCell] {
         // Use the placed tower's fireRadius when available, otherwise fall back to defaults
@@ -483,7 +590,7 @@ extension GameState {
             switch type {
             case .projectile: base = 4
             case .laser:      base = 6
-            case .fire:       base = 1
+            case .fire:       base = 2
             case .ice:        base = 1
             case .bowler:     base = 5
             case .sword:      base = 1
@@ -546,6 +653,8 @@ extension GameState {
     /// Transitions back to placing phase. Returns any newly added terrain/path cells.
     func returnToPlacing() -> [HexCell] {
         guard phase == .roundOver else { return [] }
+        // Advance all farms by one round
+        advanceFarms()
         // After the first boss (round 5), give 2 bonus tiles every 5 rounds
         if round % 5 == 0 && round >= 5 {
             assignBonusTile()
@@ -679,6 +788,8 @@ extension GameState {
         isPendingDamageAura = false
         globalSlowAuraCoords = []
         globalDamageAuraCoords = []
+        farms.removeAll()
+        isPlacingFarm = false
         isPendingTowerHeal = false
         isSelectingTowerToMove = false
         pendingMoveTower = nil

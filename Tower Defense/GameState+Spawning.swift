@@ -6,6 +6,16 @@ extension GameState {
 
     /// Creates an enemy of the given type using scaled base HP and speed for the round.
     func makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
+        let enemy = _makeEnemy(type: type, hp: hp, speed: speed)
+        if round >= 25 && type != .shield {
+            let personalShield = hp * 0.5
+            enemy.shieldMaxHP = personalShield
+            enemy.shieldHP = personalShield
+        }
+        return enemy
+    }
+
+    private func _makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
         switch type {
         case .basic:
             let fast = Bool.random()

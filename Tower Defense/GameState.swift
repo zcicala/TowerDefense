@@ -31,6 +31,12 @@ class GameState {
     var money: Int = 100
     let killReward: Int = 8
     var selectedTowerType: TowerType? = nil
+    var isPlacingFarm: Bool = false
+    let farmCost: Int = 40
+
+    // MARK: - Farms
+
+    var farms: [Farm] = []
 
     var towerPlacedCount: [TowerType: Int] = [:]
 
@@ -204,7 +210,7 @@ class GameState {
         .init(type: .wisp,          minRound: 12,               weight: 2),
         .init(type: .hopper,        minRound: 8,  maxRound: 25, weight: 5),
         .init(type: .exploder,      minRound: 10, maxRound: 30, weight: 3),
-        .init(type: .shield,        minRound: 15,               weight: 3),
+        .init(type: .shield,        minRound: 15, maxRound: 25, weight: 3),
         .init(type: .fastTank,      minRound: 20,               weight: 3),
         .init(type: .superHopper,   minRound: 25,               weight: 3),
         .init(type: .superExploder, minRound: 30,               weight: 2),

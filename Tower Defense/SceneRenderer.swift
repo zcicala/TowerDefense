@@ -10,15 +10,27 @@ import Metal
 /// Handles creating and updating RealityKit entities from game state.
 @MainActor
 class SceneRenderer {
-    private let surfaceShader: CustomMaterial.SurfaceShader
-    private let watercolorShader: CustomMaterial.SurfaceShader
+    // CustomMaterial(surfaceShader:lightingModel:) re-registers the shader library with
+    // RealityKit's shader manager on every call, producing "already exists" warnings.
+    // Caching one template per shader (created once) and copying the value type lets
+    // every entity share the same registration.
+    static let surfaceMaterial: CustomMaterial? = {
+        guard let lib = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary() else { return nil }
+        let shader = CustomMaterial.SurfaceShader(named: "celSurfaceShader", in: lib)
+        return try? CustomMaterial(surfaceShader: shader, lightingModel: .unlit)
+    }()
+    static let watercolorMaterial: CustomMaterial? = {
+        guard let lib = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary() else { return nil }
+        let shader = CustomMaterial.SurfaceShader(named: "watercolorSurfaceShader", in: lib)
+        return try? CustomMaterial(surfaceShader: shader, lightingModel: .unlit)
+    }()
+
     private var entityMap: [HexCoord: Entity] = [:]
     private var content: (any RealityViewContentProtocol)?
 
     init?() {
-        guard let library = MTLCreateSystemDefaultDevice()?.makeDefaultLibrary() else { return nil }
-        surfaceShader      = CustomMaterial.SurfaceShader(named: "celSurfaceShader",      in: library)
-        watercolorShader   = CustomMaterial.SurfaceShader(named: "watercolorSurfaceShader", in: library)
+        guard SceneRenderer.surfaceMaterial != nil,
+              SceneRenderer.watercolorMaterial != nil else { return nil }
     }
 
     /// Builds all entities for the current game state and adds them to the scene.
@@ -32,7 +44,7 @@ class SceneRenderer {
             let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
 
             let t = max(0, min(1, cell.height))
-            var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var material = SceneRenderer.surfaceMaterial!
             let tint: SimpleMaterial.Color
             switch cell.type {
             case .start:
@@ -114,7 +126,7 @@ class SceneRenderer {
 
     private func makeTreasureChest(at position: SIMD3<Float>) -> Entity {
         func mat(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CustomMaterial {
-            var m = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var m = SceneRenderer.surfaceMaterial!
             m.baseColor = CustomMaterial.BaseColor(tint: .init(red: r, green: g, blue: b, alpha: 1))
             return m
         }
@@ -204,6 +216,190 @@ class SceneRenderer {
     func removeAllBonusIndicators() {
         for entity in bonusIndicatorEntities.values { entity.removeFromParent() }
         bonusIndicatorEntities.removeAll()
+    }
+
+    // MARK: - Farm Entities
+
+    private var farmEntities: [HexCoord: Entity] = [:]
+
+    func createFarm(_ farm: Farm, cellHeight: Float, spacing: Float) {
+        guard let content, farmEntities[farm.coord] == nil else { return }
+
+        func mat(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CustomMaterial {
+            var m = SceneRenderer.surfaceMaterial!
+            m.baseColor = CustomMaterial.BaseColor(tint: .init(red: r, green: g, blue: b, alpha: 1))
+            return m
+        }
+
+        let pos = farm.coord.worldPosition(spacing: spacing)
+        let root = Entity()
+        root.position = [pos.x, cellHeight, pos.y]
+
+        switch farm.farmType {
+
+        case .farm:
+            // Green field base
+            let field = Entity()
+            field.components.set(ModelComponent(
+                mesh: .generateBox(width: 0.58, height: 0.025, depth: 0.58),
+                materials: [mat(0.30, 0.54, 0.20)]))
+            field.position = [0, 0.0125, 0]
+            root.addChild(field)
+
+            // --- House (left half) ---
+            let houseX: Float = -0.11
+            let wallH: Float = 0.14
+            let wallW: Float = 0.22
+            let wallD: Float = 0.22
+            let groundTop: Float = 0.025
+
+            let walls = Entity()
+            walls.components.set(ModelComponent(
+                mesh: .generateBox(width: wallW, height: wallH, depth: wallD),
+                materials: [mat(0.95, 0.90, 0.78)]))
+            walls.position = [houseX, groundTop + wallH / 2, 0]
+            root.addChild(walls)
+
+            // Door
+            let door = Entity()
+            door.components.set(ModelComponent(
+                mesh: .generateBox(width: 0.05, height: 0.07, depth: 0.01),
+                materials: [mat(0.45, 0.28, 0.12)]))
+            door.position = [houseX, groundTop + 0.04, -(wallD / 2 + 0.005)]
+            root.addChild(door)
+
+            // Peaked roof — two angled panels meeting at a ridge
+            let roofY: Float = groundTop + wallH
+            for (sign, xOff) in [(-1.0, houseX - 0.057), (1.0, houseX + 0.057)] as [(Float, Float)] {
+                let panel = Entity()
+                panel.components.set(ModelComponent(
+                    mesh: .generateBox(width: 0.135, height: 0.022, depth: wallD + 0.04),
+                    materials: [mat(0.70, 0.22, 0.14)]))
+                panel.orientation = simd_quatf(angle: -sign * (.pi / 5), axis: [0, 0, 1])
+                panel.position = [xOff, roofY + 0.026, 0]
+                root.addChild(panel)
+            }
+
+            // --- Crop rows (right half) ---
+            let cropX: Float = 0.12
+            for rz: Float in [-0.10, 0.0, 0.10] {
+                // Soil strip
+                let soilRow = Entity()
+                soilRow.components.set(ModelComponent(
+                    mesh: .generateBox(width: 0.26, height: 0.028, depth: 0.055),
+                    materials: [mat(0.38, 0.24, 0.12)]))
+                soilRow.position = [cropX, groundTop + 0.014, rz]
+                root.addChild(soilRow)
+                // Crop tops
+                let cropRow = Entity()
+                cropRow.components.set(ModelComponent(
+                    mesh: .generateBox(width: 0.26, height: 0.055, depth: 0.032),
+                    materials: [mat(0.48, 0.72, 0.22)]))
+                cropRow.position = [cropX, groundTop + 0.028 + 0.028, rz]
+                root.addChild(cropRow)
+            }
+
+        case .bank:
+            // Stepped base — two layers
+            let stepSizes: [(Float, Float, Float, Float)] = [
+                (0.58, 0.025, 0.54, 0.0125),
+                (0.52, 0.025, 0.48, 0.0375),
+            ]
+            for (w, h, d, y) in stepSizes {
+                let step = Entity()
+                step.components.set(ModelComponent(
+                    mesh: .generateBox(width: w, height: h, depth: d),
+                    materials: [mat(0.78, 0.76, 0.74)]))
+                step.position = [0, y, 0]
+                root.addChild(step)
+            }
+
+            // Building body
+            let bodyW: Float = 0.44
+            let bodyH: Float = 0.20
+            let bodyD: Float = 0.36
+            let bodyYBase: Float = 0.05
+            let body = Entity()
+            body.components.set(ModelComponent(
+                mesh: .generateBox(width: bodyW, height: bodyH, depth: bodyD),
+                materials: [mat(0.93, 0.91, 0.89)]))
+            body.position = [0, bodyYBase + bodyH / 2, 0]
+            root.addChild(body)
+
+            // Columns — front and back rows
+            let colH: Float = bodyH
+            let colY: Float = bodyYBase + colH / 2
+            for colZ: Float in [-(bodyD / 2), bodyD / 2] {
+                for cx: Float in [-0.15, -0.05, 0.05, 0.15] {
+                    let col = Entity()
+                    col.components.set(ModelComponent(
+                        mesh: .generateCylinder(height: colH, radius: 0.026),
+                        materials: [mat(0.86, 0.84, 0.82)]))
+                    col.position = [cx, colY, colZ]
+                    root.addChild(col)
+                }
+            }
+
+            // Entablature (horizontal band above columns)
+            let entabH: Float = 0.04
+            let entabYCenter: Float = bodyYBase + bodyH + entabH / 2
+            let entab = Entity()
+            entab.components.set(ModelComponent(
+                mesh: .generateBox(width: 0.50, height: entabH, depth: 0.42),
+                materials: [mat(0.80, 0.78, 0.76)]))
+            entab.position = [0, entabYCenter, 0]
+            root.addChild(entab)
+
+            // Pediment (gable) — two slanted panels forming a triangle
+            let pedBase: Float = bodyYBase + bodyH + entabH
+            for (sign, xOff) in [(-1.0, -0.115), (1.0, 0.115)] as [(Float, Float)] {
+                let panel = Entity()
+                panel.components.set(ModelComponent(
+                    mesh: .generateBox(width: 0.27, height: 0.022, depth: 0.40),
+                    materials: [mat(0.80, 0.78, 0.76)]))
+                panel.orientation = simd_quatf(angle: -sign * (.pi / 7), axis: [0, 0, 1])
+                panel.position = [xOff, pedBase + 0.042, 0]
+                root.addChild(panel)
+            }
+
+        case .quarry:
+            // Gray stone base
+            let base = Entity()
+            base.components.set(ModelComponent(
+                mesh: .generateBox(width: 0.54, height: 0.05, depth: 0.54),
+                materials: [mat(0.45, 0.44, 0.46)]))
+            base.position = [0, 0.025, 0]
+            root.addChild(base)
+            // Four rough stone blocks at corners
+            for (dx, dz) in [(-0.13, -0.13), (0.13, -0.13), (-0.13, 0.13), (0.13, 0.13)] as [(Float, Float)] {
+                let block = Entity()
+                block.components.set(ModelComponent(
+                    mesh: .generateBox(width: 0.14, height: 0.12, depth: 0.14),
+                    materials: [mat(0.52, 0.50, 0.54)]))
+                block.position = [dx, 0.11, dz]
+                root.addChild(block)
+            }
+            // Central drill/post
+            let post = Entity()
+            post.components.set(ModelComponent(
+                mesh: .generateCylinder(height: 0.20, radius: 0.04),
+                materials: [mat(0.30, 0.28, 0.32)]))
+            post.position = [0, 0.15, 0]
+            root.addChild(post)
+        }
+
+        content.add(root)
+        farmEntities[farm.coord] = root
+    }
+
+    func removeFarm(at coord: HexCoord) {
+        farmEntities[coord]?.removeFromParent()
+        farmEntities.removeValue(forKey: coord)
+    }
+
+    func removeAllFarms() {
+        for entity in farmEntities.values { entity.removeFromParent() }
+        farmEntities.removeAll()
     }
 
     // MARK: - Slow Aura Indicators
@@ -398,7 +594,7 @@ class SceneRenderer {
         root.position = [pos.x, cellHeight, pos.y]
 
         // Tower material — different tint for laser vs projectile
-        var stoneMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var stoneMaterial = SceneRenderer.surfaceMaterial!
         let tint: SimpleMaterial.Color
         switch tower.type {
         case .laser: tint = .init(red: 0.3, green: 0.5, blue: 0.7, alpha: 1)
@@ -442,7 +638,7 @@ class SceneRenderer {
         root.addChild(turretGroup)
 
         // Turret: height 0.1, radius 0.15, approximated with high-segment box for rounded edges
-        var turretMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var turretMaterial = SceneRenderer.surfaceMaterial!
         let turretTint: SimpleMaterial.Color
         switch tower.type {
         case .laser: turretTint = .init(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
@@ -464,7 +660,7 @@ class SceneRenderer {
         turretGroup.addChild(turret)
 
         // Barrel / launch mechanism
-        var barrelMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var barrelMaterial = SceneRenderer.surfaceMaterial!
         barrelMaterial.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.1, green: 0.1, blue: 0.1, alpha: 1))
 
         if tower.type == .bowler {
@@ -476,7 +672,7 @@ class SceneRenderer {
             turretGroup.addChild(restBall)
         } else if tower.type == .sword {
             // Upright sword blade resting in a scabbard
-            var bladeMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var bladeMat = SceneRenderer.surfaceMaterial!
             bladeMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.85, green: 0.85, blue: 0.95, alpha: 1))
             let bladeMesh = MeshResource.generateBox(width: 0.04, height: 0.4, depth: 0.04, cornerRadius: 0.01)
             let blade = Entity()
@@ -485,7 +681,7 @@ class SceneRenderer {
             turretGroup.addChild(blade)
         } else if tower.type == .healer {
             // Cross shape on top (two overlapping boxes forming a +)
-            var crossMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var crossMat = SceneRenderer.surfaceMaterial!
             crossMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 1.0, blue: 1.0, alpha: 1))
             let armH = Entity()
             armH.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.22, height: 0.06, depth: 0.06), materials: [crossMat]))
@@ -497,7 +693,7 @@ class SceneRenderer {
             turretGroup.addChild(armV)
         } else if tower.type == .targeting {
             // Central pivot post rising from the equipment box
-            var pivotMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var pivotMat = SceneRenderer.surfaceMaterial!
             pivotMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.30, green: 0.30, blue: 0.32, alpha: 1))
             let pivot = Entity()
             pivot.components.set(ModelComponent(
@@ -512,7 +708,7 @@ class SceneRenderer {
             turretGroup.addChild(dishGroup)
 
             // Dish face — flat rectangular panel tilted ~50° from horizontal (faces forward+upward)
-            var faceMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var faceMat = SceneRenderer.surfaceMaterial!
             faceMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.62, green: 0.63, blue: 0.65, alpha: 1))
             let dishFace = Entity()
             dishFace.components.set(ModelComponent(
@@ -524,7 +720,7 @@ class SceneRenderer {
             dishGroup.addChild(dishFace)
 
             // Structural frame bars on the back of the dish (children of dishFace so they match tilt)
-            var frameMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var frameMat = SceneRenderer.surfaceMaterial!
             frameMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.28, green: 0.30, blue: 0.28, alpha: 1))
             let frameH = Entity()  // horizontal bar
             frameH.components.set(ModelComponent(
@@ -541,7 +737,7 @@ class SceneRenderer {
 
             // Feed horn arm — thin cylinder extending forward (+Z) from dish face centre
             // Rotating -90° around X maps the cylinder's Y axis → +Z, so it extends forward
-            var armMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var armMat = SceneRenderer.surfaceMaterial!
             armMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.22, green: 0.22, blue: 0.25, alpha: 1))
             let arm = Entity()
             arm.components.set(ModelComponent(
@@ -552,7 +748,7 @@ class SceneRenderer {
             dishFace.addChild(arm)
 
             // Feed horn head — small box at the arm tip
-            var hornMat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+            var hornMat = SceneRenderer.surfaceMaterial!
             hornMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.15, green: 0.15, blue: 0.18, alpha: 1))
             let horn = Entity()
             horn.components.set(ModelComponent(
@@ -587,7 +783,7 @@ class SceneRenderer {
         let root = Entity()
         root.position = [position.x, cellHeight, position.y]
 
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var material = SceneRenderer.surfaceMaterial!
         material.baseColor = CustomMaterial.BaseColor(
             tint: .init(red: 0.85, green: 0.75, blue: 0.5, alpha: 1)
         )
@@ -666,7 +862,7 @@ class SceneRenderer {
         guard let turretGroup = turretEntities[tower.id] else { return }
 
         let domeMesh = MeshResource.generateSphere(radius: 0.08)
-        var domeMaterial = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var domeMaterial = SceneRenderer.surfaceMaterial!
         domeMaterial.baseColor = CustomMaterial.BaseColor(tint: .init(red: 1.0, green: 0.9, blue: 0.2, alpha: 1))
 
         let dome = Entity()
@@ -706,7 +902,7 @@ class SceneRenderer {
 
         // Solid beam
         let mesh = MeshResource.generateBox(width: 0.03, height: 0.03, depth: beamLength)
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var material = SceneRenderer.surfaceMaterial!
         material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.3, green: 0.6, blue: 1.0, alpha: 1))
 
         let beamEntity = Entity()
@@ -870,7 +1066,7 @@ class SceneRenderer {
 
     func createBowlingBall(_ ball: BowlingBall, at position: SIMD3<Float>) {
         guard let content else { return }
-        var mat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var mat = SceneRenderer.surfaceMaterial!
         mat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.05, green: 0.05, blue: 0.05, alpha: 1))
         let entity = Entity()
         entity.components.set(ModelComponent(mesh: MeshResource.generateSphere(radius: 0.18), materials: [mat]))
@@ -935,7 +1131,7 @@ class SceneRenderer {
 
     func createBlades(for tower: Tower, positions: [(origin: SIMD3<Float>, tip: SIMD3<Float>)]) {
         guard let content, let (origin, tip) = positions.first else { return }
-        var mat = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var mat = SceneRenderer.surfaceMaterial!
         mat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.9, green: 0.9, blue: 1.0, alpha: 1))
         let entity = Entity()
         entity.components.set(ModelComponent(mesh: MeshResource.generateBox(width: 0.025, height: 0.025, depth: 0.01), materials: [mat]))
@@ -983,7 +1179,7 @@ class SceneRenderer {
         guard let content else { return }
 
         let mesh: MeshResource
-        var material = try! CustomMaterial(surfaceShader: watercolorShader, lightingModel: .unlit)
+        var material = SceneRenderer.watercolorMaterial!
 
         switch enemy.enemyType {
         case .boss:
@@ -1215,7 +1411,7 @@ class SceneRenderer {
         guard let content else { return }
         let isFB = projectile.burnOnImpact
         let mesh = MeshResource.generateSphere(radius: isFB ? 0.13 : 0.05)
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var material = SceneRenderer.surfaceMaterial!
         material.baseColor = CustomMaterial.BaseColor(tint: isFB
             ? .init(red: 1.0, green: 0.35, blue: 0.0, alpha: 1)
             : .init(red: 1.0, green: 0.9, blue: 0.3, alpha: 1))
@@ -1333,8 +1529,20 @@ class SceneRenderer {
         guard let content else { return }
         let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
         let t = max(0, min(1, cell.height))
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
-        material.baseColor = CustomMaterial.BaseColor(tint: colorForHeight(t, isPath: false))
+        var material = SceneRenderer.surfaceMaterial!
+        let tint: SimpleMaterial.Color
+        switch cell.terrainType {
+        case .grass:
+            tint = colorForHeight(t, isPath: false)
+        case .rock:
+            let v = CGFloat(0.44 + 0.14 * t)
+            tint = SimpleMaterial.Color(red: v, green: v, blue: v + 0.03, alpha: 1)
+        case .gold:
+            tint = SimpleMaterial.Color(red: CGFloat(0.70 + 0.12 * t),
+                                        green: CGFloat(0.56 + 0.10 * t),
+                                        blue: CGFloat(0.14), alpha: 1)
+        }
+        material.baseColor = CustomMaterial.BaseColor(tint: tint)
         let pos = cell.coord.worldPosition(spacing: spacing)
         let entity = Entity()
         entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
@@ -1354,7 +1562,7 @@ class SceneRenderer {
     func addPathCell(_ cell: HexCell, spacing: Float, hexRadius: Float) {
         guard let content else { return }
         let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
-        var material = try! CustomMaterial(surfaceShader: surfaceShader, lightingModel: .unlit)
+        var material = SceneRenderer.surfaceMaterial!
         let tint: SimpleMaterial.Color
         if cell.type == .start {
             tint = SimpleMaterial.Color(red: 0.2, green: 0.6, blue: 0.25, alpha: 1)

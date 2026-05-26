@@ -33,7 +33,7 @@ extension GameState {
         }
 
         // Regenerate shields
-        for enemy in enemies where enemy.active && enemy.enemyType == .shield && enemy.shieldHP > 0 {
+        for enemy in enemies where enemy.active && enemy.shieldHP > 0 && enemy.shieldMaxHP > 0 {
             enemy.shieldHP = min(enemy.shieldMaxHP, enemy.shieldHP + enemy.shieldRegen * deltaTime)
         }
 
@@ -54,7 +54,7 @@ extension GameState {
                     enemy.burning = false
                     enemy.burnTimer = 0
                 } else {
-                    if dealDamage(enemy.burnDPS * deltaTime, to: enemy, events: &events) {
+                    if dealDamage(enemy.burnDPS * deltaTime, to: enemy, isFireDamage: true, events: &events) {
                         continue
                     }
                 }
@@ -259,12 +259,29 @@ extension GameState {
                 } else {
                     let coneCells = fireConeCoords(for: tower)
                     if tower.type == .fire {
-                        applyAreaDamage(cells: coneCells, dps: tower.cone!.dps, deltaTime: deltaTime, tower: tower, events: &events)
+                        let nearCells = coneCells.filter { tower.coord.distance(to: $0) <= 1 }
+                        let farCells  = coneCells.filter { tower.coord.distance(to: $0) == 2 }
+                        applyAreaDamage(cells: nearCells, dps: tower.cone!.dps, deltaTime: deltaTime, tower: tower, events: &events)
+                        applyAreaDamage(cells: farCells,  dps: tower.cone!.dps * 0.5, deltaTime: deltaTime, tower: tower, events: &events)
                         if tower.level == Tower.maxLevel {
                             applyBurning(cells: coneCells)
                         }
                     } else if tower.type == .ice, let target = tower.cone!.targetCoord {
                         applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
+                    }
+                    // Stop firing if no enemies remain in the targeted area
+                    let targetCells: [HexCoord] = tower.type == .fire ? coneCells : (tower.cone!.targetCoord.map { [$0] } ?? [])
+                    let hasEnemies = enemies.contains { enemy in
+                        guard enemy.active, let c = enemyNearestCoord(enemy) else { return false }
+                        return targetCells.contains(c)
+                    }
+                    if !hasEnemies {
+                        tower.cone!.isFiring = false
+                        tower.cone!.targetCoord = nil
+                        tower.cone!.lockedTargetID = nil
+                        tower.cooldownRemaining = tower.cooldown
+                        events.conesEnded.append(tower)
+                        continue
                     }
                     // Falls through to enemy detection and rotation below
                 }
@@ -724,18 +741,21 @@ extension GameState {
 
         if enemy.enemyType == .superHopper {
             // Super hopper: search all path cells within hex radius, jump to the
-            // one furthest ahead on the path toward the end tower.
-            let currentDepth = pathDepth(of: current)
+            // one closest to the end tower (fewest remaining steps).
+            // Using remaining steps rather than depth-from-start avoids a bug where
+            // branch cells have higher depth-from-start than the junction they lead to,
+            // causing the hopper to get stuck with no valid forward target.
+            let currentRemaining = stepsToEnd(of: current)
             var best: HexCell? = nil
-            var bestDepth = currentDepth
+            var bestRemaining = currentRemaining
 
             for cell in hexGrid.cells.values {
                 guard cell.type == .path || cell.type == .end else { continue }
                 guard cell.coord.distance(to: current.coord) <= jumpRadius else { continue }
                 guard cell.coord != current.coord else { continue }
-                let depth = pathDepth(of: cell)
-                if depth > bestDepth {
-                    bestDepth = depth
+                let remaining = stepsToEnd(of: cell)
+                if remaining < bestRemaining {
+                    bestRemaining = remaining
                     best = cell
                 }
             }
@@ -770,16 +790,15 @@ extension GameState {
         enemy.jumpProgress = 0
     }
 
-    /// Returns the number of steps from the start of the path to this cell
-    /// by walking the `.previous` chain.
-    private func pathDepth(of cell: HexCell) -> Int {
-        var depth = 0
+    /// Returns the number of steps remaining from this cell to the end by walking the `.next` chain.
+    private func stepsToEnd(of cell: HexCell) -> Int {
+        var steps = 0
         var walker: HexCell? = cell
-        while let prev = walker?.previous {
-            depth += 1
-            walker = prev
+        while let next = walker?.next {
+            steps += 1
+            walker = next
         }
-        return depth
+        return steps
     }
 
     /// Computes world position for an enemy using Catmull-Rom interpolation.
@@ -1029,9 +1048,10 @@ extension GameState {
     /// Deals damage to an enemy, routing through a nearby shield if one exists.
     /// Returns true if the enemy was killed.
     @discardableResult
-    private func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, events: inout GameEvents) -> Bool {
+    private func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, isFireDamage: Bool = false, events: inout GameEvents) -> Bool {
         guard enemy.active else { return false }
         if let tower, enemy.immuneTowerTypes.contains(tower.type) { return false }
+        let shieldFireMult: Float = (isFireDamage || tower?.type == .fire || tower?.type == .fireball) ? 2.0 : 1.0
         let baseReward = enemy.enemyType == .boss ? 5 * round : killReward
         let reward = tower?.hasMoneyDoubler == true ? baseReward * 2 : baseReward
 
@@ -1061,10 +1081,20 @@ extension GameState {
         if damageAuraPathCoords.contains(coord) {
             remaining *= 1.4
         }
+        // Personal shield (level 25+ mechanic — non-shielder enemies absorb with their own shield)
+        if enemy.shieldHP > 0 && enemy.enemyType != .shield {
+            let shieldDmg = remaining * shieldFireMult
+            let absorbed = min(enemy.shieldHP, shieldDmg)
+            enemy.shieldHP -= absorbed
+            remaining -= absorbed / shieldFireMult
+            if enemy.shieldHP <= 0 { events.shieldsBroken.append(enemy) }
+        }
+        // External shielder protection
         if let shielder = findShielder(near: coord) {
-            let absorbed = min(shielder.shieldHP, remaining)
+            let shieldDmg = remaining * shieldFireMult
+            let absorbed = min(shielder.shieldHP, shieldDmg)
             shielder.shieldHP -= absorbed
-            remaining -= absorbed
+            remaining -= absorbed / shieldFireMult
             if shielder.shieldHP <= 0 {
                 events.shieldsBroken.append(shielder)
             }

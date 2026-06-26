@@ -7,7 +7,7 @@ extension GameState {
 
     /// Main update called each frame. Returns events for the renderer.
     func togglePause() {
-        guard hasPauseControl && phase == .combat else { return }
+        guard phase == .combat else { return }
         isPaused.toggle()
     }
 
@@ -23,9 +23,9 @@ extension GameState {
 
         if spawnedCount < enemies.count && spawnTimer >= spawnInterval {
             spawnTimer = 0
-            spawnInterval = Float.random(in: 0.5...1.5)
+            spawnInterval = rng.randomFloat(in: 0.5...1.5)
             if let enemy = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
-                enemy.currentCell = startCells.randomElement()
+                enemy.currentCell = rng.randomElement(startCells)
                 enemy.progress = 0
                 enemy.active = true
                 events.spawnedEnemies.append(enemy)
@@ -78,7 +78,7 @@ extension GameState {
                     hopper.isDroppingFromHive = true
                     hopper.hiveDropFromY = hiveWorldY
                     hopper.hiveDropProgress = 0
-                    let angle = Float.random(in: 0..<(2 * .pi))
+                    let angle = rng.randomFloat(in: 0..<(2 * .pi))
                     hopper.hiveDropLateralOffset = SIMD2<Float>(cos(angle) * 0.35, sin(angle) * 0.35)
                     hopper.active = true
                     enemies.append(hopper)
@@ -417,6 +417,48 @@ extension GameState {
                     }
                 }
             }
+
+            // Second turret — projectile tower max level only
+            if tower.type == .projectile, var st = tower.secondTurret {
+                st.cooldownRemaining = max(0, st.cooldownRemaining - deltaTime)
+
+                // Pick a different enemy from the main turret when possible
+                let secondTarget = selectAlternateTarget(for: tower, avoiding: closestEnemy, targetingLevel: tLevel)
+                let stEnemy = secondTarget ?? closestEnemy
+
+                if let target = stEnemy, let targetPos = enemyWorldPosition(target) {
+                    let towerPos2D = tower.coord.worldPosition(spacing: spacing)
+                    let dx = targetPos.x - towerPos2D.x
+                    let dz = targetPos.z - towerPos2D.y
+                    st.targetYaw = atan2(dx, dz) + .pi
+                    st.hasTarget = true
+                } else {
+                    st.hasTarget = false
+                }
+
+                // Rotate second turret
+                if st.hasTarget {
+                    var diff = st.targetYaw - st.currentYaw
+                    while diff > .pi  { diff -= 2 * .pi }
+                    while diff < -.pi { diff += 2 * .pi }
+                    let maxStep = tower.turretRotationSpeed * deltaTime
+                    st.currentYaw += abs(diff) <= maxStep ? diff : copysign(maxStep, diff)
+                }
+
+                // Fire when aimed
+                var aimDiff2 = st.targetYaw - st.currentYaw
+                while aimDiff2 > .pi  { aimDiff2 -= 2 * .pi }
+                while aimDiff2 < -.pi { aimDiff2 += 2 * .pi }
+                if st.cooldownRemaining <= 0 && st.hasTarget && abs(aimDiff2) < aimThreshold,
+                   let target = stEnemy,
+                   let projectile = makeProjectile(from: tower, targeting: target, targetingLevel: tLevel) {
+                    projectiles.append(projectile)
+                    st.cooldownRemaining = tower.cooldown
+                    events.firedProjectiles.append(projectile)
+                }
+
+                tower.secondTurret = st
+            }
         }
 
         // Update projectiles
@@ -540,7 +582,7 @@ extension GameState {
     // MARK: - Enemy Movement
 
     /// Called when an enemy reaches the end tile and hits the base tower.
-    private func updateBowlingBalls(deltaTime: Float, events: inout GameEvents) {
+    func updateBowlingBalls(deltaTime: Float, events: inout GameEvents) {
         for ball in bowlingBalls where ball.active {
             // Fall-in animation: hold position, just tick the timer
             if ball.isFalling {
@@ -597,7 +639,7 @@ extension GameState {
         bowlingBalls.removeAll { !$0.active }
     }
 
-    private func damageBaseTower(damage: Int, events: inout GameEvents) {
+    func damageBaseTower(damage: Int, events: inout GameEvents) {
         baseTowerHP = max(0, baseTowerHP - damage)
         baseTowerDamageAccumulated += damage
         events.baseTowerHit = true
@@ -614,7 +656,7 @@ extension GameState {
         }
     }
 
-    private func moveEnemy(_ enemy: Enemy, deltaTime: Float) {
+    func moveEnemy(_ enemy: Enemy, deltaTime: Float) {
         guard let current = enemy.currentCell else { return }
 
         guard let nextCell = current.next else {
@@ -665,7 +707,7 @@ extension GameState {
     }
 
     /// Returns the visual sphere/box radius used when rendering this enemy type.
-    private func enemyVisualRadius(for type: EnemyType) -> Float {
+    func enemyVisualRadius(for type: EnemyType) -> Float {
         switch type {
         case .basic:         return enemyRadius
         case .hopper:        return enemyRadius * 1.1
@@ -682,13 +724,13 @@ extension GameState {
         }
     }
 
-    private func updateHopper(_ enemy: Enemy, deltaTime: Float) {
+    func updateHopper(_ enemy: Enemy, deltaTime: Float) {
         if enemy.isDroppingFromHive {
             let dropDuration: Float = 0.55
             enemy.hiveDropProgress = min(1.0, enemy.hiveDropProgress + deltaTime / dropDuration)
             if enemy.hiveDropProgress >= 1.0 {
                 enemy.isDroppingFromHive = false
-                enemy.hopperJumpTimer = Float.random(in: enemy.hopperJumpInterval)
+                enemy.hopperJumpTimer = rng.randomFloat(in: enemy.hopperJumpInterval)
             }
             return
         }
@@ -713,7 +755,7 @@ extension GameState {
                 enemy.jumpProgress = 0
                 enemy.jumpFromPos = nil
                 enemy.jumpToPos = nil
-                enemy.hopperJumpTimer = Float.random(in: enemy.hopperJumpInterval)
+                enemy.hopperJumpTimer = rng.randomFloat(in: enemy.hopperJumpInterval)
                 // If landed on end cell (no next), reach end
                 if enemy.currentCell?.next == nil {
                     enemy.reachedEnd = true
@@ -728,9 +770,9 @@ extension GameState {
         }
     }
 
-    private func triggerHopperJump(_ enemy: Enemy) {
+    func triggerHopperJump(_ enemy: Enemy) {
         guard let current = enemy.currentCell else { return }
-        let jumpRadius = Int.random(in: enemy.hopperJumpRange)
+        let jumpRadius = rng.randomInt(in: enemy.hopperJumpRange)
 
         let fromPos = enemyWorldPosition(enemy) ?? {
             let p = current.coord.worldPosition(spacing: spacing)
@@ -776,7 +818,7 @@ extension GameState {
 
         guard let landCell else {
             // Super hopper found no valid target — skip this jump
-            enemy.hopperJumpTimer = Float.random(in: enemy.hopperJumpInterval)
+            enemy.hopperJumpTimer = rng.randomFloat(in: enemy.hopperJumpInterval)
             return
         }
 
@@ -791,7 +833,7 @@ extension GameState {
     }
 
     /// Returns the number of steps remaining from this cell to the end by walking the `.next` chain.
-    private func stepsToEnd(of cell: HexCell) -> Int {
+    func stepsToEnd(of cell: HexCell) -> Int {
         var steps = 0
         var walker: HexCell? = cell
         while let next = walker?.next {
@@ -879,24 +921,43 @@ extension GameState {
 
     /// How far along the path an enemy is (higher = closer to end).
     /// Counts remaining steps to end, negated so that further ahead = higher value.
-    private func enemyPathProgress(_ enemy: Enemy) -> Int {
+    func enemyPathProgress(_ enemy: Enemy) -> Int {
         var steps = 0
         var cell = enemy.currentCell?.next
         while let c = cell { steps += 1; cell = c.next }
         return -steps
     }
 
-    /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
-    private func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
+    /// Effective detection radius for a tower given the highest targeting tower level covering it.
+    func effectiveDetectionRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
+        tLevel >= 2 ? tower.detectionRadius + 1 : tower.detectionRadius
+    }
 
-        // Level 1+: detection range extends 1 beyond firing range
-        let effectiveDetection = tLevel >= 1 ? tower.detectionRadius + 1 : tower.detectionRadius
+    /// Effective fire radius for a tower given the highest targeting tower level covering it.
+    func effectiveFireRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
+        tLevel >= 5 ? tower.fireRadius + 1 : tower.fireRadius
+    }
+
+    /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
+    func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
+        // Level 4+: manual attack lock takes highest priority
+        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
+            if let locked = enemies.first(where: { $0.id == manualID && $0.active }),
+               let coord = enemyNearestCoord(locked),
+               tower.coord.distance(to: coord) <= effectiveDetectionRadius(for: tower, targetingLevel: tLevel) {
+                return locked
+            }
+            tower.manualTargetEnemyID = nil  // enemy dead or out of range
+        }
+
+        // Level 2+: detection +1
+        let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
 
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
-            // Level 4+: skip enemies this tower type cannot damage
-            if tLevel >= 4 && enemy.immuneTowerTypes.contains(tower.type) { continue }
+            // Level 2+: skip enemies this tower type cannot damage
+            if tLevel >= 2 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
@@ -904,8 +965,8 @@ extension GameState {
         }
         guard !candidates.isEmpty else { return nil }
 
-        // Level 2+: use tower's chosen targeting mode
-        let mode: TargetingMode = tLevel >= 2 ? tower.targetingMode : .closest
+        // Level 1+: use tower's chosen targeting mode
+        let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
 
         // Level 3+: prioritise a chosen enemy type before applying targeting mode
         if tLevel >= 3, let priorityType = tower.priorityEnemyType {
@@ -916,7 +977,7 @@ extension GameState {
         return applyTargetingMode(mode, to: candidates)
     }
 
-    private func applyTargetingMode(_ mode: TargetingMode, to candidates: [(enemy: Enemy, dist: Int)]) -> Enemy? {
+    func applyTargetingMode(_ mode: TargetingMode, to candidates: [(enemy: Enemy, dist: Int)]) -> Enemy? {
         switch mode {
         case .closest:       return candidates.min(by: { $0.dist < $1.dist })?.enemy
         case .furthestAhead: return candidates.max(by: { enemyPathProgress($0.enemy) < enemyPathProgress($1.enemy) })?.enemy
@@ -927,7 +988,7 @@ extension GameState {
     }
 
     /// Predicts the world position of an enemy after `time` seconds.
-    private func predictEnemyPosition(_ enemy: Enemy, afterTime time: Float) -> (position: SIMD3<Float>, coord: HexCoord)? {
+    func predictEnemyPosition(_ enemy: Enemy, afterTime time: Float) -> (position: SIMD3<Float>, coord: HexCoord)? {
         guard var cell = enemy.currentCell else { return nil }
         var progress = enemy.progress
         var remaining = time
@@ -970,15 +1031,56 @@ extension GameState {
         }
     }
 
+    /// Returns the closest active enemy in range other than `primary`, for the second turret.
+    func selectAlternateTarget(for tower: Tower, avoiding primary: Enemy?, targetingLevel tLevel: Int) -> Enemy? {
+        let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
+        var best: (enemy: Enemy, dist: Int)? = nil
+        for enemy in enemies where enemy.active && enemy.id != primary?.id {
+            guard let coord = enemyNearestCoord(enemy) else { continue }
+            let dist = tower.coord.distance(to: coord)
+            guard dist <= effectiveDetection else { continue }
+            if best == nil || dist < best!.dist { best = (enemy, dist) }
+        }
+        return best?.enemy
+    }
+
+    /// Creates a projectile fired from `tower` aimed at a specific `target`, skipping candidate selection.
+    func makeProjectile(from tower: Tower, targeting target: Enemy, targetingLevel tLevel: Int) -> Projectile? {
+        let towerCell = hexGrid.cell(at: tower.coord)
+        let towerPos2D = tower.coord.worldPosition(spacing: spacing)
+        let towerHeight = (towerCell?.height ?? 1.0) + 0.62
+        let towerOrigin = SIMD3<Float>(towerPos2D.x, towerHeight, towerPos2D.y)
+
+        guard let enemyPos = enemyWorldPosition(target) else { return nil }
+        let estimatedFlightTime = simd_distance(towerOrigin, enemyPos) / tower.projectileSpeed
+        guard let prediction = predictEnemyPosition(target, afterTime: estimatedFlightTime) else { return nil }
+
+        let predictedDist = tower.coord.distance(to: prediction.coord)
+        if predictedDist > effectiveFireRadius(for: tower, targetingLevel: tLevel) { return nil }
+
+        let actualFlightTime = simd_distance(towerOrigin, prediction.position) / tower.projectileSpeed
+        return Projectile(
+            origin: towerOrigin,
+            target: prediction.position,
+            totalFlightTime: actualFlightTime,
+            damage: tower.damage,
+            targetEnemyID: target.id,
+            isAoE: false,
+            sourceTowerID: tower.id
+        )
+    }
+
     /// Tries to fire a projectile from the tower. Returns a projectile if targeting succeeds.
-    private func tryFire(tower: Tower, targetingLevel: Int) -> Projectile? {
+    func tryFire(tower: Tower, targetingLevel tLevel: Int) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerWorldPos2D = tower.coord.worldPosition(spacing: spacing)
-        let towerHeight = (towerCell?.height ?? 1.0) + 0.62 // turret height
+        let towerHeight = (towerCell?.height ?? 1.0) + 0.62
         let towerOrigin = SIMD3<Float>(towerWorldPos2D.x, towerHeight, towerWorldPos2D.y)
 
-        // Find enemies within detection radius (level 1+ targeting tower extends detection by 1)
-        let effectiveDetection = targetingLevel >= 1 ? tower.detectionRadius + 1 : tower.detectionRadius
+        let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
+        let effectiveFire = effectiveFireRadius(for: tower, targetingLevel: tLevel)
+
+        // Build candidate list; if a manual target is locked put it first
         var candidates: [(enemy: Enemy, distance: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
@@ -988,26 +1090,24 @@ extension GameState {
                 candidates.append((enemy, dist))
             }
         }
-
-        // Sort by distance (closest first)
-        candidates.sort { $0.distance < $1.distance }
+        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
+            candidates.sort { a, _ in a.enemy.id == manualID }
+        } else {
+            candidates.sort { $0.distance < $1.distance }
+        }
 
         for (enemy, _) in candidates {
             guard let enemyPos = enemyWorldPosition(enemy) else { continue }
 
-            // Estimate time of flight to current enemy position
             let dist3D = simd_distance(towerOrigin, enemyPos)
             let estimatedFlightTime = dist3D / tower.projectileSpeed
 
-            // Predict where enemy will be when projectile arrives
             guard let prediction = predictEnemyPosition(enemy, afterTime: estimatedFlightTime) else { continue }
 
-            // Check if predicted position is within fire radius (and outside minimum range for fireball)
             let predictedHexDist = tower.coord.distance(to: prediction.coord)
-            if predictedHexDist > tower.fireRadius { continue }
+            if predictedHexDist > effectiveFire { continue }
             if tower.type == .fireball && predictedHexDist < 2 { continue }
 
-            // Refine: compute actual flight time to predicted position
             let actualDist = simd_distance(towerOrigin, prediction.position)
             let actualFlightTime = actualDist / tower.projectileSpeed
 
@@ -1019,7 +1119,7 @@ extension GameState {
                 totalFlightTime: actualFlightTime,
                 damage: tower.damage,
                 targetEnemyID: enemy.id,
-                isAoE: !isFireball && tower.level == Tower.maxLevel,
+                isAoE: !isFireball && tower.type != .projectile && tower.level == Tower.maxLevel,
                 sourceTowerID: tower.id,
                 burnOnImpact: isFireball,
                 impactBurnDPS: isFireball ? tower.fireball!.burnDPS : 0,
@@ -1035,7 +1135,7 @@ extension GameState {
     // MARK: - Damage Helpers
 
     /// Finds a nearby active shielder protecting the given coord (within 1 hex).
-    private func findShielder(near coord: HexCoord) -> Enemy? {
+    func findShielder(near coord: HexCoord) -> Enemy? {
         for enemy in enemies where enemy.active && enemy.enemyType == .shield && enemy.shieldActive {
             guard let shielderCoord = enemyNearestCoord(enemy) else { continue }
             if shielderCoord.distance(to: coord) <= 1 {
@@ -1048,7 +1148,7 @@ extension GameState {
     /// Deals damage to an enemy, routing through a nearby shield if one exists.
     /// Returns true if the enemy was killed.
     @discardableResult
-    private func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, isFireDamage: Bool = false, events: inout GameEvents) -> Bool {
+    func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, isFireDamage: Bool = false, events: inout GameEvents) -> Bool {
         guard enemy.active else { return false }
         if let tower, enemy.immuneTowerTypes.contains(tower.type) { return false }
         let shieldFireMult: Float = (isFireDamage || tower?.type == .fire || tower?.type == .fireball) ? 2.0 : 1.0
@@ -1123,7 +1223,7 @@ extension GameState {
         return false
     }
 
-    private func applyAreaDamage(cells: [HexCoord], dps: Float, deltaTime: Float, tower: Tower? = nil, events: inout GameEvents) {
+    func applyAreaDamage(cells: [HexCoord], dps: Float, deltaTime: Float, tower: Tower? = nil, events: inout GameEvents) {
         for enemy in enemies where enemy.active {
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             if cells.contains(enemyCoord) {
@@ -1132,7 +1232,7 @@ extension GameState {
         }
     }
 
-    private func applyBurning(cells: [HexCoord]) {
+    func applyBurning(cells: [HexCoord]) {
         for enemy in enemies where enemy.active {
             guard !enemy.immuneTowerTypes.contains(.fire) else { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
@@ -1143,7 +1243,7 @@ extension GameState {
         }
     }
 
-    private func applyAreaSlow(cells: [HexCoord], slowFactor: Float = 0.5) {
+    func applyAreaSlow(cells: [HexCoord], slowFactor: Float = 0.5) {
         let slowDuration: Float = 2.0
         for enemy in enemies where enemy.active {
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }

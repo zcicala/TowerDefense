@@ -584,6 +584,7 @@ class SceneRenderer {
 
     private var towerEntities: [UUID: Entity] = [:]
     private var turretEntities: [UUID: Entity] = [:]
+    private var secondTurretEntities: [UUID: Entity] = [:]
     private var dishEntities: [UUID: Entity] = [:]
 
     func createTower(_ tower: Tower, cellHeight: Float, spacing: Float) {
@@ -872,6 +873,43 @@ class SceneRenderer {
         // Squash into a dome shape
         dome.scale = [1.0, 0.5, 1.0]
         turretGroup.addChild(dome)
+    }
+
+    /// Builds and attaches a second independent turret above the first for max-level projectile towers.
+    func addSecondTurret(for tower: Tower) {
+        guard let root = towerEntities[tower.id] else { return }
+
+        // Sit the second turret on top of the first (first group is at ~0.64, turret box is 0.1 tall)
+        let secondTurretGroup = Entity()
+        secondTurretGroup.position.y = 0.79
+
+        var turretMat = SceneRenderer.surfaceMaterial!
+        turretMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.7, green: 0.3, blue: 0.2, alpha: 1))
+
+        // Smaller turret box
+        let turretMesh = MeshResource.generateBox(width: 0.22, height: 0.08, depth: 0.22, cornerRadius: 0.04)
+        let turret = Entity()
+        turret.components.set(ModelComponent(mesh: turretMesh, materials: [turretMat]))
+        secondTurretGroup.addChild(turret)
+
+        // Barrel
+        var barrelMat = SceneRenderer.surfaceMaterial!
+        barrelMat.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.1, green: 0.1, blue: 0.1, alpha: 1))
+        let barrelMesh = MeshResource.generateCylinder(height: 0.16, radius: 0.05)
+        let barrel = Entity()
+        barrel.components.set(ModelComponent(mesh: barrelMesh, materials: [barrelMat]))
+        barrel.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+        barrel.position = [0, 0, -0.2]
+        secondTurretGroup.addChild(barrel)
+
+        root.addChild(secondTurretGroup)
+        secondTurretEntities[tower.id] = secondTurretGroup
+    }
+
+    func updateSecondTurretRotation(_ tower: Tower) {
+        guard let st = tower.secondTurret,
+              let group = secondTurretEntities[tower.id] else { return }
+        group.orientation = simd_quatf(angle: st.currentYaw, axis: [0, 1, 0])
     }
 
     func updateTurretRotation(_ tower: Tower) {
@@ -1506,6 +1544,7 @@ class SceneRenderer {
         towerEntities[id]?.removeFromParent()
         towerEntities.removeValue(forKey: id)
         turretEntities.removeValue(forKey: id)
+        secondTurretEntities.removeValue(forKey: id)
         dishEntities.removeValue(forKey: id)
     }
 

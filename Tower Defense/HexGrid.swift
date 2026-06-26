@@ -64,7 +64,6 @@ enum BonusType: CaseIterable {
     case repair
     case moneyDoubler
     case rangeExtender
-    case pauseControl
     case damageAura
     case moveTower
 
@@ -78,7 +77,6 @@ enum BonusType: CaseIterable {
         case .repair:        return "Repair (+1 HP)"
         case .moneyDoubler:  return "Money Doubler"
         case .rangeExtender: return "Range Extender"
-        case .pauseControl:  return "Pause Control"
         case .damageAura:    return "Damage Aura"
         case .moveTower:     return "Move Tower"
         }
@@ -87,7 +85,7 @@ enum BonusType: CaseIterable {
     /// True for bonuses that go into the player's inventory or wallet rather than modifying the placed tower.
     var isInventoryBonus: Bool {
         switch self {
-        case .doubleRing, .repair, .moveTower, .pauseControl, .goldCache, .slowAura, .damageAura: return true
+        case .doubleRing, .repair, .moveTower, .goldCache, .slowAura, .damageAura: return true
         default: return false
         }
     }
@@ -102,7 +100,6 @@ enum BonusType: CaseIterable {
         case .repair:        return "Place a tower here to add a Repair item to your inventory. Use it to restore 1 HP to the base tower!"
         case .moneyDoubler:  return "Place a tower here to earn double money for every enemy it kills!"
         case .rangeExtender: return "Place a tower here to extend its detection and firing range by +1!"
-        case .pauseControl:  return "Place a tower here to unlock Spacebar pause — freeze time during combat!"
         case .damageAura:    return "Place a tower here to boost all damage dealt to enemies on adjacent path tiles by 40%!"
         case .moveTower:     return "Place a tower here to add a Move Tower item to your inventory. Use it to reposition any placed tower!"
         }
@@ -267,6 +264,71 @@ enum EnemyType: CaseIterable {
     }
 }
 
+// MARK: - Wave Themes
+
+enum WaveTheme: CaseIterable {
+    case swarm
+    case armoredColumn
+    case hopperSurge
+    case exploderRush
+    case shieldWall
+    case hiveMind
+
+    var displayName: String {
+        switch self {
+        case .swarm:          return "Swarm"
+        case .armoredColumn:  return "Armored Column"
+        case .hopperSurge:    return "Hopper Surge"
+        case .exploderRush:   return "Exploder Rush"
+        case .shieldWall:     return "Shield Wall"
+        case .hiveMind:       return "Hive Mind"
+        }
+    }
+
+    var flavorText: String {
+        switch self {
+        case .swarm:          return "Masses of fast enemies converge on the base."
+        case .armoredColumn:  return "Heavy units march in tight formation."
+        case .hopperSurge:    return "Agile hoppers will leap past your defenses."
+        case .exploderRush:   return "Volatile units threaten to destroy your towers."
+        case .shieldWall:     return "Shield bearers protect the whole column."
+        case .hiveMind:       return "A hive descends, spawning endless hoppers."
+        }
+    }
+
+    /// Earliest round this theme can appear (keyed to when its star enemy debuts).
+    var minRound: Int {
+        switch self {
+        case .swarm:          return 1
+        case .armoredColumn:  return 6
+        case .hopperSurge:    return 8
+        case .exploderRush:   return 10
+        case .shieldWall:     return 15
+        case .hiveMind:       return 18
+        }
+    }
+
+    /// Weight multiplier applied to each enemy type when this theme is active.
+    func weightMultiplier(for type: EnemyType) -> Float {
+        switch self {
+        case .swarm:
+            return type == .basic ? 5.0 : 0.4
+        case .armoredColumn:
+            return (type == .tank || type == .fastTank || type == .mirroid) ? 5.0 : 0.4
+        case .hopperSurge:
+            return (type == .hopper || type == .superHopper) ? 5.0 : 0.4
+        case .exploderRush:
+            return (type == .exploder || type == .superExploder) ? 5.0 : 0.4
+        case .shieldWall:
+            if type == .shield { return 5.0 }
+            if type == .tank || type == .mirroid { return 2.5 }
+            return 0.4
+        case .hiveMind:
+            return (type == .hive || type == .wisp) ? 5.0 : 0.4
+        }
+    }
+}
+
 enum TargetingMode: String, CaseIterable {
     case closest = "Closest"
     case furthestAhead = "Furthest Ahead"
@@ -275,12 +337,23 @@ enum TargetingMode: String, CaseIterable {
     case leastHealth = "Least Health"
 }
 
+struct SecondTurretState {
+    var currentYaw: Float = 0
+    var targetYaw: Float = 0
+    var hasTarget: Bool = false
+    var cooldownRemaining: Float = 0
+}
+
 @Observable
 class Tower {
     let id: UUID = UUID()
     var coord: HexCoord
     let type: TowerType
     var targetingMode: TargetingMode = .closest
+    /// Set by the player via manual attack mode (level 4+ targeting tower in range).
+    var manualTargetEnemyID: UUID? = nil
+    /// Non-nil for max-level projectile towers — an independently rotating second turret.
+    var secondTurret: SecondTurretState? = nil
     var level: Int = 1
     static let maxLevel = 6
     var detectionRadius: Int
@@ -362,7 +435,7 @@ class Tower {
     static func makeBowler(coord: HexCoord) -> Tower {
         return Tower(coord: coord, type: .bowler,
                      detectionRadius: 5, fireRadius: 5,
-                     projectileSpeed: 0, damage: 40, cooldown: 4.0)
+                     projectileSpeed: 0, damage: 60, cooldown: 4.0)
     }
 
     static func makeFireball(coord: HexCoord) -> Tower {
@@ -425,6 +498,7 @@ class Tower {
         case .projectile:
             damage *= boost
             cooldown *= 0.88
+            if level == Tower.maxLevel { secondTurret = SecondTurretState() }
         case .laser:
             laser!.dps *= boost
             cooldown *= 0.80
@@ -458,14 +532,14 @@ class Tower {
                 fireRadius += 1
             }
         case .targeting:
-            if level == 4 { detectionRadius += 1 }
+            if level == Tower.maxLevel { detectionRadius += 1 }
         }
     }
 
     /// Summary of what the next upgrade improves.
     var upgradeDescription: String {
         switch type {
-        case .projectile: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +AoE Shots" : "+33% dmg, -12% cooldown"
+        case .projectile: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Second Turret" : "+33% dmg, -12% cooldown"
         case .laser:      return "+33% DPS, -20% cooldown"
         case .fire:       return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
         case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +Double Slow" : "+20% duration, -18% cooldown"
@@ -476,10 +550,12 @@ class Tower {
         case .antiAir:    return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
         case .targeting:
             switch level {
-            case 1: return "Unlocks targeting mode customization in radius"
-            case 2: return "Unlocks priority enemy type targeting"
-            case 3: return "+1 radius, smart filter (skip immune enemies)"
-            default: return "TBD"
+            case 1: return "+1 detect range for covered towers; filters immune enemies"
+            case 2: return "Unlocks priority enemy type selection"
+            case 3: return "Unlocks manual attack lock (A key)"
+            case 4: return "+1 fire range to all covered towers"
+            case 5: return "+1 aura radius"
+            default: return ""
             }
         }
     }

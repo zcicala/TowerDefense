@@ -19,7 +19,7 @@ extension GameState {
 
     private func generatePath() {
         var coord = HexCoord(q: 0, r: 0)
-        var dir = Int.random(in: 0..<6)
+        var dir = rng.randomInt(in: 0..<6)
         var currentHeight: Float = 1.0
         var previousCell: HexCell?
 
@@ -33,7 +33,7 @@ extension GameState {
             previousCell = cell
             placed += 1
 
-            currentHeight *= Float.random(in: 0.95...1.05)
+            currentHeight *= rng.randomFloat(in: 0.95...1.05)
 
             // Look ahead 2 steps in each turn direction to detect curling
             let leftDir = (dir + 5) % 6
@@ -45,24 +45,24 @@ extension GameState {
 
             // Choose turn direction, biasing away from existing path
             if straightBlocked && !leftBlocked && !rightBlocked {
-                dir = Bool.random() ? leftDir : rightDir
+                dir = rng.randomBool() ? leftDir : rightDir
             } else if straightBlocked && leftBlocked {
                 dir = rightDir
             } else if straightBlocked && rightBlocked {
                 dir = leftDir
             } else if leftBlocked && !rightBlocked {
                 // Bias right when left is blocked
-                let roll = Float.random(in: 0..<1)
+                let roll = rng.randomFloat(in: 0..<1)
                 if roll < 0.3 { dir = rightDir }
                 // else keep straight
             } else if rightBlocked && !leftBlocked {
                 // Bias left when right is blocked
-                let roll = Float.random(in: 0..<1)
+                let roll = rng.randomFloat(in: 0..<1)
                 if roll < 0.3 { dir = leftDir }
                 // else keep straight
             } else {
                 // Normal random turning
-                let roll = Float.random(in: 0..<1)
+                let roll = rng.randomFloat(in: 0..<1)
                 if roll < 0.20 {
                     dir = leftDir
                 } else if roll < 0.4 {
@@ -121,16 +121,16 @@ extension GameState {
         let neighbors = hexGrid.neighbors(of: coord)
         let terrainHeight: Float
         if neighbors.isEmpty {
-            terrainHeight = Float.random(in: 0.5...2.0)
+            terrainHeight = rng.randomFloat(in: 0.5...2.0)
         } else {
             let avg = neighbors.map(\.height).reduce(0, +) / Float(neighbors.count)
-            terrainHeight = avg * Float.random(in: 0.80...1.20)
+            terrainHeight = avg * rng.randomFloat(in: 0.80...1.20)
         }
         let cell = HexCell(coord: coord, height: terrainHeight, type: .terrain)
         let nearPath = hexGrid.cells.values.contains {
             ($0.type == .path || $0.type == .start) && $0.coord.distance(to: coord) <= 2
         }
-        let roll = Float.random(in: 0..<1)
+        let roll = rng.randomFloat(in: 0..<1)
         if nearPath {
             cell.terrainType = roll < 0.10 ? .rock : roll < 0.15 ? .gold : .grass
         } else {
@@ -153,18 +153,14 @@ extension GameState {
         }
         // Deduplicate
         let unique = Array(Set(candidates))
-        guard let coord = unique.randomElement() else { return nil }
+        guard let coord = rng.randomElement(unique) else { return nil }
         return makeTerrainCell(at: coord)
     }
 
     /// Adds up to 2 random terrain tiles among the empty neighbours of a coord. Returns new cells.
     func expandTerrainAround(coord: HexCoord, count: Int) -> [HexCell] {
-        let emptyNeighbors = (0..<6)
-            .map { coord.neighbor($0) }
-            .filter { hexGrid.cell(at: $0) == nil }
-            .shuffled()
-            .prefix(count)
-        return emptyNeighbors.map { makeTerrainCell(at: $0) }
+        let shuffled = rng.shuffled((0..<6).map { coord.neighbor($0) }.filter { hexGrid.cell(at: $0) == nil })
+        return shuffled.prefix(count).map { makeTerrainCell(at: $0) }
     }
 
     // MARK: - Tower Placement
@@ -222,7 +218,7 @@ extension GameState {
                 tower.applyUpgrade()
             case .invulnerable:
                 tower.isInvulnerable = true
-            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl, .slowAura, .damageAura:
+            case .doubleRing, .goldCache, .repair, .moveTower, .slowAura, .damageAura:
                 openChest()
             case .moneyDoubler:
                 tower.hasMoneyDoubler = true
@@ -315,12 +311,12 @@ extension GameState {
     func openChest() {
         grantRandomInventoryItem()
         grantRandomInventoryItem()
-        if Int.random(in: 0..<5) == 0 { grantRandomInventoryItem() }
+        if rng.randomInt(in: 0..<5) == 0 { grantRandomInventoryItem() }
     }
 
     /// Grants one random inventory item chosen from: ring, repair, tower heal, move tower, slow aura, damage aura, or $75 gold.
     func grantRandomInventoryItem() {
-        let roll = Int.random(in: 0..<7)
+        let roll = rng.randomInt(in: 0..<7)
         switch roll {
         case 0: ringItemCount += 1
         case 1: repairItemCount += 1
@@ -483,7 +479,7 @@ extension GameState {
                 tower.applyUpgrade()
             case .invulnerable:
                 tower.isInvulnerable = true
-            case .doubleRing, .goldCache, .repair, .moveTower, .pauseControl, .slowAura, .damageAura:
+            case .doubleRing, .goldCache, .repair, .moveTower, .slowAura, .damageAura:
                 openChest()
             case .moneyDoubler:
                 tower.hasMoneyDoubler = true
@@ -553,8 +549,8 @@ extension GameState {
         let candidates = hexGrid.cells.values.filter {
             $0.type == .terrain && !$0.hasTower && $0.bonusType == nil
         }
-        guard let cell = candidates.randomElement() else { return }
-        cell.bonusType = BonusType.allCases.randomElement()
+        guard let cell = rng.randomElement(candidates) else { return }
+        cell.bonusType = rng.randomElement(BonusType.allCases)
     }
 
     /// Returns true if the currently selected tower type can be placed at coord (without consuming resources).
@@ -681,6 +677,9 @@ extension GameState {
                 tower.sword = SwordState(swingDuration: tower.sword!.swingDuration)
             }
         }
+        // Pre-pick theme for the upcoming round so the player can prepare
+        pickUpcomingTheme(for: round + 1)
+
         // Add one terrain tile adjacent to the path each round
         var newCells: [HexCell] = []
         if let cell = addSingleTerrainTileAlongPath() {
@@ -698,7 +697,7 @@ extension GameState {
     /// Grows a new 10-cell branch path off a random existing path cell. Returns the new cells (path + start).
     @discardableResult
     func addBranchPath() -> [HexCell] {
-        let pathCells = hexGrid.cells.values.filter { $0.type == .path }.shuffled()
+        let pathCells = rng.shuffled(hexGrid.cells.values.filter { $0.type == .path })
         for junction in pathCells {
             if let cells = tryGenerateBranch(from: junction, length: 10) {
                 for cell in cells { hexGrid.addCell(cell) }
@@ -710,7 +709,7 @@ extension GameState {
 
     private func tryGenerateBranch(from junction: HexCell, length: Int) -> [HexCell]? {
         let freeDirs = (0..<6).filter { hexGrid.cell(at: junction.coord.neighbor($0)) == nil }
-        guard let startDir = freeDirs.randomElement() else { return nil }
+        guard let startDir = rng.randomElement(freeDirs) else { return nil }
         var dir = startDir
         var current = junction.coord
         var placedCoords: [HexCoord] = []
@@ -733,12 +732,12 @@ extension GameState {
                 }
             }
             if !placed { return nil }
-            if Float.random(in: 0..<1) < 0.3 { dir = (dir + (Bool.random() ? 1 : 5)) % 6 }
+            if rng.randomFloat(in: 0..<1) < 0.3 { dir = (dir + (rng.randomBool() ? 1 : 5)) % 6 }
         }
         var cells: [HexCell] = []
         var height = junction.height
         for (i, coord) in placedCoords.enumerated() {
-            height *= Float.random(in: 0.92...1.08)
+            height *= rng.randomFloat(in: 0.92...1.08)
             let isStart = i == placedCoords.count - 1
             let cell = HexCell(coord: coord, height: height, type: isStart ? .start : .path)
             cells.append(cell)
@@ -793,7 +792,6 @@ extension GameState {
         isPendingTowerHeal = false
         isSelectingTowerToMove = false
         pendingMoveTower = nil
-        hasPauseControl = false
         isPaused = false
         return (towerIDs, terrainCoords, [])
     }

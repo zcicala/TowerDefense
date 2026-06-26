@@ -33,6 +33,8 @@ struct ContentView: View {
     @State private var dialogRefresh: Int = 0
     @State private var viewSize: CGSize = CGSize(width: 800, height: 600)
     @State private var hoveredPlacementCoord: HexCoord? = nil
+    /// True while waiting for the player to click an enemy for manual attack lock.
+    @State private var isPendingManualTarget: Bool = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -74,6 +76,7 @@ struct ContentView: View {
                     // Update turret rotations every frame so dish spin works outside combat
                     for tower in gameState.towers {
                         renderer.updateTurretRotation(tower)
+                        renderer.updateSecondTurretRotation(tower)
                     }
 
                     guard gameState.phase == .combat else {
@@ -244,7 +247,15 @@ struct ContentView: View {
                 }
             }
             .focusable()
-            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d")], phases: [.down, .repeat]) { press in
+            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d"), .init("x")], phases: [.down, .repeat]) { press in
+                // 'x' triggers/cancels manual attack lock when a qualifying tower is selected
+                if press.characters == "x",
+                   gameState.phase == .combat,
+                   let tower = selectedTower,
+                   gameState.targetingLevel(for: tower) >= 4 {
+                    isPendingManualTarget.toggle()
+                    return .handled
+                }
                 guard cameraEntity != nil else { return .ignored }
                 keysPressed.insert(press.characters)
                 return .handled
@@ -255,7 +266,7 @@ struct ContentView: View {
             }
             .onKeyPress(.space, phases: .down) { _ in
                 gameState.togglePause()
-                return gameState.hasPauseControl ? .handled : .ignored
+                return .handled
             }
             .gesture(DragGesture()
                 .onChanged { value in
@@ -304,7 +315,7 @@ struct ContentView: View {
                         Text("⏸ PAUSED")
                             .foregroundColor(.yellow)
                             .fontWeight(.bold)
-                    } else if gameState.hasPauseControl && gameState.phase == .combat {
+                    } else if gameState.phase == .combat {
                         Text("Space to pause")
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.45))
@@ -323,56 +334,7 @@ struct ContentView: View {
                 .cornerRadius(8)
 
                 if gameState.phase == .placing {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Attack")
-                            .font(.caption.bold())
-                            .foregroundColor(.white.opacity(0.85))
-                        HStack(spacing: 6) {
-                            Button("None") { gameState.selectedTowerType = nil; gameState.isPlacingFarm = false }
-                                .buttonStyle(.bordered)
-                                .tint(gameState.selectedTowerType == nil && !gameState.isPlacingFarm ? .blue : .gray)
-                            ForEach([TowerType.projectile, .laser, .fire, .bowler, .sword, .fireball, .antiAir], id: \.self) { type in
-                                Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
-                                    gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
-                                    gameState.isPlacingFarm = false
-                                }
-                                .buttonStyle(.bordered)
-                                .tint(gameState.selectedTowerType == type ? .blue : .gray)
-                            }
-                        }
-                        Text("Support")
-                            .font(.caption.bold())
-                            .foregroundColor(.white.opacity(0.85))
-                        HStack(spacing: 6) {
-                            ForEach([TowerType.ice, .healer, .targeting], id: \.self) { type in
-                                Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
-                                    gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
-                                    gameState.isPlacingFarm = false
-                                }
-                                .buttonStyle(.bordered)
-                                .tint(gameState.selectedTowerType == type ? .blue : .gray)
-                            }
-                        }
-                        Text("Utility")
-                            .font(.caption.bold())
-                            .foregroundColor(.white.opacity(0.85))
-                        HStack(spacing: 6) {
-                            Button("Farm ($\(gameState.farmCost))") {
-                                gameState.isPlacingFarm.toggle()
-                                if gameState.isPlacingFarm { gameState.selectedTowerType = nil }
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(gameState.isPlacingFarm ? .green : .gray)
-                        }
-                    }
-
-                    Text(
-                        gameState.isPlacingFarm ? "Tap terrain cells to place a farm" :
-                        gameState.selectedTowerType == nil ? "Click cells to inspect or select a tower to place" :
-                        "Tap terrain cells to place towers"
-                    )
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.8))
+                    placingPhaseControls()
 
                     Button("Start Round") {
                         gameState.cancelPendingSlowAura()
@@ -390,9 +352,20 @@ struct ContentView: View {
 
                 if gameState.phase == .combat {
                     let active = gameState.enemies.filter { $0.active }.count
-                    Text("Enemies: \(active)")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.8))
+                    HStack(spacing: 8) {
+                        Text("Enemies: \(active)")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                        if let theme = gameState.currentWaveTheme {
+                            Text(theme.displayName.uppercased())
+                                .font(.caption.bold())
+                                .foregroundColor(.orange)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.orange.opacity(0.2))
+                                .cornerRadius(4)
+                        }
+                    }
                 }
 
                 if showRoundOverMessage {
@@ -625,6 +598,28 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
+            // Manual attack lock — pick an enemy to focus
+            if isPendingManualTarget {
+                VStack(spacing: 6) {
+                    Text("Attack — Select an Enemy")
+                        .font(.headline)
+                        .foregroundColor(.red)
+                    Text("Click an enemy to lock this tower onto it.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Button("Cancel") { isPendingManualTarget = false }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
             // Unified cell info dialog — right side
             if let cell = selectedCell {
                 cellInfoPanel(cell: cell)
@@ -642,22 +637,99 @@ struct ContentView: View {
             }
         }
         .onChange(of: gameState.selectedTowerType) { _, _ in
-            if let renderer {
-                renderer.removeGhostTower()
-                renderer.removeRangeHighlights()
-            }
+            isPendingManualTarget = false
+            renderer?.removeGhostTower()
+            renderer?.removeRangeHighlights()
             hoveredPlacementCoord = nil
         }
-        .onChange(of: gameState.phase) { _, phase in
-            if phase != .placing, let renderer {
-                renderer.removeGhostTower()
-                renderer.removeRangeHighlights()
-                hoveredPlacementCoord = nil
-            }
+        .onChange(of: gameState.phase) { _, _ in
+            isPendingManualTarget = false
+            renderer?.removeGhostTower()
+            renderer?.removeRangeHighlights()
+            hoveredPlacementCoord = nil
         }
         .sheet(isPresented: $showingStats) {
             StatsView(gameState: gameState)
         }
+    }
+
+    // MARK: - Placing Phase Controls
+
+    @ViewBuilder
+    private func placingPhaseControls() -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Attack")
+                .font(.caption.bold())
+                .foregroundColor(.white.opacity(0.85))
+            HStack(spacing: 6) {
+                Button("None") { gameState.selectedTowerType = nil; gameState.isPlacingFarm = false }
+                    .buttonStyle(.bordered)
+                    .tint(gameState.selectedTowerType == nil && !gameState.isPlacingFarm ? .blue : .gray)
+                ForEach([TowerType.projectile, .laser, .fire, .bowler, .sword, .fireball, .antiAir], id: \.self) { type in
+                    Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
+                        gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
+                        gameState.isPlacingFarm = false
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(gameState.selectedTowerType == type ? .blue : .gray)
+                }
+            }
+            Text("Support")
+                .font(.caption.bold())
+                .foregroundColor(.white.opacity(0.85))
+            HStack(spacing: 6) {
+                ForEach([TowerType.ice, .healer, .targeting], id: \.self) { type in
+                    Button("\(type.displayName) ($\(gameState.costForTower(type)))") {
+                        gameState.selectedTowerType = gameState.selectedTowerType == type ? nil : type
+                        gameState.isPlacingFarm = false
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(gameState.selectedTowerType == type ? .blue : .gray)
+                }
+            }
+            Text("Utility")
+                .font(.caption.bold())
+                .foregroundColor(.white.opacity(0.85))
+            HStack(spacing: 6) {
+                let farmLabel = "Farm ($\(gameState.farmCost))"
+                Button(farmLabel) {
+                    gameState.isPlacingFarm.toggle()
+                    if gameState.isPlacingFarm { gameState.selectedTowerType = nil }
+                }
+                .buttonStyle(.bordered)
+                .tint(gameState.isPlacingFarm ? .green : .gray)
+            }
+        }
+
+        let hintText: String = {
+            if gameState.isPlacingFarm { return "Tap terrain cells to place a farm" }
+            if gameState.selectedTowerType == nil { return "Click cells to inspect or select a tower to place" }
+            return "Tap terrain cells to place towers"
+        }()
+        Text(hintText)
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.8))
+
+        if let upcoming = gameState.upcomingWaveTheme {
+            waveThemeBanner(upcoming)
+        }
+    }
+
+    @ViewBuilder
+    private func waveThemeBanner(_ theme: WaveTheme) -> some View {
+        VStack(spacing: 2) {
+            Text("⚠ \(theme.displayName.uppercased())")
+                .font(.caption.bold())
+                .foregroundColor(.orange)
+            Text(theme.flavorText)
+                .font(.caption2)
+                .foregroundColor(.orange.opacity(0.8))
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.orange.opacity(0.15))
+        .cornerRadius(6)
     }
 
     // MARK: - Placement Preview Hover
@@ -873,10 +945,11 @@ struct ContentView: View {
                         .font(statFont)
                         .foregroundColor(labelColor)
                     let effects: [(String, Bool)] = [
-                        ("+1 Detection Range", tower.level >= 1),
-                        ("Targeting Mode", tower.level >= 2),
-                        ("Priority Target", tower.level >= 3),
-                        ("Skip Immune", tower.level >= 4),
+                        ("Targeting Mode",               tower.level >= 1),
+                        ("+1 Detect Range  •  Skip Immune", tower.level >= 2),
+                        ("Priority Enemy Type",          tower.level >= 3),
+                        ("Manual Attack Lock (X)",       tower.level >= 4),
+                        ("+1 Fire Range (covered towers)", tower.level >= 5),
                     ]
                     ForEach(effects, id: \.0) { label, active in
                         HStack(spacing: 4) {
@@ -894,14 +967,18 @@ struct ContentView: View {
             // Fire range and detection range shown for all non-targeting towers
             if tower.type != .targeting {
                 let tLevel = gameState.targetingLevel(for: tower)
-                let effectiveDetection = tower.detectionRadius + (tLevel >= 1 ? 1 : 0)
+                let detectBonus = tLevel >= 2
+                let fireBonus   = tLevel >= 5
                 Divider().background(.white.opacity(0.2))
                 HStack(spacing: 12) {
-                    statRow("Fire Range", "\(tower.fireRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                    statRow("Detect Range", effectiveDetection > tower.detectionRadius
-                            ? "\(tower.detectionRadius)+1" : "\(tower.detectionRadius)",
+                    statRow("Fire Range",
+                            fireBonus ? "\(tower.fireRadius)+1" : "\(tower.fireRadius)",
                             label: statFont, labelColor: labelColor,
-                            valueColor: effectiveDetection > tower.detectionRadius ? .green : valueColor)
+                            valueColor: fireBonus ? .green : valueColor)
+                    statRow("Detect Range",
+                            detectBonus ? "\(tower.detectionRadius)+1" : "\(tower.detectionRadius)",
+                            label: statFont, labelColor: labelColor,
+                            valueColor: detectBonus ? .green : valueColor)
                 }
             }
         }
@@ -1255,7 +1332,11 @@ struct ContentView: View {
                 if gameState.upgradeTower(tower) {
                     dialogRefresh += 1
                     if tower.level == Tower.maxLevel {
-                        renderer?.addMaxLevelDome(for: tower)
+                        if tower.type == .projectile {
+                            renderer?.addSecondTurret(for: tower)
+                        } else {
+                            renderer?.addMaxLevelDome(for: tower)
+                        }
                     }
                 }
             }
@@ -1288,10 +1369,29 @@ struct ContentView: View {
         }
 
         let tLevel = gameState.targetingLevel(for: tower)
-        if tLevel >= 2 {
+        if tLevel >= 1 {
             Divider().background(.white.opacity(0.3))
 
+            // Level 1+: targeting mode
+            Text("Targeting Mode")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.7))
+                .frame(maxWidth: .infinity, alignment: .center)
+            ForEach(TargetingMode.allCases, id: \.self) { mode in
+                Button(action: { tower.targetingMode = mode; dialogRefresh += 1 }) {
+                    HStack {
+                        Text(mode.rawValue)
+                        Spacer()
+                        if tower.targetingMode == mode { Image(systemName: "checkmark") }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(tower.targetingMode == mode ? .blue : .gray)
+            }
+
+            // Level 3+: priority enemy type
             if tLevel >= 3 {
+                Divider().background(.white.opacity(0.3))
                 Text("Priority Target")
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.7))
@@ -1307,24 +1407,34 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, alignment: .center)
-                Divider().background(.white.opacity(0.3))
             }
 
-            Text("Targeting")
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.7))
-                .frame(maxWidth: .infinity, alignment: .center)
-            ForEach(TargetingMode.allCases, id: \.self) { mode in
-                Button(action: { tower.targetingMode = mode; dialogRefresh += 1 }) {
-                    HStack {
-                        Text(mode.rawValue)
-                        Spacer()
-                        if tower.targetingMode == mode { Image(systemName: "checkmark") }
+            // Level 4+: manual attack lock
+            if tLevel >= 4 && gameState.phase == .combat {
+                Divider().background(.white.opacity(0.3))
+                if let manualID = tower.manualTargetEnemyID,
+                   let locked = gameState.enemies.first(where: { $0.id == manualID && $0.active }) {
+                    Text("Locked: \(locked.enemyType.displayName)")
+                        .font(.caption.bold())
+                        .foregroundColor(.red)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    Button("Clear Lock") {
+                        tower.manualTargetEnemyID = nil
+                        dialogRefresh += 1
                     }
+                    .buttonStyle(.bordered)
+                    .tint(.gray)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                } else {
+                    Button(isPendingManualTarget && selectedTower?.id == tower.id ? "Click an Enemy…" : "Attack (X)") {
+                        isPendingManualTarget.toggle()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(isPendingManualTarget && selectedTower?.id == tower.id ? .orange : .red)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
-                .buttonStyle(.bordered)
-                .tint(tower.targetingMode == mode ? .blue : .gray)
             }
+
             Divider().background(.white.opacity(0.3))
         }
 
@@ -1347,6 +1457,17 @@ struct ContentView: View {
 
     private func handleTap(entity: Entity) {
         guard let renderer else { return }
+
+        // Manual attack lock — clicking an enemy sets it as the focused target
+        if isPendingManualTarget {
+            if let id = renderer.enemyID(for: entity),
+               let enemy = gameState.enemies.first(where: { $0.id == id && $0.active }) {
+                selectedTower?.manualTargetEnemyID = enemy.id
+                dialogRefresh += 1
+            }
+            isPendingManualTarget = false
+            return
+        }
 
         // Check if tapping an enemy — show its stats panel
         if let id = renderer.enemyID(for: entity),
@@ -1480,7 +1601,11 @@ struct ContentView: View {
                     }
                 }
                 if tower.level == Tower.maxLevel {
-                    renderer.addMaxLevelDome(for: tower)
+                    if tower.type == .projectile {
+                        renderer.addSecondTurret(for: tower)
+                    } else {
+                        renderer.addMaxLevelDome(for: tower)
+                    }
                 }
                 hoveredPlacementCoord = nil
                 renderer.removeGhostTower()

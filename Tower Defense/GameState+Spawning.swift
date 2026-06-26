@@ -15,10 +15,10 @@ extension GameState {
         return enemy
     }
 
-    private func _makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
+    func _makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
         switch type {
         case .basic:
-            let fast = Bool.random()
+            let fast = rng.randomBool()
             return Enemy(type: .basic, hitPoints: hp, speed: speed * (fast ? 2.0 : 1.0))
         case .tank:
             return Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
@@ -54,18 +54,28 @@ extension GameState {
     }
 
     /// Picks a random enemy type from eligible configs using weighted sampling.
-    private func pickSpawnType(excludingIntro: [EnemyType] = []) -> EnemyType {
+    /// Pass a `theme` to bias the pool toward that wave's featured enemy types.
+    func pickSpawnType(excludingIntro: [EnemyType] = [], theme: WaveTheme? = nil) -> EnemyType {
         let eligible = spawnConfigs.filter {
             $0.minRound <= round && $0.maxRound >= round &&
             !($0.minRound == round && excludingIntro.contains($0.type))
         }
-        let totalWeight = eligible.reduce(0.0) { $0 + $1.weight }
-        var roll = Float.random(in: 0..<totalWeight)
+        let totalWeight = eligible.reduce(0.0) {
+            $0 + $1.weight * (theme?.weightMultiplier(for: $1.type) ?? 1.0)
+        }
+        var roll = rng.randomFloat(in: 0..<totalWeight)
         for config in eligible {
-            roll -= config.weight
+            roll -= config.weight * (theme?.weightMultiplier(for: config.type) ?? 1.0)
             if roll <= 0 { return config.type }
         }
         return eligible.last?.type ?? .basic
+    }
+
+    /// Pre-picks and stores the wave theme for `targetRound`, if it's a theme round.
+    func pickUpcomingTheme(for targetRound: Int) {
+        guard targetRound % 3 == 0 else { upcomingWaveTheme = nil; return }
+        let eligible = WaveTheme.allCases.filter { $0.minRound <= targetRound }
+        upcomingWaveTheme = rng.randomElement(eligible)
     }
 
     // MARK: - Round Management
@@ -75,12 +85,20 @@ extension GameState {
         round += 1
         phase = .combat
 
+        // Consume the pre-picked theme (or pick one now for round 1, before returnToPlacing has run)
+        if round % 3 == 0 && upcomingWaveTheme == nil {
+            let eligible = WaveTheme.allCases.filter { $0.minRound <= round }
+            upcomingWaveTheme = rng.randomElement(eligible)
+        }
+        currentWaveTheme = (round % 3 == 0) ? upcomingWaveTheme : nil
+        upcomingWaveTheme = nil
+
         let enemyCount = 2 + Int(Float(round) * 1.5)
         let hp: Float = 25 + Float(round) * 20
         let speed: Float = 1.2
 
         enemiesToSpawn = enemyCount
-        spawnInterval = Float.random(in: 0.5...1.5)
+        spawnInterval = rng.randomFloat(in: 0.5...1.5)
         spawnTimer = 0
 
         enemies.removeAll()
@@ -89,7 +107,7 @@ extension GameState {
         // Weighted random pool of regular enemies — debut types spawn only once per intro round
         var introTypesUsed: [EnemyType] = []
         for _ in 0..<enemyCount {
-            let type = pickSpawnType(excludingIntro: introTypesUsed)
+            let type = pickSpawnType(excludingIntro: introTypesUsed, theme: currentWaveTheme)
             if spawnConfigs.first(where: { $0.type == type })?.minRound == round {
                 introTypesUsed.append(type)
             }

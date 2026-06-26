@@ -16,11 +16,16 @@ enum GamePhase {
 @Observable
 class GameState {
     let hexGrid = HexGrid()
+    let rng: RandomSource
 
     let hexRadius: Float = 0.5
     let gap: Float = 0.05
     let pathLength = 30
     let terrainRings = 2
+
+    init(rng: RandomSource = RandomSource()) {
+        self.rng = rng
+    }
 
     var spacing: Float { hexRadius + gap / 2 }
 
@@ -148,8 +153,6 @@ class GameState {
     var isPendingSlowAura: Bool = false
     /// True when a damage aura item is active and the player is picking a path tile target.
     var isPendingDamageAura: Bool = false
-    /// True once the player has claimed the pause control bonus.
-    var hasPauseControl: Bool = false
 
     // MARK: - Inventory
 
@@ -190,6 +193,13 @@ class GameState {
 
     let repairCost: Int = 75
 
+    // MARK: - Wave Themes
+
+    /// Theme active during the current combat round (nil = normal wave).
+    var currentWaveTheme: WaveTheme? = nil
+    /// Theme pre-picked for the next round so the player can prepare during placing phase.
+    var upcomingWaveTheme: WaveTheme? = nil
+
     // MARK: - Enemy Spawning
 
     /// Defines a weighted spawn entry for a non-boss enemy type.
@@ -216,6 +226,73 @@ class GameState {
         .init(type: .superExploder, minRound: 30,               weight: 2),
         .init(type: .hive,          minRound: 18,               weight: 2),
     ]
+}
+
+// MARK: - Random Source
+
+/// Wraps random-number generation so tests can inject a deterministic source.
+class RandomSource {
+    func randomBool() -> Bool { Bool.random() }
+    func randomFloat(in range: ClosedRange<Float>) -> Float { Float.random(in: range) }
+    func randomFloat(in range: Range<Float>) -> Float { Float.random(in: range) }
+    func randomInt(in range: ClosedRange<Int>) -> Int { Int.random(in: range) }
+    func randomInt(in range: Range<Int>) -> Int { Int.random(in: range) }
+    func randomElement<T>(_ array: [T]) -> T? { array.randomElement() }
+    func shuffled<T>(_ array: [T]) -> [T] { array.shuffled() }
+}
+
+/// Xorshift64-based seeded RNG. Same seed → identical sequence every run.
+class SeededRandom: RandomSource {
+    private var state: UInt64
+
+    init(seed: UInt64 = 42) {
+        self.state = seed == 0 ? 1 : seed
+    }
+
+    private func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+
+    private func unitFloat() -> Float {
+        Float(next() >> 8) / 16_777_216.0  // 2^24
+    }
+
+    override func randomBool() -> Bool { next() & 1 == 0 }
+
+    override func randomFloat(in range: ClosedRange<Float>) -> Float {
+        range.lowerBound + unitFloat() * (range.upperBound - range.lowerBound)
+    }
+
+    override func randomFloat(in range: Range<Float>) -> Float {
+        range.lowerBound + unitFloat() * (range.upperBound - range.lowerBound)
+    }
+
+    override func randomInt(in range: ClosedRange<Int>) -> Int {
+        let span = UInt64(range.upperBound - range.lowerBound) + 1
+        return range.lowerBound + Int(next() % span)
+    }
+
+    override func randomInt(in range: Range<Int>) -> Int {
+        let span = UInt64(range.upperBound - range.lowerBound)
+        return range.lowerBound + Int(next() % span)
+    }
+
+    override func randomElement<T>(_ array: [T]) -> T? {
+        guard !array.isEmpty else { return nil }
+        return array[Int(next() % UInt64(array.count))]
+    }
+
+    override func shuffled<T>(_ array: [T]) -> [T] {
+        var result = array
+        for i in stride(from: result.count - 1, through: 1, by: -1) {
+            let j = Int(next() % UInt64(i + 1))
+            result.swapAt(i, j)
+        }
+        return result
+    }
 }
 
 // MARK: - Game Events

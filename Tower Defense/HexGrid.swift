@@ -97,7 +97,7 @@ enum BonusType: CaseIterable {
         case .doubleRing:    return "Place a tower here to add 2 Spawn Tiles items to your inventory!"
         case .goldCache:     return "Place a tower here to receive $150!"
         case .slowAura:      return "Place a tower here to slow enemies on adjacent path tiles by 20%!"
-        case .repair:        return "Place a tower here to add a Repair item to your inventory. Use it to restore 1 HP to the base tower!"
+        case .repair:        return "Place a tower here to add a Repair item to your inventory. Use it to restore 1 HP to the Castle Tower!"
         case .moneyDoubler:  return "Place a tower here to earn double money for every enemy it kills!"
         case .rangeExtender: return "Place a tower here to extend its detection and firing range by +1!"
         case .damageAura:    return "Place a tower here to boost all damage dealt to enemies on adjacent path tiles by 40%!"
@@ -167,6 +167,8 @@ struct LaserState {
     var isFiring: Bool = false
     var timeRemaining: Float = 0
     var lockedTargetID: UUID? = nil
+    var rampMultiplier: Float = 1.0  // grows 5% per 0.1s of continuous fire
+    var rampTimer: Float = 0          // accumulator for ramp ticks
 }
 
 struct ConeState {
@@ -380,6 +382,8 @@ class Tower {
     var targetTypeRestrictions: Set<EnemyType> = []
     /// Set via a level-2+ Targeting Tower: this tower prioritises this enemy type when selecting targets.
     var priorityEnemyType: EnemyType? = nil
+    /// When set, tower only fires at enemies whose nearest coord matches this cell.
+    var lockedTargetCoord: HexCoord? = nil
 
     // Type-specific state — only the relevant one is non-nil for a given tower
     var laser: LaserState? = nil
@@ -390,7 +394,7 @@ class Tower {
 
     init(coord: HexCoord, type: TowerType = .projectile,
          detectionRadius: Int = 4, fireRadius: Int = 4,
-         projectileSpeed: Float = 6.0, damage: Float = 40, cooldown: Float = 1.0) {
+         projectileSpeed: Float = 6.0, damage: Float = 50, cooldown: Float = 1.0) {
         self.coord = coord
         self.type = type
         self.detectionRadius = detectionRadius
@@ -404,7 +408,7 @@ class Tower {
         let t = Tower(coord: coord, type: .laser,
                       detectionRadius: 6, fireRadius: 6,
                       projectileSpeed: 0, damage: 0, cooldown: 3.0)
-        t.laser = LaserState(duration: 3.0, dps: 60, range: 6)
+        t.laser = LaserState(duration: 3.0, dps: 72, range: 6)
         return t
     }
 
@@ -412,14 +416,14 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 60.0)
+        t.cone = ConeState(duration: 3.5, dps: 101.0)
         return t
     }
 
     static func makeIce(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .ice,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 0, cooldown: 2.0)
+                      projectileSpeed: 0, damage: 0, cooldown: 1.0)
         t.cone = ConeState(duration: 3.0, dps: 0)
         return t
     }
@@ -435,7 +439,7 @@ class Tower {
     static func makeBowler(coord: HexCoord) -> Tower {
         return Tower(coord: coord, type: .bowler,
                      detectionRadius: 5, fireRadius: 5,
-                     projectileSpeed: 0, damage: 60, cooldown: 4.0)
+                     projectileSpeed: 0, damage: 158, cooldown: 4.0)
     }
 
     static func makeFireball(coord: HexCoord) -> Tower {
@@ -606,12 +610,18 @@ class Enemy {
 
     /// Tower types that cannot damage this enemy.
     var immuneTowerTypes: Set<TowerType> {
+        var immune: Set<TowerType>
         switch enemyType {
-        case .hive:    return [.fire, .ice, .sword, .bowler, .fireball, .projectile]
-        case .mirroid: return [.laser]
-        case .wisp:    return [.fire, .ice, .sword, .bowler, .fireball, .projectile]
-        default: return []
+        case .hive:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]
+        case .mirroid: immune = [.laser]
+        case .wisp:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]
+        default:       immune = []
         }
+        // Hoppers are out of reach of ground-based sword towers while airborne
+        if (enemyType == .hopper || enemyType == .superHopper) && (isJumping || isDroppingFromHive) {
+            immune.insert(.sword)
+        }
+        return immune
     }
 
     // Hopper-specific state
@@ -753,6 +763,8 @@ class HexGrid {
     func neighbors(of coord: HexCoord) -> [HexCell] {
         (0..<6).compactMap { cells[coord.neighbor($0)] }
     }
+
+    func removeAllCells() { cells.removeAll() }
 
     func removeCell(at coord: HexCoord) {
         cells.removeValue(forKey: coord)

@@ -778,7 +778,7 @@ class SceneRenderer {
     private var baseTowerRoot: Entity?
     private var baseTowerBlocks: [Entity] = []  // index 0 = bottom, 4 = top
 
-    func createBaseTower(cellHeight: Float, position: SIMD2<Float>) {
+    func createBaseTower(cellHeight: Float, position: SIMD2<Float>, blockCount: Int) {
         guard let content else { return }
 
         let root = Entity()
@@ -797,7 +797,7 @@ class SceneRenderer {
         var currentY: Float = 0
         baseTowerBlocks.removeAll()
 
-        for i in 0..<5 {
+        for i in 0..<blockCount {
             let scale = pow(0.9, Float(i))
             let w = baseWidth * scale
             let h = blockHeight * scale
@@ -808,6 +808,26 @@ class SceneRenderer {
             block.position.y = currentY + h / 2
             root.addChild(block)
             baseTowerBlocks.append(block)
+
+            // Merlons (castle battlements) — 3 per side along top edge, skip corners
+            let merW = w * 0.13
+            let merH = h * 0.42
+            let merMesh = MeshResource.generateBox(width: merW, height: merH, depth: merW)
+            let merY = h / 2 + merH / 2
+            var merPositions: [(Float, Float)] = []
+            for t: Float in [-0.25, 0.0, 0.25] {
+                merPositions.append((w * t, -w / 2))  // north edge
+                merPositions.append((w * t,  w / 2))  // south edge
+                merPositions.append((-w / 2, w * t))  // west edge
+                merPositions.append(( w / 2, w * t))  // east edge
+            }
+            for (mx, mz) in merPositions {
+                let merlon = Entity()
+                merlon.components.set(ModelComponent(mesh: merMesh, materials: [material]))
+                merlon.position = [mx, merY, mz]
+                block.addChild(merlon)
+            }
+
             currentY += h + blockGap
         }
 
@@ -981,9 +1001,11 @@ class SceneRenderer {
         let midpoint = origin + diff * 0.5
         let direction = normalize(diff)
 
-        // Update solid beam
+        // Update solid beam — width grows with ramp multiplier
         if let beamEntity = beamEntities[tower.id] {
-            let mesh = MeshResource.generateBox(width: 0.03, height: 0.03, depth: beamLength)
+            let ramp = tower.laser?.rampMultiplier ?? 1.0
+            let w = 0.03 * pow(ramp, 0.6)
+            let mesh = MeshResource.generateBox(width: w, height: w, depth: beamLength)
             if var model = beamEntity.components[ModelComponent.self] {
                 model.mesh = mesh
                 beamEntity.components[ModelComponent.self] = model
@@ -1554,11 +1576,11 @@ class SceneRenderer {
         entity.position = [pos.x, cellHeight, pos.y]
     }
 
-    func rebuildBaseTower(cellHeight: Float, position: SIMD2<Float>) {
+    func rebuildBaseTower(cellHeight: Float, position: SIMD2<Float>, blockCount: Int) {
         baseTowerRoot?.removeFromParent()
         baseTowerRoot = nil
         baseTowerBlocks.removeAll()
-        createBaseTower(cellHeight: cellHeight, position: position)
+        createBaseTower(cellHeight: cellHeight, position: position, blockCount: blockCount)
     }
 
     // MARK: - Dynamic Terrain
@@ -1570,16 +1592,25 @@ class SceneRenderer {
         let t = max(0, min(1, cell.height))
         var material = SceneRenderer.surfaceMaterial!
         let tint: SimpleMaterial.Color
-        switch cell.terrainType {
-        case .grass:
-            tint = colorForHeight(t, isPath: false)
-        case .rock:
-            let v = CGFloat(0.44 + 0.14 * t)
-            tint = SimpleMaterial.Color(red: v, green: v, blue: v + 0.03, alpha: 1)
-        case .gold:
-            tint = SimpleMaterial.Color(red: CGFloat(0.70 + 0.12 * t),
-                                        green: CGFloat(0.56 + 0.10 * t),
-                                        blue: CGFloat(0.14), alpha: 1)
+        switch cell.type {
+        case .start:
+            tint = SimpleMaterial.Color(red: 0.2, green: 0.6, blue: 0.25, alpha: 1)
+        case .end:
+            tint = SimpleMaterial.Color(red: 0.7, green: 0.2, blue: 0.2, alpha: 1)
+        case .path:
+            tint = colorForHeight(t, isPath: true)
+        default:
+            switch cell.terrainType {
+            case .grass:
+                tint = colorForHeight(t, isPath: false)
+            case .rock:
+                let v = CGFloat(0.44 + 0.14 * t)
+                tint = SimpleMaterial.Color(red: v, green: v, blue: v + 0.03, alpha: 1)
+            case .gold:
+                tint = SimpleMaterial.Color(red: CGFloat(0.70 + 0.12 * t),
+                                            green: CGFloat(0.56 + 0.10 * t),
+                                            blue: CGFloat(0.14), alpha: 1)
+            }
         }
         material.baseColor = CustomMaterial.BaseColor(tint: tint)
         let pos = cell.coord.worldPosition(spacing: spacing)
@@ -1628,6 +1659,11 @@ class SceneRenderer {
     func removeTerrainCell(at coord: HexCoord) {
         entityMap[coord]?.removeFromParent()
         entityMap.removeValue(forKey: coord)
+    }
+
+    func removeAllTerrainCells() {
+        for entity in entityMap.values { entity.removeFromParent() }
+        entityMap.removeAll()
     }
 
     // MARK: - Color

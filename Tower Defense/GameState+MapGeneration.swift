@@ -168,6 +168,7 @@ extension GameState {
     /// Places a tower on a terrain cell. Returns the tower and any new terrain cells added around it.
     func placeTower(at coord: HexCoord) -> (Tower, [HexCell])? {
         guard phase == .placing, let type = selectedTowerType else { return nil }
+        guard unlockedTowers.contains(type) else { return nil }
         let cost = costForTower(type)
         guard money >= cost else { return nil }
         guard let cell = hexGrid.cell(at: coord) else { return nil }
@@ -208,6 +209,10 @@ extension GameState {
             tower = Tower.makeTargeting(coord: coord)
         }
         tower.moneySpent = cost
+
+        // Apply tech-tree base level bonus (towerBonusLevel returns target level 1-6)
+        let startLevel = towerBonusLevel(type)
+        for _ in 1..<startLevel { tower.applyUpgrade() }
 
         // Apply and consume any bonus on this cell
         if let bonus = cell.bonusType {
@@ -265,7 +270,7 @@ extension GameState {
 
     /// Places a farm on the cell. Returns the new terrain cells spawned around it, or nil on failure.
     func placeFarm(at coord: HexCoord) -> [HexCell]? {
-        guard phase == .placing else { return nil }
+        guard phase == .placing, farmUnlocked else { return nil }
         guard let cell = hexGrid.cell(at: coord),
               cell.type == .terrain, !cell.hasTower, !cell.hasFarm else { return nil }
         guard money >= farmCost else { return nil }
@@ -290,41 +295,46 @@ extension GameState {
 
             switch farm.farmType {
             case .farm:
-                // 3% base growth + 2% per adjacent farm
+                // 3% base growth + 2% per adjacent farm, plus 1 gold passive income
                 farm.accumulatedBonus += 0.05 + Float(adjacentFarmCount) * 0.03
+                money += 1
 
             case .bank:
                 // 60 gold base + 20 per adjacent farm
                 money += 20 + adjacentFarmCount * 10
 
             case .quarry:
-                // +1 HP every 4 rounds, reduced by 1 per 2 adjacent farm/quarry/bank (min 1)
+                // +1 HP every 4 rounds, reduced by 1 per 2 adjacent farm/quarry/bank (min 1), plus 1 gold passive income
                 let interval = max(1, 4 - adjacentFarmCount / 2)
                 if farm.roundsGrown % interval == 0 {
                     farm.accumulatedHP += 1
                 }
+                money += 1
             }
         }
     }
 
     /// Grants 2 random inventory items, with a 20% chance of a bonus third item.
     func openChest() {
-        grantRandomInventoryItem()
-        grantRandomInventoryItem()
-        if rng.randomInt(in: 0..<5) == 0 { grantRandomInventoryItem() }
+        var items: [String] = []
+        items.append(grantRandomInventoryItem())
+        items.append(grantRandomInventoryItem())
+        if rng.randomInt(in: 0..<5) == 0 { items.append(grantRandomInventoryItem()) }
+        print("[Chest] Opened — contained: \(items.joined(separator: ", "))")
     }
 
     /// Grants one random inventory item chosen from: ring, repair, tower heal, move tower, slow aura, damage aura, or $75 gold.
-    func grantRandomInventoryItem() {
+    @discardableResult
+    func grantRandomInventoryItem() -> String {
         let roll = rng.randomInt(in: 0..<7)
         switch roll {
-        case 0: ringItemCount += 1
-        case 1: repairItemCount += 1
-        case 2: towerHealItemCount += 1
-        case 3: moveTowerItemCount += 1
-        case 4: slowAuraItemCount += 1
-        case 5: damageAuraItemCount += 1
-        default: money += 75
+        case 0: ringItemCount += 1;       return "Ring"
+        case 1: repairItemCount += 1;     return "Repair"
+        case 2: towerHealItemCount += 1;  return "Tower Heal"
+        case 3: moveTowerItemCount += 1;  return "Move Tower"
+        case 4: slowAuraItemCount += 1;   return "Slow Aura"
+        case 5: damageAuraItemCount += 1; return "Damage Aura"
+        default: money += 75;             return "$75 Gold"
         }
     }
 
@@ -649,6 +659,7 @@ extension GameState {
     /// Transitions back to placing phase. Returns any newly added terrain/path cells.
     func returnToPlacing() -> [HexCell] {
         guard phase == .roundOver else { return [] }
+        upgradePoints += 1
         // Advance all farms by one round
         advanceFarms()
         // After the first boss (round 5), give 2 bonus tiles every 5 rounds
@@ -700,7 +711,10 @@ extension GameState {
         let pathCells = rng.shuffled(hexGrid.cells.values.filter { $0.type == .path })
         for junction in pathCells {
             if let cells = tryGenerateBranch(from: junction, length: 10) {
-                for cell in cells { hexGrid.addCell(cell) }
+                for cell in cells {
+                    hexGrid.addCell(cell)
+                    branchPathCoords.insert(cell.coord)
+                }
                 return cells
             }
         }
@@ -754,17 +768,21 @@ extension GameState {
     /// Resets the entire game. Returns removed tower IDs, removed terrain coords, and the new seed cells around the base.
     func restart() -> (towerIDs: [UUID], removedTerrainCoords: [HexCoord], seedCells: [HexCell]) {
         let towerIDs = towers.map(\.id)
-        // Remove all terrain cells — they'll be re-grown gradually each round
+        // Remove terrain and branch cells; path/start/end cells are preserved
         let terrainCoords = hexGrid.cells.values
             .filter { $0.type == .terrain }
             .map { $0.coord }
         for coord in terrainCoords { hexGrid.removeCell(at: coord) }
+        let branchCoords = Array(branchPathCoords)
+        for coord in branchCoords { hexGrid.removeCell(at: coord) }
+        branchPathCoords.removeAll()
         phase = .placing
         round = 0
-        money = 100
+        money = 100 + startingGoldBonus
+        // upgradePoints and purchasedTechNodes intentionally preserved across restarts
         selectedTowerType = nil
         baseTowerHP = baseTowerMaxHP
-        baseTowerBlocksRemaining = 5
+        baseTowerBlocksRemaining = (baseTowerMaxHP + 1) / 2
         baseTowerDamageAccumulated = 0
         baseSentinelTower = nil
         towers.removeAll()
@@ -793,6 +811,6 @@ extension GameState {
         isSelectingTowerToMove = false
         pendingMoveTower = nil
         isPaused = false
-        return (towerIDs, terrainCoords, [])
+        return (towerIDs, terrainCoords + branchCoords, [])
     }
 }

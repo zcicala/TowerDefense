@@ -1,6 +1,7 @@
 import Foundation
 import simd
 
+
 extension GameState {
 
     // MARK: - Game Loop
@@ -71,7 +72,7 @@ extension GameState {
                 if enemy.hiveSpawnTimer <= 0 {
                     enemy.hiveSpawnTimer = 4.0
                     let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
-                    let hp: Float = 20 + Float(round) * 15
+                    let hp: Float = Float(256 + round * 102)
                     let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
                     hopper.currentCell = enemy.currentCell
                     hopper.progress = enemy.progress
@@ -103,11 +104,18 @@ extension GameState {
         if let sentinel = baseSentinelTower {
             sentinel.cooldownRemaining = max(0, sentinel.cooldownRemaining - deltaTime)
             if sentinel.cooldownRemaining <= 0 {
-                if let projectile = tryFire(tower: sentinel, targetingLevel: 0) {
-                    sentinel.cooldownRemaining = sentinel.cooldown
-                    projectiles.append(projectile)
-                    events.firedProjectiles.append(projectile)
+                let shotCount = baseTowerTechLevel >= 6 ? 3 : 1
+                var excluded: Set<UUID> = []
+                var anyFired = false
+                for _ in 0..<shotCount {
+                    if let projectile = tryFire(tower: sentinel, targetingLevel: 0, excluding: excluded, preferFurthest: true) {
+                        excluded.insert(projectile.targetEnemyID)
+                        projectiles.append(projectile)
+                        events.firedProjectiles.append(projectile)
+                        anyFired = true
+                    }
                 }
+                if anyFired { sentinel.cooldownRemaining = sentinel.cooldown }
             }
         }
 
@@ -266,8 +274,30 @@ extension GameState {
                         if tower.level == Tower.maxLevel {
                             applyBurning(cells: coneCells)
                         }
-                    } else if tower.type == .ice, let target = tower.cone!.targetCoord {
-                        applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
+                    } else if tower.type == .ice {
+                        // Follow locked enemy; if it left fireRadius, switch to any enemy still in range
+                        // so the cone keeps firing for its full duration rather than stopping early.
+                        let lockedInRange: HexCoord? = tower.cone!.lockedTargetID.flatMap { id in
+                            enemies.first(where: { $0.id == id && $0.active })
+                                .flatMap { enemyNearestCoord($0) }
+                                .flatMap { tower.coord.distance(to: $0) <= tower.fireRadius ? $0 : nil }
+                        }
+                        if let coord = lockedInRange {
+                            tower.cone!.targetCoord = coord
+                        } else {
+                            // Locked enemy left range — pick any enemy still in fireRadius
+                            let fallback = enemies.first(where: { enemy in
+                                guard enemy.active, let c = enemyNearestCoord(enemy) else { return false }
+                                return tower.coord.distance(to: c) <= tower.fireRadius
+                            })
+                            if let fallback, let coord = enemyNearestCoord(fallback) {
+                                tower.cone!.targetCoord = coord
+                                tower.cone!.lockedTargetID = fallback.id
+                            }
+                        }
+                        if let target = tower.cone!.targetCoord {
+                            applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
+                        }
                     }
                     // Stop firing if no enemies remain in the targeted area
                     let targetCells: [HexCoord] = tower.type == .fire ? coneCells : (tower.cone!.targetCoord.map { [$0] } ?? [])
@@ -288,7 +318,7 @@ extension GameState {
             }
 
             // Compute targeting level once — used by selectTarget and tryFire
-            let tLevel = targetingLevel(for: tower)
+            let tLevel = globalTargetingLevel
 
             // Find target enemy — use locked target if actively firing, otherwise select new
             let towerPos2D = tower.coord.worldPosition(spacing: spacing)
@@ -298,7 +328,13 @@ extension GameState {
             let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID
             if isFiring, let lockedID,
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
-                closestEnemy = locked
+                // Respect cell lock even while firing — don't track enemy that left the locked cell
+                if let lockCoord = tower.lockedTargetCoord,
+                   enemyNearestCoord(locked) != lockCoord {
+                    closestEnemy = nil
+                } else {
+                    closestEnemy = locked
+                }
             } else {
                 closestEnemy = selectTarget(for: tower, targetingLevel: tLevel)
             }
@@ -318,7 +354,8 @@ extension GameState {
                 while diff > .pi { diff -= 2 * .pi }
                 while diff < -.pi { diff += 2 * .pi }
 
-                let maxStep = tower.turretRotationSpeed * deltaTime
+                let rotSpeed = tLevel >= 2 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
+                let maxStep = rotSpeed * deltaTime
                 if abs(diff) <= maxStep {
                     tower.currentYaw = tower.targetYaw
                 } else {
@@ -347,10 +384,17 @@ extension GameState {
                 let tooClose = lockedTarget.flatMap { enemyNearestCoord($0) }
                     .map { tower.coord.distance(to: $0) <= 1 } ?? false
 
-                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose {
+                // Stop if locked enemy has left the tower's cell lock zone
+                let leftCellLock = tower.lockedTargetCoord.map { lockCoord in
+                    lockedTarget.flatMap { enemyNearestCoord($0) } != lockCoord
+                } ?? false
+
+                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose || leftCellLock {
                     tower.laser!.isFiring = false
                     tower.laser!.timeRemaining = 0
                     tower.laser!.lockedTargetID = nil
+                    tower.laser!.rampMultiplier = 1.0
+                    tower.laser!.rampTimer = 0
                     tower.cooldownRemaining = tower.cooldown
                     tower.hasTarget = false
                     events.beamsEnded.append(tower)
@@ -363,15 +407,24 @@ extension GameState {
                         tower.hasTarget = true
                     }
 
+                    // Ramp up 5% every 0.1s of continuous fire
+                    tower.laser!.rampTimer += deltaTime
+                    while tower.laser!.rampTimer >= 0.1 {
+                        tower.laser!.rampMultiplier *= 1.05
+                        tower.laser!.rampTimer -= 0.1
+                    }
+
                     let killCountBefore = events.killedEnemies.count
                     if let target = lockedTarget {
-                        _ = dealDamage(tower.laser!.dps * deltaTime, to: target, tower: tower, events: &events)
+                        _ = dealDamage(tower.laser!.dps * deltaTime * tower.laser!.rampMultiplier, to: target, tower: tower, events: &events)
                     }
 
                     if events.killedEnemies.count > killCountBefore {
                         tower.laser!.isFiring = false
                         tower.laser!.timeRemaining = 0
                         tower.laser!.lockedTargetID = nil
+                        tower.laser!.rampMultiplier = 1.0
+                        tower.laser!.rampTimer = 0
                         tower.cooldownRemaining = tower.cooldown
                         tower.hasTarget = false
                         events.beamsEnded.append(tower)
@@ -441,7 +494,8 @@ extension GameState {
                     var diff = st.targetYaw - st.currentYaw
                     while diff > .pi  { diff -= 2 * .pi }
                     while diff < -.pi { diff += 2 * .pi }
-                    let maxStep = tower.turretRotationSpeed * deltaTime
+                    let rotSpeed2 = tLevel >= 2 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
+                    let maxStep = rotSpeed2 * deltaTime
                     st.currentYaw += abs(diff) <= maxStep ? diff : copysign(maxStep, diff)
                 }
 
@@ -511,7 +565,7 @@ extension GameState {
         for enemy in events.killedEnemies where enemy.enemyType == .hive {
             let spawnCell = enemy.currentCell
             let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
-            let hp: Float = 25 + Float(round) * 20
+            let hp: Float = Float(256 + round * 102)
             let scatterRadius: Float = 0.4
             for i in 0..<5 {
                 let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
@@ -935,13 +989,13 @@ extension GameState {
 
     /// Effective fire radius for a tower given the highest targeting tower level covering it.
     func effectiveFireRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
-        tLevel >= 5 ? tower.fireRadius + 1 : tower.fireRadius
+        tLevel >= 6 ? tower.fireRadius + 1 : tower.fireRadius
     }
 
     /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
     func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
-        // Level 4+: manual attack lock takes highest priority
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
+        // Level 5+: manual attack lock takes highest priority
+        if tLevel >= 5, let manualID = tower.manualTargetEnemyID {
             if let locked = enemies.first(where: { $0.id == manualID && $0.active }),
                let coord = enemyNearestCoord(locked),
                tower.coord.distance(to: coord) <= effectiveDetectionRadius(for: tower, targetingLevel: tLevel) {
@@ -959,6 +1013,8 @@ extension GameState {
             // Level 2+: skip enemies this tower type cannot damage
             if tLevel >= 2 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            // Level 3+: target lock — only consider enemies in the locked cell
+            if tLevel >= 3, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
             if dist <= effectiveDetection { candidates.append((enemy, dist)) }
@@ -968,8 +1024,8 @@ extension GameState {
         // Level 1+: use tower's chosen targeting mode
         let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
 
-        // Level 3+: prioritise a chosen enemy type before applying targeting mode
-        if tLevel >= 3, let priorityType = tower.priorityEnemyType {
+        // Level 4+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 4, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
             if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
@@ -1071,7 +1127,7 @@ extension GameState {
     }
 
     /// Tries to fire a projectile from the tower. Returns a projectile if targeting succeeds.
-    func tryFire(tower: Tower, targetingLevel tLevel: Int) -> Projectile? {
+    func tryFire(tower: Tower, targetingLevel tLevel: Int, excluding: Set<UUID> = [], preferFurthest: Bool = false) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerWorldPos2D = tower.coord.worldPosition(spacing: spacing)
         let towerHeight = (towerCell?.height ?? 1.0) + 0.62
@@ -1083,15 +1139,19 @@ extension GameState {
         // Build candidate list; if a manual target is locked put it first
         var candidates: [(enemy: Enemy, distance: Int)] = []
         for enemy in enemies where enemy.active {
+            if excluding.contains(enemy.id) { continue }
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            if tLevel >= 3, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if dist <= effectiveDetection {
                 candidates.append((enemy, dist))
             }
         }
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
+        if tLevel >= 5, let manualID = tower.manualTargetEnemyID {
             candidates.sort { a, _ in a.enemy.id == manualID }
+        } else if preferFurthest {
+            candidates.sort { enemyPathProgress($0.enemy) > enemyPathProgress($1.enemy) }
         } else {
             candidates.sort { $0.distance < $1.distance }
         }
@@ -1152,6 +1212,8 @@ extension GameState {
         guard enemy.active else { return false }
         if let tower, enemy.immuneTowerTypes.contains(tower.type) { return false }
         let shieldFireMult: Float = (isFireDamage || tower?.type == .fire || tower?.type == .fireball) ? 2.0 : 1.0
+        let amount = (enemy.enemyType == .shield && (tower?.type == .projectile || tower?.type == .sword))
+            ? amount * 0.5 : amount
         let baseReward = enemy.enemyType == .boss ? 5 * round : killReward
         let reward = tower?.hasMoneyDoubler == true ? baseReward * 2 : baseReward
 

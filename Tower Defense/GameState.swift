@@ -12,6 +12,25 @@ enum GamePhase {
     case roundOver // All enemies defeated or escaped
 }
 
+// MARK: - Tech Tree Types
+
+enum TechNodeID: Hashable {
+    case towerUnlock(TowerType)
+    case farmUnlock
+    case towerLevel(TowerType, Int)  // target starting level (2 – Tower.maxLevel)
+    case baseTowerLevel(Int)         // base/center tower upgrade level (2 – 6)
+    case targetingFeature(Int)       // global targeting upgrade (1 – 6)
+    case startingGold(Int)           // starting gold upgrade (1 – 5), +50 gold each
+}
+
+struct TechNodeDef {
+    let id: TechNodeID
+    let title: String
+    let description: String
+    let cost: Int
+    let prerequisites: [TechNodeID]
+}
+
 /// Owns the hex grid and all game logic.
 @Observable
 class GameState {
@@ -28,6 +47,145 @@ class GameState {
     }
 
     var spacing: Float { hexRadius + gap / 2 }
+
+    // MARK: - Meta Progression (persists across restarts)
+
+    /// Points earned by completing rounds; spent in the tech tree between runs.
+    var upgradePoints: Int = 0
+    /// Nodes the player has purchased in the tech tree.
+    var purchasedTechNodes: Set<TechNodeID> = []
+
+    // MARK: - Tech Node Definitions
+
+    static let techNodes: [TechNodeDef] = {
+        // Tower unlock nodes (Sword is always free — no unlock node needed)
+        let unlockDefs: [(TowerType, Int, [TechNodeID])] = [
+            (.projectile, 2, []),
+            (.bowler,     2, [.towerUnlock(.projectile)]),
+            (.laser,      3, [.towerUnlock(.projectile)]),
+            (.fire,       3, [.towerUnlock(.projectile)]),
+            (.fireball,   5, [.towerUnlock(.laser), .towerUnlock(.fire)]),
+            (.ice,        3, [.farmUnlock]),
+            (.antiAir,    3, [.farmUnlock]),
+            (.healer,     4, [.targetingFeature(1)]),
+        ]
+
+        var nodes: [TechNodeDef] = []
+
+        for (type, cost, prereqs) in unlockDefs {
+            nodes.append(.init(id: .towerUnlock(type),
+                               title: "Unlock \(type.displayName)",
+                               description: "",
+                               cost: cost, prerequisites: prereqs))
+        }
+
+        nodes.append(.init(id: .farmUnlock, title: "Unlock Farm",
+                           description: "", cost: 1, prerequisites: []))
+
+        // Level upgrade chain for every tower type including Sword.
+        // Cost for level N = N - 1 points (Lv2 = 1pt, Lv3 = 2pts, … Lv6 = 5pts).
+        let allTowers: [TowerType] = [
+            .sword, .projectile, .bowler, .laser, .fire,
+            .fireball, .ice, .antiAir, .healer
+        ]
+        for type in allTowers {
+            for level in 2...Tower.maxLevel {
+                let prereqs: [TechNodeID] = level == 2
+                    ? (type == .sword ? [] : [.towerUnlock(type)])
+                    : [.towerLevel(type, level - 1)]
+                nodes.append(.init(
+                    id: .towerLevel(type, level),
+                    title: "\(type.displayName) Lv\(level)",
+                    description: "New \(type.displayName) towers start at level \(level).",
+                    cost: level - 1,
+                    prerequisites: prereqs))
+            }
+        }
+
+        // Base tower upgrades — each level costs 1 pt, grants +1 HP, +30% damage, +1 range
+        for level in 2...6 {
+            let prereqs: [TechNodeID] = level == 2 ? [] : [.baseTowerLevel(level - 1)]
+            nodes.append(.init(
+                id: .baseTowerLevel(level),
+                title: "Castle Lv\(level)",
+                description: "+1 HP, +2x dmg, +1 range",
+                cost: 1,
+                prerequisites: prereqs))
+        }
+
+        // Starting gold upgrades — +50 gold per level
+        let goldCosts = [1, 2, 2, 3, 3]
+        for level in 1...5 {
+            let prereqs: [TechNodeID] = level == 1 ? [] : [.startingGold(level - 1)]
+            nodes.append(.init(
+                id: .startingGold(level),
+                title: "+\(level * 50)g Start",
+                description: "Start each run with \(100 + level * 50) gold",
+                cost: goldCosts[level - 1],
+                prerequisites: prereqs))
+        }
+
+        // Global targeting upgrades — apply to all towers once purchased
+        let targetingDefs: [(Int, String, String, Int, [TechNodeID])] = [
+            (1, "Targeting Mode",      "All towers: choose priority target type",           1, []),
+            (2, "Extended Range",      "All towers: +1 detect range, skip immune enemies",  2, [.targetingFeature(1)]),
+            (3, "Target Lock",         "All towers: lock fire to a specific path cell",     2, [.targetingFeature(2)]),
+            (4, "Priority Type",       "All towers: set a preferred enemy type",             2, [.targetingFeature(3)]),
+            (5, "Manual Lock",         "All towers: manually lock attack target (X)",        3, [.targetingFeature(4)]),
+            (6, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(5)]),
+        ]
+        for (feat, title, desc, cost, prereqs) in targetingDefs {
+            nodes.append(.init(id: .targetingFeature(feat), title: title, description: desc,
+                               cost: cost, prerequisites: prereqs))
+        }
+
+        return nodes
+    }()
+
+    // MARK: - Computed Tech State
+
+    /// Tower types the player has unlocked. Sword is always free.
+    var unlockedTowers: Set<TowerType> {
+        var result: Set<TowerType> = [.sword]
+        for node in purchasedTechNodes {
+            if case .towerUnlock(let type) = node { result.insert(type) }
+        }
+        return result
+    }
+
+    var farmUnlocked: Bool { purchasedTechNodes.contains(.farmUnlock) }
+
+    /// Highest purchased base tower tech level (1 = none purchased).
+    var baseTowerTechLevel: Int {
+        for level in stride(from: 6, through: 2, by: -1) {
+            if purchasedTechNodes.contains(.baseTowerLevel(level)) { return level }
+        }
+        return 1
+    }
+
+    /// Starting level for newly placed towers of this type (1 if no upgrades purchased).
+    func towerBonusLevel(_ type: TowerType) -> Int {
+        for level in stride(from: Tower.maxLevel, through: 2, by: -1) {
+            if purchasedTechNodes.contains(.towerLevel(type, level)) { return level }
+        }
+        return 1
+    }
+
+    func canPurchase(_ nodeID: TechNodeID) -> Bool {
+        guard !purchasedTechNodes.contains(nodeID) else { return false }
+        guard let def = GameState.techNodes.first(where: { $0.id == nodeID }) else { return false }
+        guard upgradePoints >= def.cost else { return false }
+        return def.prerequisites.allSatisfy { purchasedTechNodes.contains($0) }
+    }
+
+    @discardableResult
+    func purchase(_ nodeID: TechNodeID) -> Bool {
+        guard canPurchase(nodeID) else { return false }
+        let cost = GameState.techNodes.first(where: { $0.id == nodeID })!.cost
+        upgradePoints -= cost
+        purchasedTechNodes.insert(nodeID)
+        return true
+    }
 
     // MARK: - Game Phase
 
@@ -118,19 +276,29 @@ class GameState {
 
     func ensureBaseSentinel() {
         guard baseSentinelTower == nil, let end = endCell else { return }
+        let lvl = baseTowerTechLevel
+        let dmg = 60.0 * pow(2.0 as Float, Float(lvl - 1))
+        let range = 2 + (lvl - 1)
         let t = Tower(coord: end.coord, type: .projectile,
-                      detectionRadius: 4, fireRadius: 4,
-                      projectileSpeed: 6.0, damage: 50, cooldown: 1.5)
+                      detectionRadius: range, fireRadius: range,
+                      projectileSpeed: 6.0, damage: dmg, cooldown: 1.5)
         baseSentinelTower = t
     }
 
-    /// Returns the level of the highest-level Targeting Tower whose radius covers the given tower.
-    /// Returns 0 if no Targeting Tower is in range.
-    func targetingLevel(for tower: Tower) -> Int {
-        towers
-            .filter { $0.type == .targeting && $0.id != tower.id }
-            .compactMap { t in t.coord.distance(to: tower.coord) <= t.detectionRadius ? t.level : nil }
-            .max() ?? 0
+    /// Bonus starting gold from tech upgrades (50 per level purchased).
+    var startingGoldBonus: Int {
+        for level in stride(from: 5, through: 1, by: -1) {
+            if purchasedTechNodes.contains(.startingGold(level)) { return level * 50 }
+        }
+        return 0
+    }
+
+    /// Highest purchased global targeting feature level (0 = none purchased).
+    var globalTargetingLevel: Int {
+        for feat in stride(from: 6, through: 1, by: -1) {
+            if purchasedTechNodes.contains(.targetingFeature(feat)) { return feat }
+        }
+        return 0
     }
 
     // MARK: - Enemies
@@ -145,8 +313,8 @@ class GameState {
 
     // MARK: - Base Tower
 
-    let baseTowerMaxHP: Int = 10
-    var baseTowerHP: Int = 10
+    var baseTowerMaxHP: Int { 8 + (baseTowerTechLevel - 1) }
+    var baseTowerHP: Int = 8
     /// True when a ring item is being used and the user must pick a cell to expand around.
     var pendingRingBonus: Bool = false
     /// True when a slow aura item is active and the player is picking a path tile target.
@@ -166,6 +334,8 @@ class GameState {
     var globalSlowAuraCoords: Set<HexCoord> = []
     /// Damage aura zones applied via inventory items (not tied to any tower).
     var globalDamageAuraCoords: Set<HexCoord> = []
+    /// Coords of branch path cells added during gameplay (tracked so they can be removed on restart).
+    var branchPathCoords: Set<HexCoord> = []
     /// True when the player has activated a Tower Heal item and is selecting which tower to heal.
     var isPendingTowerHeal: Bool = false
     /// True when the player has activated a Move Tower item and is selecting which tower to move.
@@ -174,8 +344,8 @@ class GameState {
     var pendingMoveTower: Tower? = nil
     /// True while the game is paused (only possible if hasPauseControl).
     var isPaused: Bool = false
-    /// Number of visual blocks remaining (starts at 5, loses one every 2 HP lost)
-    var baseTowerBlocksRemaining: Int = 5
+    /// Number of visual blocks remaining (= ceil(maxHP/2), loses one every 2 HP lost)
+    var baseTowerBlocksRemaining: Int = 4  // ceil(8/2) for base HP of 8
     /// Tracks cumulative damage for block destruction threshold
     var baseTowerDamageAccumulated: Int = 0
 

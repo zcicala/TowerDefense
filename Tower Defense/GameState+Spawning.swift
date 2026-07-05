@@ -93,12 +93,12 @@ extension GameState {
         currentWaveTheme = (round % 3 == 0) ? upcomingWaveTheme : nil
         upcomingWaveTheme = nil
 
-        let enemyCount = 2 + Int(Float(round) * 1.5)
-        let hp: Float = 25 + Float(round) * 20
-        let speed: Float = 1.2
+        let enemyCount = 3 + round * 3
+        let hp: Float = Float(256 + round * 102)
+        let speed: Float = 1.2 + Float(round) * 0.03
 
         enemiesToSpawn = enemyCount
-        spawnInterval = rng.randomFloat(in: 0.5...1.5)
+        spawnInterval = rng.randomFloat(in: 0.3...1.0)
         spawnTimer = 0
 
         enemies.removeAll()

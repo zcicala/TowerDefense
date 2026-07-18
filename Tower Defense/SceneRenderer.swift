@@ -520,6 +520,7 @@ class SceneRenderer {
         case .fireball:   (br, bg, bb, tr, tg, tb) = (0.6, 0.2, 0.05, 1.0, 0.45, 0.0)
         case .antiAir:    (br, bg, bb, tr, tg, tb) = (0.2, 0.35, 0.15, 0.75, 0.78, 0.8)
         case .targeting:  (br, bg, bb, tr, tg, tb) = (0.35, 0.2, 0.55, 0.65, 0.4, 0.9)
+        case .lightning:  (br, bg, bb, tr, tg, tb) = (0.35, 0.25, 0.55, 0.75, 0.55, 1.0)
         }
 
         let root = Entity()
@@ -608,6 +609,7 @@ class SceneRenderer {
         case .fireball: tint = .init(red: 0.6, green: 0.2, blue: 0.05, alpha: 1)
         case .antiAir:   tint = .init(red: 0.2, green: 0.35, blue: 0.15, alpha: 1)
         case .targeting: tint = .init(red: 0.35, green: 0.2, blue: 0.55, alpha: 1)
+        case .lightning: tint = .init(red: 0.35, green: 0.25, blue: 0.55, alpha: 1)
         }
         stoneMaterial.baseColor = CustomMaterial.BaseColor(tint: tint)
 
@@ -652,6 +654,7 @@ class SceneRenderer {
         case .fireball: turretTint = .init(red: 1.0, green: 0.45, blue: 0.0, alpha: 1)
         case .antiAir:   turretTint = .init(red: 0.75, green: 0.78, blue: 0.8, alpha: 1)
         case .targeting: turretTint = .init(red: 0.65, green: 0.4, blue: 0.9, alpha: 1)
+        case .lightning: turretTint = .init(red: 0.75, green: 0.55, blue: 1.0, alpha: 1)
         }
         turretMaterial.baseColor = CustomMaterial.BaseColor(tint: turretTint)
 
@@ -1043,6 +1046,109 @@ class SceneRenderer {
             entity.removeFromParent()
         }
         beamParticleEntities.removeAll()
+    }
+
+    // MARK: - Lightning Bolts
+
+    private var boltEntities: [UUID: [Entity]] = [:]
+    private static let boltCoreMaterial: UnlitMaterial = UnlitMaterial(color: .init(red: 0.88, green: 0.88, blue: 1.0, alpha: 1.0))
+    private static let boltBranchMaterial: UnlitMaterial = {
+        var m = UnlitMaterial(color: .init(red: 0.65, green: 0.45, blue: 1.0, alpha: 0.8))
+        m.blending = .transparent(opacity: .init(floatLiteral: 0.8))
+        return m
+    }()
+
+    /// Rebuilds a jagged, branching bolt through `positions` from scratch every call. Re-randomizing
+    /// each frame (rather than caching a fixed path) gives the bolt a flickering electric look.
+    func createBolt(for tower: Tower, positions: [SIMD3<Float>]) {
+        guard let content else { return }
+        removeBolt(for: tower)
+        guard positions.count > 1 else { return }
+
+        var segments: [Entity] = []
+        for i in 0..<(positions.count - 1) {
+            appendBoltStrike(from: positions[i], to: positions[i + 1], into: &segments, content: content)
+        }
+        boltEntities[tower.id] = segments
+    }
+
+    /// Builds one tower→target or target→target link as a jittered polyline (the jagged "core"),
+    /// with short branching tendrils sprouting off some of the interior kinks.
+    private func appendBoltStrike(from origin: SIMD3<Float>, to endpoint: SIMD3<Float>, into segments: inout [Entity], content: any RealityViewContentProtocol) {
+        let diff = endpoint - origin
+        let length = simd_length(diff)
+        guard length > 0.02 else { return }
+        let dir = diff / length
+
+        // Two axes perpendicular to the strike direction, used to jitter/branch sideways.
+        let helper: SIMD3<Float> = abs(dir.y) > 0.95 ? [1, 0, 0] : [0, 1, 0]
+        let perp1 = normalize(cross(dir, helper))
+        let perp2 = cross(dir, perp1)
+
+        let coreSegmentCount = 6
+        let maxJitter = min(0.12, length * 0.2)
+
+        var corePoints: [SIMD3<Float>] = [origin]
+        for i in 1..<coreSegmentCount {
+            let t = Float(i) / Float(coreSegmentCount)
+            let base = origin + diff * t
+            let taper = sin(t * .pi)  // zero jitter at both endpoints, max at the midpoint
+            let angle = Float.random(in: 0..<(2 * .pi))
+            let mag = Float.random(in: 0...maxJitter) * taper
+            corePoints.append(base + (perp1 * cos(angle) + perp2 * sin(angle)) * mag)
+        }
+        corePoints.append(endpoint)
+
+        for i in 0..<(corePoints.count - 1) {
+            let a = corePoints[i]
+            let b = corePoints[i + 1]
+            if let segment = boltBoxSegment(from: a, to: b, width: 0.05, material: SceneRenderer.boltCoreMaterial) {
+                content.add(segment)
+                segments.append(segment)
+            }
+
+            // Occasional short branching tendril off an interior kink — never at the very ends.
+            let isInteriorKink = i > 0 && i < corePoints.count - 2
+            if isInteriorKink && Bool.random() {
+                let branchAngle = Float.random(in: 0..<(2 * .pi))
+                let branchSpread = Float.random(in: 0.6...1.3)
+                let branchDir = normalize(dir + (perp1 * cos(branchAngle) + perp2 * sin(branchAngle)) * branchSpread)
+                let branchLength = Float.random(in: 0.08...0.22)
+                let branchEnd = a + branchDir * branchLength
+                if let branch = boltBoxSegment(from: a, to: branchEnd, width: 0.02, material: SceneRenderer.boltBranchMaterial) {
+                    content.add(branch)
+                    segments.append(branch)
+                }
+            }
+        }
+    }
+
+    private func boltBoxSegment(from a: SIMD3<Float>, to b: SIMD3<Float>, width: Float, material: UnlitMaterial) -> Entity? {
+        let diff = b - a
+        let length = simd_length(diff)
+        guard length > 0.001 else { return nil }
+        let mesh = MeshResource.generateBox(width: width, height: width, depth: length)
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        entity.position = a + diff * 0.5
+        entity.orientation = simd_quatf(from: [0, 0, 1], to: diff / length)
+        return entity
+    }
+
+    func updateBolt(for tower: Tower, positions: [SIMD3<Float>]) {
+        createBolt(for: tower, positions: positions)
+    }
+
+    func removeBolt(for tower: Tower) {
+        boltEntities[tower.id]?.forEach { $0.removeFromParent() }
+        boltEntities.removeValue(forKey: tower.id)
+    }
+
+    func removeAllBolts() {
+        for (_, entities) in boltEntities {
+            entities.forEach { $0.removeFromParent() }
+        }
+        boltEntities.removeAll()
     }
 
     // MARK: - Fire Cones

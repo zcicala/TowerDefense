@@ -171,6 +171,15 @@ struct LaserState {
     var rampTimer: Float = 0          // accumulator for ramp ticks
 }
 
+struct LightningState {
+    var duration: Float = 0.5
+    var range: Int = 3
+    var isFiring: Bool = false
+    var timeRemaining: Float = 0
+    var chainTargetIDs: [UUID] = []  // enemies hit this cast, in bolt order
+    var chainDamages: [Float] = []   // total damage dealt to each chain target (falloff already applied)
+}
+
 struct ConeState {
     var duration: Float
     var dps: Float              // 0 for ice
@@ -217,6 +226,7 @@ enum TowerType {
     case fireball
     case antiAir
     case targeting
+    case lightning
 
     var displayName: String {
         switch self {
@@ -230,6 +240,7 @@ enum TowerType {
         case .fireball:   return "Fireball"
         case .antiAir:    return "Anti Air"
         case .targeting:  return "Targeting"
+        case .lightning:  return "Lightning"
         }
     }
 }
@@ -391,6 +402,7 @@ class Tower {
     var sword: SwordState? = nil
     var healer: HealerState? = nil
     var fireball: FireballState? = nil
+    var lightning: LightningState? = nil
 
     init(coord: HexCoord, type: TowerType = .projectile,
          detectionRadius: Int = 4, fireRadius: Int = 4,
@@ -407,8 +419,8 @@ class Tower {
     static func makeLaser(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .laser,
                       detectionRadius: 6, fireRadius: 6,
-                      projectileSpeed: 0, damage: 0, cooldown: 3.0)
-        t.laser = LaserState(duration: 3.0, dps: 72, range: 6)
+                      projectileSpeed: 0, damage: 0, cooldown: 6.0)
+        t.laser = LaserState(duration: 3.0, dps: 180, range: 6)
         return t
     }
 
@@ -472,6 +484,14 @@ class Tower {
                      projectileSpeed: 0, damage: 0, cooldown: 999)
     }
 
+    static func makeLightning(coord: HexCoord) -> Tower {
+        let t = Tower(coord: coord, type: .lightning,
+                      detectionRadius: 3, fireRadius: 3,
+                      projectileSpeed: 0, damage: 198, cooldown: 2.5)
+        t.lightning = LightningState(duration: 0.5, range: 3)
+        return t
+    }
+
     var canUpgrade: Bool { level < Tower.maxLevel }
 
     /// Cost to upgrade to the next level.
@@ -488,6 +508,7 @@ class Tower {
         case .fireball:   base = 53
         case .antiAir:    base = 35
         case .targeting:  base = 75
+        case .lightning:  base = 32
         }
         return base * level
     }
@@ -537,6 +558,10 @@ class Tower {
             }
         case .targeting:
             if level == Tower.maxLevel { detectionRadius += 1 }
+        case .lightning:
+            damage *= boost
+            cooldown *= 0.88
+            // Chain jump count is derived directly from `level`, so no extra state to bump here.
         }
     }
 
@@ -561,6 +586,8 @@ class Tower {
             case 5: return "+1 aura radius"
             default: return ""
             }
+        case .lightning:
+            return "+33% dmg, -12% cooldown, +1 Chain Jump"
         }
     }
 }

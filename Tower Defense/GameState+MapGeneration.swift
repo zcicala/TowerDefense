@@ -207,6 +207,8 @@ extension GameState {
             tower = Tower.makeAntiAir(coord: coord)
         case .targeting:
             tower = Tower.makeTargeting(coord: coord)
+        case .lightning:
+            tower = Tower.makeLightning(coord: coord)
         }
         tower.moneySpent = cost
 
@@ -604,6 +606,7 @@ extension GameState {
             case .fireball:   base = 5
             case .antiAir:    base = 9
             case .targeting:  base = 3
+            case .lightning:  base = 3
             }
             if hexGrid.cell(at: coord)?.bonusType == .rangeExtender { base += 1 }
             radius = base

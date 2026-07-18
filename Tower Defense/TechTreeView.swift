@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TechTreeView: View {
     @Bindable var gameState: GameState
+    @Binding var hoveredInfo: String
 
     // ── Grid metrics ──────────────────────────────────────────────────────────
     private let cardW:   CGFloat = 148
@@ -45,13 +46,17 @@ struct TechTreeView: View {
         g[.towerUnlock(.fireball)] = (3, 7)
         for lv in 2...Tower.maxLevel { g[.towerLevel(.fireball, lv)] = (lv + 2, 7) }
 
-        // Row 9 — Farm (root) + Ice on same row   [row 8 separates the branches]
+        // Row 8 — Lightning (needs Projectile, one step deeper)
+        g[.towerUnlock(.lightning)] = (1, 8)
+        for lv in 2...Tower.maxLevel { g[.towerLevel(.lightning, lv)] = (lv, 8) }
+
+        // Row 9 — Farm (root) + Ice on same row
         g[.farmUnlock] = (0, 9)
         g[.towerUnlock(.ice)] = (1, 9)
         for lv in 2...Tower.maxLevel { g[.towerLevel(.ice, lv)] = (lv, 9) }
 
         // Row 10 — Global targeting upgrades (independent category)
-        for feat in 1...6 { g[.targetingFeature(feat)] = (feat - 1, 10) }
+        for feat in 1...5 { g[.targetingFeature(feat)] = (feat - 1, 10) }
 
         // Row 11 — Anti-air (farm child)
         g[.towerUnlock(.antiAir)] = (1, 11)
@@ -117,13 +122,13 @@ struct TechTreeView: View {
                 ZStack(alignment: .topLeading) {
                     edgeCanvas
                     if let pos = Self.grid[.towerUnlock(.sword)] {
-                        SwordFreeCard()
+                        SwordFreeCard(hoveredInfo: $hoveredInfo)
                             .frame(width: cardW, height: cardH)
                             .position(center(col: pos.col, row: pos.row))
                     }
                     ForEach(nonSwordNodes.filter { shouldShow($0) }, id: \.self) { id in
                         if let pos = Self.grid[id] {
-                            NodeCard(id: id, gameState: gameState)
+                            NodeCard(id: id, gameState: gameState, hoveredInfo: $hoveredInfo)
                                 .frame(width: cardW, height: cardH)
                                 .position(center(col: pos.col, row: pos.row))
                         }
@@ -210,6 +215,7 @@ struct TechTreeView: View {
 private struct NodeCard: View {
     let id: TechNodeID
     @Bindable var gameState: GameState
+    @Binding var hoveredInfo: String
 
     var body: some View {
         let purchased = gameState.purchasedTechNodes.contains(id)
@@ -245,7 +251,10 @@ private struct NodeCard: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(!canBuy)
+        .help(tooltip(purchased: purchased, canBuy: canBuy, def: def))
+        .onHover { hovering in
+            hoveredInfo = hovering ? tooltip(purchased: purchased, canBuy: canBuy, def: def) : ""
+        }
     }
 
     private func statusLine(purchased: Bool, canBuy: Bool, def: TechNodeDef?) -> String {
@@ -254,11 +263,28 @@ private struct NodeCard: View {
         if purchased { return "Purchased" }
         return canBuy ? pts : "\(pts) · locked"
     }
+
+    private func tooltip(purchased: Bool, canBuy: Bool, def: TechNodeDef?) -> String {
+        guard let def else { return "" }
+        let status: String
+        if purchased {
+            status = "Purchased"
+        } else {
+            let pts = "\(def.cost) point\(def.cost == 1 ? "" : "s")"
+            status = canBuy ? pts : "\(pts) · locked until prerequisites are purchased"
+        }
+        let header = "\(def.title) (\(status))"
+        return def.description.isEmpty ? header : "\(header) — \(def.description)"
+    }
 }
 
 // MARK: - Sword Free Card
 
 private struct SwordFreeCard: View {
+    @Binding var hoveredInfo: String
+
+    private static let tooltip = "Sword Tower (Always free) — Always-unlocked melee tower. Short range but hits hard, and swipes multiple enemies at max level."
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top) {
@@ -279,5 +305,9 @@ private struct SwordFreeCard: View {
                 .overlay(RoundedRectangle(cornerRadius: 8)
                     .stroke(Color(white: 0.26), lineWidth: 1.0))
         )
+        .help(Self.tooltip)
+        .onHover { hovering in
+            hoveredInfo = hovering ? Self.tooltip : ""
+        }
     }
 }

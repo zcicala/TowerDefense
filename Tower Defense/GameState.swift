@@ -19,7 +19,7 @@ enum TechNodeID: Hashable {
     case farmUnlock
     case towerLevel(TowerType, Int)  // target starting level (2 – Tower.maxLevel)
     case baseTowerLevel(Int)         // base/center tower upgrade level (2 – 6)
-    case targetingFeature(Int)       // global targeting upgrade (1 – 6)
+    case targetingFeature(Int)       // global targeting upgrade (1 – 5)
     case startingGold(Int)           // starting gold upgrade (1 – 5), +50 gold each
 }
 
@@ -68,25 +68,43 @@ class GameState {
             (.ice,        3, [.farmUnlock]),
             (.antiAir,    3, [.farmUnlock]),
             (.healer,     4, [.targetingFeature(1)]),
+            (.lightning,  4, [.towerUnlock(.projectile)]),
         ]
+
+        func unlockDescription(_ type: TowerType) -> String {
+            switch type {
+            case .projectile: return "Balanced ranged tower. Moderate damage and range; gains a second turret at max level."
+            case .bowler:     return "Rolls a heavy ball down the path, hitting every enemy it passes through. Bounces to a second lane at max level."
+            case .laser:      return "Fires a continuous beam, dealing steady damage per second to a single target."
+            case .fire:       return "Blankets a cone in flame, damaging every enemy inside over time. Applies a burning DOT at max level."
+            case .fireball:   return "Launches an explosive shell that splashes nearby enemies and sets them burning. Splash radius grows at max level."
+            case .ice:        return "Blasts a cone that slows enemies caught inside, without dealing direct damage. Slows twice as hard at max level."
+            case .antiAir:    return "Very long range, high-damage tower that fires only at Hive and Wisp enemies."
+            case .healer:     return "Repairs nearby damaged towers instead of attacking. Gains extra charges and radius as it levels up."
+            case .targeting:  return "Grants global targeting options to all towers."
+            case .sword:      return "Always-unlocked melee tower. Short range but hits hard, and swipes multiple enemies at max level."
+            case .lightning:  return "Strikes an enemy then chains to nearby foes, losing 20% damage per jump. Gains an extra jump every level."
+            }
+        }
 
         var nodes: [TechNodeDef] = []
 
         for (type, cost, prereqs) in unlockDefs {
             nodes.append(.init(id: .towerUnlock(type),
                                title: "Unlock \(type.displayName)",
-                               description: "",
+                               description: unlockDescription(type),
                                cost: cost, prerequisites: prereqs))
         }
 
         nodes.append(.init(id: .farmUnlock, title: "Unlock Farm",
-                           description: "", cost: 1, prerequisites: []))
+                           description: "Lets you place Farms on terrain tiles, which generate passive gold income each round.",
+                           cost: 1, prerequisites: []))
 
         // Level upgrade chain for every tower type including Sword.
         // Cost for level N = N - 1 points (Lv2 = 1pt, Lv3 = 2pts, … Lv6 = 5pts).
         let allTowers: [TowerType] = [
             .sword, .projectile, .bowler, .laser, .fire,
-            .fireball, .ice, .antiAir, .healer
+            .fireball, .ice, .antiAir, .healer, .lightning
         ]
         for type in allTowers {
             for level in 2...Tower.maxLevel {
@@ -102,14 +120,14 @@ class GameState {
             }
         }
 
-        // Base tower upgrades — each level costs 1 pt, grants +1 HP, +30% damage, +1 range
+        // Base tower upgrades — each level costs 1 pt (final level costs 3), grants +1 HP, +30% damage, +1 range
         for level in 2...6 {
             let prereqs: [TechNodeID] = level == 2 ? [] : [.baseTowerLevel(level - 1)]
             nodes.append(.init(
                 id: .baseTowerLevel(level),
                 title: "Castle Lv\(level)",
                 description: "+1 HP, +2x dmg, +1 range",
-                cost: 1,
+                cost: level == 6 ? 3 : 1,
                 prerequisites: prereqs))
         }
 
@@ -127,12 +145,11 @@ class GameState {
 
         // Global targeting upgrades — apply to all towers once purchased
         let targetingDefs: [(Int, String, String, Int, [TechNodeID])] = [
-            (1, "Targeting Mode",      "All towers: choose priority target type",           1, []),
-            (2, "Extended Range",      "All towers: +1 detect range, skip immune enemies",  2, [.targetingFeature(1)]),
-            (3, "Target Lock",         "All towers: lock fire to a specific path cell",     2, [.targetingFeature(2)]),
-            (4, "Priority Type",       "All towers: set a preferred enemy type",             2, [.targetingFeature(3)]),
-            (5, "Manual Lock",         "All towers: manually lock attack target (X)",        3, [.targetingFeature(4)]),
-            (6, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(5)]),
+            (1, "Advanced Targeting",  "All towers: choose priority target type, +1 detect range, +50% turret turn speed", 3, []),
+            (2, "Target Lock",         "All towers: lock fire to a specific path cell",     2, [.targetingFeature(1)]),
+            (3, "Priority Type",       "All towers: set a preferred enemy type, skip immune enemies", 2, [.targetingFeature(2)]),
+            (4, "Manual Lock",         "All towers: manually lock attack target (X)",        3, [.targetingFeature(3)]),
+            (5, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(4)]),
         ]
         for (feat, title, desc, cost, prereqs) in targetingDefs {
             nodes.append(.init(id: .targetingFeature(feat), title: title, description: desc,
@@ -226,11 +243,11 @@ class GameState {
     }
 
     var allTowerStats: [TowerTypeStats] {
-        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer, .fireball, .antiAir, .targeting]
+        let allTypes: [TowerType] = [.projectile, .laser, .fire, .ice, .bowler, .sword, .healer, .fireball, .antiAir, .targeting, .lightning]
         let names: [TowerType: String] = [
             .projectile: "Projectile", .laser: "Laser", .fire: "Fire", .ice: "Ice",
             .bowler: "Bowler", .sword: "Sword", .healer: "Healer", .fireball: "Fireball",
-            .antiAir: "Anti Air", .targeting: "Targeting"
+            .antiAir: "Anti Air", .targeting: "Targeting", .lightning: "Lightning"
         ]
         return allTypes.map { type in
             let built  = statsTowerBuilt[type, default: 0]
@@ -262,6 +279,7 @@ class GameState {
         case .fireball: base = 300
         case .antiAir:   base = 150
         case .targeting: base = 75
+        case .lightning: base = 130
         }
         let count = towerPlacedCount[type, default: 0]
         return Int(Double(base) * pow(1.1, Double(count)))
@@ -295,7 +313,7 @@ class GameState {
 
     /// Highest purchased global targeting feature level (0 = none purchased).
     var globalTargetingLevel: Int {
-        for feat in stride(from: 6, through: 1, by: -1) {
+        for feat in stride(from: 5, through: 1, by: -1) {
             if purchasedTechNodes.contains(.targetingFeature(feat)) { return feat }
         }
         return 0
@@ -492,6 +510,9 @@ struct GameEvents {
     var bladesStarted: [Tower] = []
     var bladesUpdated: [Tower] = []
     var bladesEnded: [Tower] = []
+    var boltsStarted: [Tower] = []
+    var boltsUpdated: [Tower] = []
+    var boltsEnded: [Tower] = []
     var firedBalls: [BowlingBall] = []
     var movedBalls: [BowlingBall] = []
     var removedBalls: [BowlingBall] = []

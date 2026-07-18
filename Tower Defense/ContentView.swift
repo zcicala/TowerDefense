@@ -26,8 +26,10 @@ struct ContentView: View {
 
     // UI state
     @State private var showRoundOverMessage: Bool = false
+    @State private var showIntroMessage: Bool = true
     @State private var showingStats: Bool = false
     @State private var showingTechTree: Bool = false
+    @State private var hoveredTechInfo: String = ""
     @State private var selectedTower: Tower?
     @State private var selectedEnemy: Enemy?
     @State private var selectedCell: HexCell?
@@ -49,8 +51,20 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Tech Tree")
                                 .font(.title.bold()).foregroundColor(.white)
-                            Text("\(gameState.upgradePoints) upgrade point\(gameState.upgradePoints == 1 ? "" : "s") available")
-                                .font(.subheadline).foregroundColor(.yellow)
+                            HStack(spacing: 8) {
+                                Text("\(gameState.upgradePoints) upgrade point\(gameState.upgradePoints == 1 ? "" : "s") available")
+                                    .font(.subheadline).foregroundColor(.yellow)
+                                    .fixedSize()
+                                if !hoveredTechInfo.isEmpty {
+                                    Text("·")
+                                        .font(.subheadline).foregroundColor(.white.opacity(0.4))
+                                    Text(hoveredTechInfo)
+                                        .font(.subheadline).foregroundColor(.white.opacity(0.9))
+                                        .lineLimit(2)
+                                        .frame(maxWidth: 520, alignment: .leading)
+                                }
+                            }
+                            .frame(height: 38, alignment: .top)
                         }
                         Spacer()
                         Button("Restart") {
@@ -61,6 +75,7 @@ struct ContentView: View {
                             renderer.removeAllEnemies()
                             renderer.removeAllProjectiles()
                             renderer.removeAllBeams()
+                            renderer.removeAllBolts()
                             renderer.removeAllCones()
                             renderer.removeAllBowlingBalls()
                             renderer.removeAllBlades()
@@ -96,7 +111,7 @@ struct ContentView: View {
     // MARK: - Tech Tree Overlay
 
     private var techTreeOverlay: some View {
-        TechTreeView(gameState: gameState)
+        TechTreeView(gameState: gameState, hoveredInfo: $hoveredTechInfo)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -236,6 +251,17 @@ struct ContentView: View {
                         renderer.removeBeam(for: tower)
                     }
 
+                    // Lightning bolts
+                    for tower in events.boltsStarted {
+                        renderer.createBolt(for: tower, positions: gameState.lightningBoltPositions(for: tower))
+                    }
+                    for tower in events.boltsUpdated {
+                        renderer.updateBolt(for: tower, positions: gameState.lightningBoltPositions(for: tower))
+                    }
+                    for tower in events.boltsEnded {
+                        renderer.removeBolt(for: tower)
+                    }
+
                     // Create fire cones
                     for tower in events.conesStarted {
                         let origin = gameState.fireOrigin(for: tower)
@@ -280,6 +306,7 @@ struct ContentView: View {
                     var needsAuraRefresh = false
                     for tower in events.destroyedTowers {
                         renderer.removeBeam(for: tower)
+                        renderer.removeBolt(for: tower)
                         renderer.removeCone(for: tower)
                         renderer.removeTower(id: tower.id)
                         if tower.hasSlowAura { needsAuraRefresh = true }
@@ -306,6 +333,7 @@ struct ContentView: View {
                         renderer.removeAllEnemies()
                         renderer.removeAllProjectiles()
                         renderer.removeAllBeams()
+                        renderer.removeAllBolts()
                         renderer.removeAllCones()
                         renderer.removeAllBowlingBalls()
                         renderer.removeAllBlades()
@@ -319,7 +347,7 @@ struct ContentView: View {
                 if press.characters == "x",
                    gameState.phase == .combat,
                    let tower = selectedTower,
-                   gameState.globalTargetingLevel >= 5 {
+                   gameState.globalTargetingLevel >= 4 {
                     isPendingManualTarget.toggle()
                     return .handled
                 }
@@ -494,11 +522,14 @@ struct ContentView: View {
                         .font(.caption.bold())
                         .foregroundColor(.white)
 
-                    Button("Spawn Tiles ×\(gameState.ringItemCount)") { gameState.activateRingItem() }
+                    Button("Spawn Tiles ×\(gameState.ringItemCount)") {
+                        gameState.activateRingItem()
+                        showIntroMessage = false
+                    }
                         .buttonStyle(.borderedProminent).tint(.green)
                         .disabled(gameState.ringItemCount == 0 || anyPending)
 
-                    Button("Repair ×\(gameState.repairItemCount)") { gameState.useRepairItem() }
+                    Button("Repair Castle ×\(gameState.repairItemCount)") { gameState.useRepairItem() }
                         .buttonStyle(.borderedProminent).tint(.mint)
                         .disabled(gameState.repairItemCount == 0 || gameState.baseTowerHP >= gameState.baseTowerMaxHP)
 
@@ -552,6 +583,29 @@ struct ContentView: View {
                 }
                 .padding(12).background(.black.opacity(0.8)).cornerRadius(10)
                 .frame(maxWidth: 300).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).padding(.top, 60)
+            }
+
+            // First-launch tip — points the player at the Spawn Tiles inventory item
+            if showIntroMessage && gameState.phase == .placing {
+                VStack(spacing: 6) {
+                    Text("Welcome!")
+                        .font(.headline)
+                        .foregroundColor(.green)
+                    Text("Start by using the **Spawn Tiles** item in the Inventory panel (left) to lay down terrain you can build towers on.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Button("Got it") { showIntroMessage = false }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                        .font(.caption)
+                }
+                .padding(12)
+                .background(.black.opacity(0.85))
+                .cornerRadius(10)
+                .frame(maxWidth: 320)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
             }
 
             // Ring bonus target pick prompt — center top banner
@@ -734,7 +788,7 @@ struct ContentView: View {
                 Button("None") { gameState.selectedTowerType = nil; gameState.isPlacingFarm = false }
                     .buttonStyle(.bordered)
                     .tint(gameState.selectedTowerType == nil && !gameState.isPlacingFarm ? .blue : .gray)
-                ForEach([TowerType.projectile, .laser, .fire, .bowler, .sword, .fireball, .antiAir], id: \.self) { type in
+                ForEach([TowerType.projectile, .laser, .fire, .bowler, .sword, .fireball, .antiAir, .lightning], id: \.self) { type in
                     let unlocked = gameState.unlockedTowers.contains(type)
                     Button(unlocked ? "\(type.displayName) ($\(gameState.costForTower(type)))" : "\(type.displayName) \u{1F512}") {
                         guard unlocked else { return }
@@ -1043,13 +1097,24 @@ struct ContentView: View {
                         }
                     }
                 }
+            case .lightning:
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Dmg", "\(String(format: "%.0f", tower.damage))", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Jumps", "\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        statRow("Duration", "\(String(format: "%.1f", tower.lightning?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                    }
+                }
             }
 
             // Fire range and detection range shown for all non-targeting towers
             if tower.type != .targeting {
                 let tLevel = gameState.globalTargetingLevel
-                let detectBonus = tLevel >= 2
-                let fireBonus   = tLevel >= 6
+                let detectBonus = tLevel >= 1
+                let fireBonus   = tLevel >= 5
                 Divider().background(.white.opacity(0.2))
                 HStack(spacing: 12) {
                     statRow("Fire Range",
@@ -1512,8 +1577,8 @@ struct ContentView: View {
                 .tint(tower.targetingMode == mode ? .blue : .gray)
             }
 
-            // Level 3+: target lock (restrict firing to a specific path cell)
-            if tLevel >= 3 {
+            // Level 2+: target lock (restrict firing to a specific path cell)
+            if tLevel >= 2 {
                 Divider().background(.white.opacity(0.3))
                 if let lockCoord = tower.lockedTargetCoord {
                     Text("Cell Lock: (\(lockCoord.q), \(lockCoord.r))")
@@ -1539,8 +1604,8 @@ struct ContentView: View {
                 }
             }
 
-            // Level 4+: priority enemy type
-            if tLevel >= 4 {
+            // Level 3+: priority enemy type
+            if tLevel >= 3 {
                 Divider().background(.white.opacity(0.3))
                 Text("Priority Target")
                     .font(.caption)
@@ -1559,8 +1624,8 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .center)
             }
 
-            // Level 5+: manual attack lock
-            if tLevel >= 5 && gameState.phase == .combat {
+            // Level 4+: manual attack lock
+            if tLevel >= 4 && gameState.phase == .combat {
                 Divider().background(.white.opacity(0.3))
                 if let manualID = tower.manualTargetEnemyID,
                    let locked = gameState.enemies.first(where: { $0.id == manualID && $0.active }) {

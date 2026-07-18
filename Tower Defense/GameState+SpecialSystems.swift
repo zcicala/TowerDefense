@@ -227,6 +227,21 @@ extension GameState {
         )
     }
 
+    // MARK: - Lightning Bolt
+
+    /// World-space points the bolt should be drawn through: tower barrel, then each still-active
+    /// enemy in the chain (in hit order). Enemies that died mid-chain are simply skipped.
+    func lightningBoltPositions(for tower: Tower) -> [SIMD3<Float>] {
+        guard let lightning = tower.lightning else { return [] }
+        var points: [SIMD3<Float>] = [beamOrigin(for: tower)]
+        for targetID in lightning.chainTargetIDs {
+            guard let enemy = enemies.first(where: { $0.id == targetID && $0.active }),
+                  let pos = enemyWorldPosition(enemy) else { continue }
+            points.append(pos)
+        }
+        return points
+    }
+
     /// Converts a world XZ position to the nearest hex coord.
     func nearestHexCoord(worldX: Float, worldZ: Float) -> HexCoord {
         // Reverse the flat-top hex layout formula

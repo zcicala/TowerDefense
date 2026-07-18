@@ -108,7 +108,7 @@ extension GameState {
                 var excluded: Set<UUID> = []
                 var anyFired = false
                 for _ in 0..<shotCount {
-                    if let projectile = tryFire(tower: sentinel, targetingLevel: 0, excluding: excluded, preferFurthest: true) {
+                    if let projectile = tryFire(tower: sentinel, targetingLevel: 0, excluding: excluded, preferFurthest: true, skipImmuneTargets: true) {
                         excluded.insert(projectile.targetEnemyID)
                         projectiles.append(projectile)
                         events.firedProjectiles.append(projectile)
@@ -324,8 +324,8 @@ extension GameState {
             let towerPos2D = tower.coord.worldPosition(spacing: spacing)
             let closestEnemy: Enemy?
 
-            let isFiring = tower.cone?.isFiring == true || tower.laser?.isFiring == true
-            let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID
+            let isFiring = tower.cone?.isFiring == true || tower.laser?.isFiring == true || tower.lightning?.isFiring == true
+            let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID ?? tower.lightning?.chainTargetIDs.first
             if isFiring, let lockedID,
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
                 // Respect cell lock even while firing — don't track enemy that left the locked cell
@@ -354,7 +354,7 @@ extension GameState {
                 while diff > .pi { diff -= 2 * .pi }
                 while diff < -.pi { diff += 2 * .pi }
 
-                let rotSpeed = tLevel >= 2 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
+                let rotSpeed = tLevel >= 1 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
                 let maxStep = rotSpeed * deltaTime
                 if abs(diff) <= maxStep {
                     tower.currentYaw = tower.targetYaw
@@ -441,6 +441,45 @@ extension GameState {
                 continue
             }
 
+            // Lightning: chain is locked in at cast time — tick DOT damage to every hit in the chain
+            if tower.type == .lightning && tower.lightning!.isFiring {
+                tower.lightning!.timeRemaining -= deltaTime
+
+                for (index, targetID) in tower.lightning!.chainTargetIDs.enumerated() {
+                    guard let target = enemies.first(where: { $0.id == targetID && $0.active }) else { continue }
+                    let dps = tower.lightning!.chainDamages[index] / tower.lightning!.duration
+                    _ = dealDamage(dps * deltaTime, to: target, tower: tower, events: &events)
+                }
+
+                if let primaryID = tower.lightning!.chainTargetIDs.first,
+                   let primary = enemies.first(where: { $0.id == primaryID && $0.active }),
+                   let targetPos = enemyWorldPosition(primary) {
+                    let towerPos2D = tower.coord.worldPosition(spacing: spacing)
+                    let dx = targetPos.x - towerPos2D.x
+                    let dz = targetPos.z - towerPos2D.y
+                    tower.targetYaw = atan2(dx, dz) + .pi
+                    tower.hasTarget = true
+                }
+
+                if tower.lightning!.timeRemaining <= 0 {
+                    tower.lightning!.isFiring = false
+                    tower.lightning!.chainTargetIDs = []
+                    tower.lightning!.chainDamages = []
+                    tower.cooldownRemaining = tower.cooldown
+                    tower.hasTarget = false
+                    events.boltsEnded.append(tower)
+                } else {
+                    events.boltsUpdated.append(tower)
+                }
+                continue
+            }
+
+            // Lightning in cooldown — don't track new targets
+            if tower.type == .lightning && tower.cooldownRemaining > 0 {
+                tower.hasTarget = false
+                continue
+            }
+
             // Only fire when turret is aimed close enough
             let aimThreshold: Float = 0.15
             var aimDiff = tower.targetYaw - tower.currentYaw
@@ -461,6 +500,21 @@ extension GameState {
                         tower.cone!.targetCoord = coord
                         tower.cone!.lockedTargetID = target.id
                         events.conesStarted.append(tower)
+                    }
+                } else if tower.type == .lightning {
+                    if let target = closestEnemy {
+                        let chain = buildLightningChain(from: tower, primary: target)
+                        var perTargetDamage: [Float] = []
+                        var hitDamage = tower.damage
+                        for _ in chain {
+                            perTargetDamage.append(hitDamage)
+                            hitDamage *= 0.8
+                        }
+                        tower.lightning!.isFiring = true
+                        tower.lightning!.timeRemaining = tower.lightning!.duration
+                        tower.lightning!.chainTargetIDs = chain.map { $0.id }
+                        tower.lightning!.chainDamages = perTargetDamage
+                        events.boltsStarted.append(tower)
                     }
                 } else {
                     if let projectile = tryFire(tower: tower, targetingLevel: tLevel) {
@@ -494,7 +548,7 @@ extension GameState {
                     var diff = st.targetYaw - st.currentYaw
                     while diff > .pi  { diff -= 2 * .pi }
                     while diff < -.pi { diff += 2 * .pi }
-                    let rotSpeed2 = tLevel >= 2 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
+                    let rotSpeed2 = tLevel >= 1 ? tower.turretRotationSpeed * 1.5 : tower.turretRotationSpeed
                     let maxStep = rotSpeed2 * deltaTime
                     st.currentYaw += abs(diff) <= maxStep ? diff : copysign(maxStep, diff)
                 }
@@ -984,18 +1038,18 @@ extension GameState {
 
     /// Effective detection radius for a tower given the highest targeting tower level covering it.
     func effectiveDetectionRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
-        tLevel >= 2 ? tower.detectionRadius + 1 : tower.detectionRadius
+        tLevel >= 1 ? tower.detectionRadius + 1 : tower.detectionRadius
     }
 
     /// Effective fire radius for a tower given the highest targeting tower level covering it.
     func effectiveFireRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
-        tLevel >= 6 ? tower.fireRadius + 1 : tower.fireRadius
+        tLevel >= 5 ? tower.fireRadius + 1 : tower.fireRadius
     }
 
     /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
     func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
-        // Level 5+: manual attack lock takes highest priority
-        if tLevel >= 5, let manualID = tower.manualTargetEnemyID {
+        // Level 4+: manual attack lock takes highest priority
+        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
             if let locked = enemies.first(where: { $0.id == manualID && $0.active }),
                let coord = enemyNearestCoord(locked),
                tower.coord.distance(to: coord) <= effectiveDetectionRadius(for: tower, targetingLevel: tLevel) {
@@ -1004,17 +1058,17 @@ extension GameState {
             tower.manualTargetEnemyID = nil  // enemy dead or out of range
         }
 
-        // Level 2+: detection +1
+        // Level 1+: detection +1
         let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
 
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
-            // Level 2+: skip enemies this tower type cannot damage
-            if tLevel >= 2 && enemy.immuneTowerTypes.contains(tower.type) { continue }
+            // Level 3+: skip enemies this tower type cannot damage
+            if tLevel >= 3 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            // Level 3+: target lock — only consider enemies in the locked cell
-            if tLevel >= 3, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
+            // Level 2+: target lock — only consider enemies in the locked cell
+            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
             if dist <= effectiveDetection { candidates.append((enemy, dist)) }
@@ -1024,8 +1078,8 @@ extension GameState {
         // Level 1+: use tower's chosen targeting mode
         let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
 
-        // Level 4+: prioritise a chosen enemy type before applying targeting mode
-        if tLevel >= 4, let priorityType = tower.priorityEnemyType {
+        // Level 3+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 3, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
             if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
@@ -1100,6 +1154,31 @@ extension GameState {
         return best?.enemy
     }
 
+    /// Builds a lightning tower's chain: the primary target, then jumps to the nearest
+    /// not-yet-hit enemy within 2 tiles of the previous hit, up to `tower.level` jumps.
+    /// Stops early if no more eligible enemies are in range.
+    func buildLightningChain(from tower: Tower, primary: Enemy) -> [Enemy] {
+        var chain: [Enemy] = [primary]
+        var hitIDs: Set<UUID> = [primary.id]
+        var fromCoord = enemyNearestCoord(primary)
+        let maxHits = tower.level + 1
+        let jumpRange = 2
+
+        while chain.count < maxHits, let coord = fromCoord {
+            let candidates: [(enemy: Enemy, dist: Int)] = enemies.compactMap { enemy in
+                guard enemy.active, !hitIDs.contains(enemy.id) else { return nil }
+                guard let enemyCoord = enemyNearestCoord(enemy) else { return nil }
+                let dist = coord.distance(to: enemyCoord)
+                return dist <= jumpRange ? (enemy, dist) : nil
+            }
+            guard let next = candidates.min(by: { $0.dist < $1.dist })?.enemy else { break }
+            chain.append(next)
+            hitIDs.insert(next.id)
+            fromCoord = enemyNearestCoord(next)
+        }
+        return chain
+    }
+
     /// Creates a projectile fired from `tower` aimed at a specific `target`, skipping candidate selection.
     func makeProjectile(from tower: Tower, targeting target: Enemy, targetingLevel tLevel: Int) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
@@ -1127,7 +1206,7 @@ extension GameState {
     }
 
     /// Tries to fire a projectile from the tower. Returns a projectile if targeting succeeds.
-    func tryFire(tower: Tower, targetingLevel tLevel: Int, excluding: Set<UUID> = [], preferFurthest: Bool = false) -> Projectile? {
+    func tryFire(tower: Tower, targetingLevel tLevel: Int, excluding: Set<UUID> = [], preferFurthest: Bool = false, skipImmuneTargets: Bool = false) -> Projectile? {
         let towerCell = hexGrid.cell(at: tower.coord)
         let towerWorldPos2D = tower.coord.worldPosition(spacing: spacing)
         let towerHeight = (towerCell?.height ?? 1.0) + 0.62
@@ -1141,14 +1220,15 @@ extension GameState {
         for enemy in enemies where enemy.active {
             if excluding.contains(enemy.id) { continue }
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
+            if skipImmuneTargets && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            if tLevel >= 3, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
+            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if dist <= effectiveDetection {
                 candidates.append((enemy, dist))
             }
         }
-        if tLevel >= 5, let manualID = tower.manualTargetEnemyID {
+        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
             candidates.sort { a, _ in a.enemy.id == manualID }
         } else if preferFurthest {
             candidates.sort { enemyPathProgress($0.enemy) > enemyPathProgress($1.enemy) }

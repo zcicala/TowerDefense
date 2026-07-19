@@ -5,14 +5,11 @@ extension GameState {
     // MARK: - Enemy Spawning
 
     /// Creates an enemy of the given type using scaled base HP and speed for the round.
+    /// (The old universal "every enemy gets a personal shield at round 25" wall has been
+    /// removed — that difficulty spike is now handled by the shield/Plated archetypes
+    /// themselves via `resistances` and the Act II/III tier rosters.)
     func makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
-        let enemy = _makeEnemy(type: type, hp: hp, speed: speed)
-        if round >= 25 && type != .shield {
-            let personalShield = hp * 0.5
-            enemy.shieldMaxHP = personalShield
-            enemy.shieldHP = personalShield
-        }
-        return enemy
+        _makeEnemy(type: type, hp: hp, speed: speed)
     }
 
     func _makeEnemy(type: EnemyType, hp: Float, speed: Float) -> Enemy {
@@ -23,7 +20,9 @@ extension GameState {
         case .tank:
             return Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
         case .mirroid:
-            return Enemy(type: .mirroid, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
+            let e = Enemy(type: .mirroid, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
+            e.resistances[.energy] = 1.0
+            return e
         case .fastTank:
             return Enemy(type: .fastTank, hitPoints: hp * 4, speed: speed * 1.4, baseDamage: 2)
         case .exploder:
@@ -34,13 +33,15 @@ extension GameState {
                          explosionRadius: 2, explosionDamage: 2)
         case .shield:
             let shieldAmt = Float(270 + 120 * round)
-            return Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt)
+            let e = Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt)
+            e.resistances[.physical] = 0.5
+            return e
         case .hopper:
             return Enemy(type: .hopper, hitPoints: hp * 0.7, speed: speed)
         case .superHopper:
             return Enemy(type: .superHopper, hitPoints: hp * 1.5, speed: speed * 1.2)
         case .boss:
-            let bossHP = 100 + hp * Float(round)
+            let bossHP = 100 + hp * Float(round) * tier(for: round).bossMultiplier
             return Enemy(type: .boss, hitPoints: bossHP, speed: speed * 0.5, baseDamage: 5)
         case .hive:
             let e = Enemy(type: .hive, hitPoints: hp * 6.3, speed: speed * 0.6, baseDamage: 2)
@@ -50,19 +51,49 @@ extension GameState {
             let e = Enemy(type: .wisp, hitPoints: hp * 1.0, speed: speed * 1.3)
             e.additionalHoverOffset = 0.7
             return e
+        case .plated:
+            // Act II "Hardened": heavily armored against physical towers.
+            let e = Enemy(type: .plated, hitPoints: hp * 2.2, speed: speed * 0.9, baseDamage: 2)
+            e.resistances[.physical] = 0.6
+            return e
+        case .insulated:
+            // Act II "Hardened": fractional mirroid successor — resists energy but isn't immune.
+            let e = Enemy(type: .insulated, hitPoints: hp * 1.6, speed: speed * 1.05)
+            e.resistances[.energy] = 0.6
+            return e
+        case .cinder:
+            // Act II "Hardened": resists fire damage and shrugs off burning entirely (see `isBurnImmune`).
+            let e = Enemy(type: .cinder, hitPoints: hp * 1.4, speed: speed * 1.1)
+            e.resistances[.fire] = 0.7
+            return e
+        case .nullifier:
+            // Act III "Apex": resists everything a little rather than one thing a lot.
+            let e = Enemy(type: .nullifier, hitPoints: hp * 2.0, speed: speed * 0.85, baseDamage: 2)
+            e.resistances[.physical] = 0.4
+            e.resistances[.energy] = 0.4
+            e.resistances[.fire] = 0.4
+            return e
+        case .warden:
+            // Act III "Apex": support unit — grants nearby enemies a temporary resistance
+            // buff while alive (see `applyWardenAura` in GameState+Combat.swift).
+            return Enemy(type: .warden, hitPoints: hp * 1.8, speed: speed * 0.8, baseDamage: 2)
         }
     }
 
     /// Picks a random enemy type from eligible configs using weighted sampling.
     /// Pass a `theme` to bias the pool toward that wave's featured enemy types.
     func pickSpawnType(excludingIntro: [EnemyType] = [], theme: WaveTheme? = nil) -> EnemyType {
-        let eligible = spawnConfigs.filter {
+        let eligible = tier(for: round).roster.filter {
             $0.minRound <= round && $0.maxRound >= round &&
             !($0.minRound == round && excludingIntro.contains($0.type))
         }
         let totalWeight = eligible.reduce(0.0) {
             $0 + $1.weight * (theme?.weightMultiplier(for: $1.type) ?? 1.0)
         }
+        // Defensive: if the intro-exclusion filter emptied the pool (e.g. a mis-tuned roster
+        // where a round's only eligible type is also its debut), fall back to basic rather
+        // than crashing on an empty random range.
+        guard totalWeight > 0, !eligible.isEmpty else { return .basic }
         var roll = rng.randomFloat(in: 0..<totalWeight)
         for config in eligible {
             roll -= config.weight * (theme?.weightMultiplier(for: config.type) ?? 1.0)
@@ -94,8 +125,9 @@ extension GameState {
         upcomingWaveTheme = nil
 
         let enemyCount = 3 + round * 3
-        let hp: Float = Float(256 + round * 102)
-        let speed: Float = 1.2 + Float(round) * 0.03
+        let activeTier = tier(for: round)
+        let hp: Float = activeTier.hp(atRound: round)
+        let speed: Float = activeTier.speed(atRound: round)
 
         enemiesToSpawn = enemyCount
         spawnInterval = rng.randomFloat(in: 0.3...1.0)
@@ -108,7 +140,7 @@ extension GameState {
         var introTypesUsed: [EnemyType] = []
         for _ in 0..<enemyCount {
             let type = pickSpawnType(excludingIntro: introTypesUsed, theme: currentWaveTheme)
-            if spawnConfigs.first(where: { $0.type == type })?.minRound == round {
+            if activeTier.roster.first(where: { $0.type == type })?.minRound == round {
                 introTypesUsed.append(type)
             }
             enemies.append(makeEnemy(type: type, hp: hp, speed: speed))

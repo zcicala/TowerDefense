@@ -213,6 +213,15 @@ struct FireballState {
     var burnDPS: Float
 }
 
+// MARK: - Damage Types
+
+/// Broad damage-type families used by the enemy resistance system.
+enum DamageType {
+    case physical
+    case energy
+    case fire
+}
+
 // MARK: - Tower
 
 enum TowerType {
@@ -243,6 +252,17 @@ enum TowerType {
         case .lightning:  return "Lightning"
         }
     }
+
+    /// The damage-type family this tower's attacks belong to, for the enemy resistance system.
+    /// `nil` for towers that deal no direct damage (ice, healer, targeting).
+    var damageType: DamageType? {
+        switch self {
+        case .projectile, .bowler, .sword, .antiAir: return .physical
+        case .laser, .lightning: return .energy
+        case .fire, .fireball: return .fire
+        case .ice, .healer, .targeting: return nil
+        }
+    }
 }
 
 enum EnemyType: CaseIterable {
@@ -258,6 +278,13 @@ enum EnemyType: CaseIterable {
     case hive
     case mirroid
     case wisp
+    // Act II "Hardened" archetypes
+    case plated
+    case insulated
+    case cinder
+    // Act III "Apex" archetypes
+    case nullifier
+    case warden
 
     var displayName: String {
         switch self {
@@ -273,6 +300,11 @@ enum EnemyType: CaseIterable {
         case .hive:         return "Hive"
         case .mirroid:      return "Mirroid"
         case .wisp:         return "Wisp"
+        case .plated:       return "Plated"
+        case .insulated:    return "Insulated"
+        case .cinder:       return "Cinder"
+        case .nullifier:    return "Nullifier"
+        case .warden:       return "Warden"
         }
     }
 }
@@ -406,7 +438,7 @@ class Tower {
 
     init(coord: HexCoord, type: TowerType = .projectile,
          detectionRadius: Int = 4, fireRadius: Int = 4,
-         projectileSpeed: Float = 6.0, damage: Float = 50, cooldown: Float = 1.0) {
+         projectileSpeed: Float = 6.0, damage: Float = 62.5, cooldown: Float = 1.0) {
         self.coord = coord
         self.type = type
         self.detectionRadius = detectionRadius
@@ -428,7 +460,7 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 101.0)
+        t.cone = ConeState(duration: 3.5, dps: 126.25)
         return t
     }
 
@@ -457,7 +489,7 @@ class Tower {
     static func makeFireball(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .fireball,
                       detectionRadius: 5, fireRadius: 5,
-                      projectileSpeed: 5.0, damage: 100, cooldown: 2.5)
+                      projectileSpeed: 5.0, damage: 300, cooldown: 2.5)
         t.fireball = FireballState(splashRadius: 1, burnDuration: 2.0, burnDPS: 40.0)
         return t
     }
@@ -499,7 +531,7 @@ class Tower {
         let base: Int
         switch type {
         case .projectile: base = 22
-        case .laser:      base = 33
+        case .laser:      base = 50
         case .fire:       base = 28
         case .ice:        base = 44
         case .bowler:     base = 20
@@ -508,7 +540,7 @@ class Tower {
         case .fireball:   base = 53
         case .antiAir:    base = 35
         case .targeting:  base = 75
-        case .lightning:  base = 32
+        case .lightning:  base = 48
         }
         return base * level
     }
@@ -635,12 +667,13 @@ class Enemy {
     var hiveDropFromY: Float = 0              // world Y the drop starts from
     var hiveDropLateralOffset: SIMD2<Float> = .zero  // random XZ scatter, fades to zero on land
 
-    /// Tower types that cannot damage this enemy.
+    /// Tower types that cannot *target* this enemy at all — purely positional/targetability rules
+    /// (airborne units out of reach of ground-only towers). Damage-type resistance is handled
+    /// separately by `resistances`/`resistanceMultiplier(for:)`.
     var immuneTowerTypes: Set<TowerType> {
         var immune: Set<TowerType>
         switch enemyType {
         case .hive:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]
-        case .mirroid: immune = [.laser]
         case .wisp:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]
         default:       immune = []
         }
@@ -650,6 +683,27 @@ class Enemy {
         }
         return immune
     }
+
+    /// Fractional damage-type resistances, in `-1.0...1.0` (positive = resist, `1.0` = full
+    /// immunity, negative = vulnerability). Set at spawn time in `_makeEnemy`.
+    var resistances: [DamageType: Float] = [:]
+
+    /// Temporary all-type resistance bonus granted by a nearby living Warden. Recomputed every
+    /// frame by `GameState.applyWardenAura()` — zero the instant the enemy leaves aura range or
+    /// the warden dies. Stacks additively on top of `resistances` in `resistanceMultiplier(for:)`.
+    var wardenAuraBonus: Float = 0
+
+    /// Multiplier applied to incoming damage of the given type: `1 - (resistances[type] + wardenAuraBonus)`.
+    /// Defaults to `1.0` (no reduction) when the enemy has no entry for that type, or when
+    /// `type` is `nil` (the attacking tower deals no typed damage).
+    func resistanceMultiplier(for type: DamageType?) -> Float {
+        guard let type else { return 1.0 }
+        return 1.0 - (resistances[type] ?? 0) - wardenAuraBonus
+    }
+
+    /// Cinder is immune to the burning DOT status effect entirely (on top of its fractional
+    /// fire resistance, which still reduces direct fire-tower/fireball hits).
+    var isBurnImmune: Bool { enemyType == .cinder }
 
     // Hopper-specific state
     var hopperJumpTimer: Float = 0      // countdown to next jump

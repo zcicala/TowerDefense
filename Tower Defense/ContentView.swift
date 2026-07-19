@@ -1202,17 +1202,33 @@ struct ContentView: View {
                 }
             }
 
-            // Immunities
+            // Immune / Resist — positional targetability immunities, plus fractional
+            // damage-type resistances (including full 100% immunities like mirroid's laser).
             let immunities = enemy.immuneTowerTypes
-            if !immunities.isEmpty {
+            let resistanceRows = damageTypeResistanceRows(enemy)
+            if !immunities.isEmpty || !resistanceRows.isEmpty {
                 Divider().background(.white.opacity(0.3))
-                HStack(spacing: 4) {
-                    Text("Immune:")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.5))
-                    Text(immunities.map { towerTypeName($0) }.sorted().joined(separator: ", "))
-                        .font(.caption)
-                        .foregroundColor(.red.opacity(0.85))
+                VStack(alignment: .leading, spacing: 2) {
+                    if !immunities.isEmpty {
+                        HStack(spacing: 4) {
+                            Text("Immune:")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.5))
+                            Text(immunities.map { towerTypeName($0) }.sorted().joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundColor(.red.opacity(0.85))
+                        }
+                    }
+                    if !resistanceRows.isEmpty {
+                        HStack(spacing: 4) {
+                            Text("Resist:")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.5))
+                            Text(resistanceRows.joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundColor(.orange.opacity(0.85))
+                        }
+                    }
                 }
             }
 
@@ -1228,6 +1244,23 @@ struct ContentView: View {
     }
 
     private func towerTypeName(_ type: TowerType) -> String { type.displayName }
+
+    private func damageTypeName(_ type: DamageType) -> String {
+        switch type {
+        case .physical: return "Physical"
+        case .energy:   return "Energy"
+        case .fire:     return "Fire"
+        }
+    }
+
+    /// Formats each of the enemy's non-zero damage-type resistances as e.g. "Energy 60%",
+    /// sorted by descending resistance so the most dangerous gaps read first.
+    private func damageTypeResistanceRows(_ enemy: Enemy) -> [String] {
+        enemy.resistances
+            .filter { $0.value != 0 }
+            .sorted { $0.value > $1.value }
+            .map { "\(damageTypeName($0.key)) \(Int(($0.value * 100).rounded()))%" }
+    }
 
     private func refreshSlowAuraIndicators() {
         guard let renderer else { return }
@@ -1973,6 +2006,11 @@ struct StatsView: View {
         case .hive:         return "Hive"
         case .mirroid:      return "Mirroid"
         case .wisp:         return "Wisp"
+        case .plated:       return "Plated"
+        case .insulated:    return "Insul."
+        case .cinder:       return "Cinder"
+        case .nullifier:    return "Nullif."
+        case .warden:       return "Warden"
         }
     }
 

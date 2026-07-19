@@ -68,7 +68,7 @@ class GameState {
             (.ice,        3, [.farmUnlock]),
             (.antiAir,    3, [.farmUnlock]),
             (.healer,     4, [.targetingFeature(1)]),
-            (.lightning,  4, [.towerUnlock(.projectile)]),
+            (.lightning,  6, [.towerUnlock(.projectile)]),
         ]
 
         func unlockDescription(_ type: TowerType) -> String {
@@ -270,7 +270,7 @@ class GameState {
         let base: Int
         switch type {
         case .projectile: base = 50
-        case .laser: base = 80
+        case .laser: base = 120
         case .fire: base = 80
         case .ice: base = 100
         case .bowler: base = 60
@@ -279,7 +279,7 @@ class GameState {
         case .fireball: base = 300
         case .antiAir:   base = 150
         case .targeting: base = 75
-        case .lightning: base = 130
+        case .lightning: base = 180
         }
         let count = towerPlacedCount[type, default: 0]
         return Int(Double(base) * pow(1.1, Double(count)))
@@ -401,19 +401,107 @@ class GameState {
         }
     }
 
-    let spawnConfigs: [EnemySpawnConfig] = [
-        .init(type: .basic,         minRound: 0,  maxRound: 18, weight: 10),
-        .init(type: .tank,          minRound: 6,  maxRound: 20, weight: 4),
-        .init(type: .mirroid,       minRound: 14,               weight: 3),
-        .init(type: .wisp,          minRound: 12,               weight: 2),
-        .init(type: .hopper,        minRound: 8,  maxRound: 25, weight: 5),
-        .init(type: .exploder,      minRound: 10, maxRound: 30, weight: 3),
-        .init(type: .shield,        minRound: 15, maxRound: 25, weight: 3),
-        .init(type: .fastTank,      minRound: 20,               weight: 3),
-        .init(type: .superHopper,   minRound: 25,               weight: 3),
-        .init(type: .superExploder, minRound: 30,               weight: 2),
-        .init(type: .hive,          minRound: 18,               weight: 2),
+    // MARK: - Enemy Difficulty Tiers
+
+    /// A named "act" of the difficulty curve. HP/speed scale linearly with the round *within*
+    /// the tier (round 0 of the tier = `hpBase`/`speedBase`), and only the tier's own roster
+    /// can be picked while it's active — see `tier(for:)` and `pickSpawnType`.
+    struct EnemyTier {
+        let act: Int
+        let name: String
+        let rounds: ClosedRange<Int>
+        let hpBase: Float
+        let hpSlope: Float
+        let speedBase: Float
+        let speedSlope: Float
+        /// Extra multiplier stacked on top of the standard boss formula so bosses stay
+        /// threatening even as `hpSlope` flattens out in later acts.
+        let bossMultiplier: Float
+        let roster: [EnemySpawnConfig]
+
+        /// Enemy HP for the given round (expected to fall within `rounds`).
+        func hp(atRound round: Int) -> Float {
+            hpBase + hpSlope * Float(round - rounds.lowerBound)
+        }
+
+        /// Enemy speed for the given round (expected to fall within `rounds`).
+        func speed(atRound round: Int) -> Float {
+            speedBase + speedSlope * Float(round - rounds.lowerBound)
+        }
+    }
+
+    /// Source of truth for the round-by-round difficulty curve and roster.
+    /// Act I's `hpBase`/`hpSlope`/`speedBase`/`speedSlope` are chosen so `hp(atRound:)` and
+    /// `speed(atRound:)` exactly reproduce the legacy `256 + 102·round` / `1.2 + 0.03·round`
+    /// formulas for rounds 1–15 — the early game is unchanged by this system.
+    static let tiers: [EnemyTier] = [
+        EnemyTier(
+            act: 1, name: "Vanguard", rounds: 1...15,
+            hpBase: 358, hpSlope: 102,
+            speedBase: 1.23, speedSlope: 0.03,
+            bossMultiplier: 1.0,
+            roster: [
+                // basic's minRound is 0 (not 1) so it never collides with the round-1 "debut
+                // exclusion" rule in pickSpawnType — at round 1 it's the only eligible type,
+                // and excluding it after the first pick would leave the pool empty.
+                .init(type: .basic,    minRound: 0,  weight: 10),
+                .init(type: .tank,     minRound: 6,  weight: 4),
+                .init(type: .hopper,   minRound: 8,  weight: 5),
+                .init(type: .exploder, minRound: 10, weight: 3),
+                .init(type: .wisp,     minRound: 12, weight: 2),
+                .init(type: .mirroid,  minRound: 14, weight: 3),
+            ]
+        ),
+        EnemyTier(
+            act: 2, name: "Hardened", rounds: 16...30,
+            hpBase: 1950, hpSlope: 45,
+            speedBase: 1.75, speedSlope: 0.025,
+            bossMultiplier: 1.3,
+            roster: [
+                .init(type: .basic,       minRound: 16, weight: 6),
+                .init(type: .tank,        minRound: 16, weight: 4),
+                .init(type: .hopper,      minRound: 16, weight: 4),
+                .init(type: .exploder,    minRound: 16, weight: 3),
+                .init(type: .wisp,        minRound: 16, weight: 2),
+                .init(type: .mirroid,     minRound: 16, weight: 3),
+                .init(type: .shield,      minRound: 16, weight: 3),
+                .init(type: .fastTank,    minRound: 20, weight: 3),
+                .init(type: .superHopper, minRound: 25, weight: 3),
+                .init(type: .plated,      minRound: 16, weight: 4),
+                .init(type: .insulated,   minRound: 18, weight: 4),
+                .init(type: .cinder,      minRound: 20, weight: 4),
+            ]
+        ),
+        EnemyTier(
+            act: 3, name: "Apex", rounds: 31...Int.max,
+            hpBase: 2750, hpSlope: 15,
+            speedBase: 2.4, speedSlope: 0.04,
+            bossMultiplier: 1.6,
+            roster: [
+                .init(type: .basic,         minRound: 31, weight: 4),
+                .init(type: .tank,          minRound: 31, weight: 3),
+                .init(type: .hopper,        minRound: 31, weight: 3),
+                .init(type: .exploder,      minRound: 31, weight: 2),
+                .init(type: .wisp,          minRound: 31, weight: 2),
+                .init(type: .mirroid,       minRound: 31, weight: 2),
+                .init(type: .shield,        minRound: 31, weight: 3),
+                .init(type: .fastTank,      minRound: 31, weight: 3),
+                .init(type: .superHopper,   minRound: 31, weight: 3),
+                .init(type: .superExploder, minRound: 31, weight: 3),
+                .init(type: .hive,          minRound: 31, weight: 2),
+                .init(type: .plated,        minRound: 31, weight: 3),
+                .init(type: .insulated,     minRound: 31, weight: 3),
+                .init(type: .cinder,        minRound: 31, weight: 3),
+                .init(type: .nullifier,     minRound: 31, weight: 3),
+                .init(type: .warden,        minRound: 33, weight: 2),
+            ]
+        ),
     ]
+
+    /// The active difficulty tier for the given round (falls back to Act I for round ≤ 0).
+    func tier(for round: Int) -> EnemyTier {
+        GameState.tiers.first(where: { $0.rounds.contains(round) }) ?? GameState.tiers[0]
+    }
 }
 
 // MARK: - Random Source

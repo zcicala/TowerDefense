@@ -46,6 +46,9 @@ extension GameState {
             applyAreaSlow(cells: Array(globalSlowAuraCoords), slowFactor: 0.8)
         }
 
+        // Warden aura: buffs nearby enemies' resistances while a warden is alive and in range
+        applyWardenAura()
+
         // Move enemies and apply burn DOT
         for enemy in enemies where enemy.active {
             // Burn damage tick
@@ -72,7 +75,7 @@ extension GameState {
                 if enemy.hiveSpawnTimer <= 0 {
                     enemy.hiveSpawnTimer = 4.0
                     let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
-                    let hp: Float = Float(256 + round * 102)
+                    let hp: Float = tier(for: round).hp(atRound: round)
                     let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
                     hopper.currentCell = enemy.currentCell
                     hopper.progress = enemy.progress
@@ -830,6 +833,11 @@ extension GameState {
         case .exploder:      return enemyRadius * 1.1   // half of box width (2.2r)
         case .superExploder: return enemyRadius * 1.5   // half of box width (3r)
         case .hive:          return enemyRadius * 2.5
+        case .plated:        return enemyRadius * 2.0
+        case .insulated:     return enemyRadius * 1.7
+        case .cinder:        return enemyRadius * 1.6
+        case .nullifier:     return enemyRadius * 2.2
+        case .warden:        return enemyRadius * 1.9
         }
     }
 
@@ -1273,6 +1281,33 @@ extension GameState {
         return nil
     }
 
+    // MARK: - Warden Aura
+
+    /// Hex radius (from the warden's nearest path coord) within which enemies get buffed.
+    static let wardenAuraRadius = 3
+    /// Flat resistance bonus (added to every damage type) granted while in aura range.
+    static let wardenAuraBonusAmount: Float = 0.3
+
+    /// Recomputes every active enemy's `wardenAuraBonus` for this frame, mirroring the
+    /// proximity pattern used by `findShielder(near:)`. The buff is cleared and re-earned every
+    /// tick, so it drops instantly once an enemy leaves range or the warden dies — there's no
+    /// separate "aura expired" bookkeeping needed.
+    func applyWardenAura() {
+        for enemy in enemies where enemy.active {
+            enemy.wardenAuraBonus = 0
+        }
+        let wardenCoords = enemies
+            .filter { $0.active && $0.enemyType == .warden }
+            .compactMap { enemyNearestCoord($0) }
+        guard !wardenCoords.isEmpty else { return }
+        for enemy in enemies where enemy.active {
+            guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
+            if wardenCoords.contains(where: { $0.distance(to: enemyCoord) <= GameState.wardenAuraRadius }) {
+                enemy.wardenAuraBonus = GameState.wardenAuraBonusAmount
+            }
+        }
+    }
+
     // MARK: - Damage Helpers
 
     /// Finds a nearby active shielder protecting the given coord (within 1 hex).
@@ -1292,9 +1327,10 @@ extension GameState {
     func dealDamage(_ amount: Float, to enemy: Enemy, tower: Tower? = nil, isFireDamage: Bool = false, events: inout GameEvents) -> Bool {
         guard enemy.active else { return false }
         if let tower, enemy.immuneTowerTypes.contains(tower.type) { return false }
+        // Damage-type resistance (fractional; 1.0 = full immunity). Burn ticks (no tower) count as fire.
+        let damageType: DamageType? = tower?.type.damageType ?? (isFireDamage ? .fire : nil)
+        let amount = amount * enemy.resistanceMultiplier(for: damageType)
         let shieldFireMult: Float = (isFireDamage || tower?.type == .fire || tower?.type == .fireball) ? 2.0 : 1.0
-        let amount = (enemy.enemyType == .shield && (tower?.type == .projectile || tower?.type == .sword))
-            ? amount * 0.5 : amount
         let baseReward = enemy.enemyType == .boss ? 5 * round : killReward
         let reward = tower?.hasMoneyDoubler == true ? baseReward * 2 : baseReward
 
@@ -1378,6 +1414,7 @@ extension GameState {
     func applyBurning(cells: [HexCoord]) {
         for enemy in enemies where enemy.active {
             guard !enemy.immuneTowerTypes.contains(.fire) else { continue }
+            guard !enemy.isBurnImmune else { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
             if cells.contains(enemyCoord) {
                 enemy.burning = true

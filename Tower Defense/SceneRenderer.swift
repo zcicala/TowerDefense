@@ -1387,6 +1387,26 @@ class SceneRenderer {
         case .wisp:
             mesh = MeshResource.generateSphere(radius: radius * 0.9)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.5, green: 0.85, blue: 1.0, alpha: 1))
+        case .plated:
+            // Armored box — slate blue-grey, reads as "resists physical".
+            mesh = MeshResource.generateBox(width: radius * 2.0, height: radius * 2.0, depth: radius * 2.0, cornerRadius: radius * 0.15)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.4, green: 0.46, blue: 0.55, alpha: 1))
+        case .insulated:
+            // Teal sphere — reads as "resists energy" (mirroid's fractional successor).
+            mesh = MeshResource.generateSphere(radius: radius * 1.7)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.1, green: 0.6, blue: 0.6, alpha: 1))
+        case .cinder:
+            // Charcoal/ember sphere — reads as "resists fire, immune to burning".
+            mesh = MeshResource.generateSphere(radius: radius * 1.6)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.3, green: 0.15, blue: 0.1, alpha: 1))
+        case .nullifier:
+            // Void-purple box — reads as "resists everything a little".
+            mesh = MeshResource.generateBox(width: radius * 2.2, height: radius * 2.2, depth: radius * 2.2, cornerRadius: radius * 0.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.18, green: 0.06, blue: 0.24, alpha: 1))
+        case .warden:
+            // Gold sphere — reads as "support unit, kill first".
+            mesh = MeshResource.generateSphere(radius: radius * 1.9)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.75, green: 0.62, blue: 0.15, alpha: 1))
         }
 
         let entity = Entity()
@@ -1414,6 +1434,11 @@ class SceneRenderer {
         case .hive:          collisionRadius = radius * 2.5
         case .mirroid:       collisionRadius = radius * 2
         case .wisp:          collisionRadius = radius * 0.9
+        case .plated:        collisionRadius = radius * 2.0
+        case .insulated:     collisionRadius = radius * 1.7
+        case .cinder:        collisionRadius = radius * 1.6
+        case .nullifier:     collisionRadius = radius * 2.2
+        case .warden:        collisionRadius = radius * 1.9
         }
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: collisionRadius)]))
         entity.components.set(InputTargetComponent())

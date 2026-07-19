@@ -190,18 +190,175 @@ final class CombatTests: XCTestCase {
         XCTAssertEqual(enemy.hitPoints, 100, accuracy: 0.001)
     }
 
-    func testDealDamage_immuneTowerType_dealsNoDamage() {
+    func testDealDamage_fullyResistantEnemy_dealsNoDamage() {
         let gs = makeGameState()
-        // Mirroid is immune to laser
+        // Mirroid is fully resistant (immune) to energy-type damage, e.g. laser.
         let enemy = Enemy(type: .mirroid, hitPoints: 100, speed: 1.0)
+        enemy.resistances[.energy] = 1.0
         enemy.currentCell = pathCell(at: 1, in: gs)
         enemy.active = true
         gs.enemies.append(enemy)
         let laser = Tower.makeLaser(coord: HexCoord(q: 0, r: 0))
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 0, accuracy: 0.001)
         var events = GameEvents()
         let killed = gs.dealDamage(100, to: enemy, tower: laser, events: &events)
         XCTAssertFalse(killed)
         XCTAssertEqual(enemy.hitPoints, 100, accuracy: 0.001)
+    }
+
+    func testMakeEnemy_mirroid_hasEnergyImmunityViaResistances() {
+        let gs = makeGameState()
+        gs.round = 14
+        let enemy = gs._makeEnemy(type: .mirroid, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 0, accuracy: 0.001)
+        XCTAssertFalse(enemy.immuneTowerTypes.contains(.laser), "positional immunity should no longer carry the energy immunity")
+    }
+
+    func testMakeEnemy_round25_noLongerGrantsUniversalPersonalShield() {
+        let gs = makeGameState()
+        gs.round = 25
+        let enemy = gs.makeEnemy(type: .basic, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.shieldMaxHP, 0, "the universal round-25 personal shield wall should be removed")
+    }
+
+    func testShield_debutsAtRound16_notInActITier() {
+        let gs = makeGameState()
+        XCTAssertFalse(gs.tier(for: 15).roster.contains { $0.type == .shield },
+                       "shield should not appear in Act I (rounds 1-15)")
+        XCTAssertTrue(gs.tier(for: 16).roster.contains { $0.type == .shield },
+                      "shield should debut at round 16 (Act II)")
+    }
+
+    func testMakeEnemy_shield_hasPhysicalResistanceViaResistances() {
+        let gs = makeGameState()
+        gs.round = 16
+        let enemy = gs._makeEnemy(type: .shield, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 0.5, accuracy: 0.001)
+    }
+
+    // MARK: New Act II/III archetypes
+
+    func testMakeEnemy_plated_resistsPhysical60Percent() {
+        let gs = makeGameState()
+        let enemy = gs._makeEnemy(type: .plated, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 0.4, accuracy: 0.001)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 1.0, accuracy: 0.001)
+    }
+
+    func testMakeEnemy_insulated_resistsEnergy60Percent() {
+        let gs = makeGameState()
+        let enemy = gs._makeEnemy(type: .insulated, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 0.4, accuracy: 0.001)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 1.0, accuracy: 0.001)
+    }
+
+    func testMakeEnemy_cinder_resistsFireAndIsBurnImmune() {
+        let gs = makeGameState()
+        let enemy = gs._makeEnemy(type: .cinder, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .fire), 0.3, accuracy: 0.001)
+        XCTAssertTrue(enemy.isBurnImmune)
+    }
+
+    func testMakeEnemy_nullifier_resistsAllTypesPartially() {
+        let gs = makeGameState()
+        let enemy = gs._makeEnemy(type: .nullifier, hp: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 0.6, accuracy: 0.001)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 0.6, accuracy: 0.001)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .fire), 0.6, accuracy: 0.001)
+    }
+
+    func testApplyBurning_burnImmuneEnemy_isNeverSetBurning() {
+        let gs = makeGameState()
+        let enemy = makeActiveEnemy(type: .cinder, atCell: 1, in: gs)
+        XCTAssertFalse(enemy.burning)
+        gs.applyBurning(cells: [HexCoord(q: 1, r: 0)])
+        XCTAssertFalse(enemy.burning, "cinder should be immune to the burning status effect")
+    }
+
+    // MARK: Warden aura
+
+    func testApplyWardenAura_buffsInRangeNeighbor() {
+        let gs = makeGameState(pathLength: 10)
+        let warden = makeActiveEnemy(type: .warden, atCell: 3, in: gs)
+        let neighbor = makeActiveEnemy(type: .basic, atCell: 4, in: gs)  // distance 1, within radius
+        XCTAssertEqual(neighbor.wardenAuraBonus, 0)
+        gs.applyWardenAura()
+        XCTAssertEqual(neighbor.wardenAuraBonus, GameState.wardenAuraBonusAmount, accuracy: 0.001)
+        // The warden itself also benefits from its own aura.
+        XCTAssertEqual(warden.wardenAuraBonus, GameState.wardenAuraBonusAmount, accuracy: 0.001)
+    }
+
+    func testApplyWardenAura_clearsWhenOutOfRange() {
+        let gs = makeGameState(pathLength: 10)
+        _ = makeActiveEnemy(type: .warden, atCell: 0, in: gs)
+        let farEnemy = makeActiveEnemy(type: .basic, atCell: 9, in: gs)  // far outside radius
+        gs.applyWardenAura()
+        XCTAssertEqual(farEnemy.wardenAuraBonus, 0, accuracy: 0.001)
+    }
+
+    func testApplyWardenAura_clearsWhenWardenDies() {
+        let gs = makeGameState(pathLength: 10)
+        let warden = makeActiveEnemy(type: .warden, atCell: 3, in: gs)
+        let neighbor = makeActiveEnemy(type: .basic, atCell: 4, in: gs)
+        gs.applyWardenAura()
+        XCTAssertGreaterThan(neighbor.wardenAuraBonus, 0)
+        warden.active = false
+        gs.applyWardenAura()
+        XCTAssertEqual(neighbor.wardenAuraBonus, 0, accuracy: 0.001)
+    }
+
+    func testResistanceMultiplier_wardenAuraBonus_stacksWithBaseResistance() {
+        let enemy = Enemy(type: .plated, hitPoints: 100, speed: 1.0)
+        enemy.resistances[.physical] = 0.6
+        enemy.wardenAuraBonus = 0.3
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 0.1, accuracy: 0.001)
+    }
+
+    func testArchetypeRoster_newTypesAppearInActIIAndActIII() {
+        let gs = makeGameState()
+        let actII = gs.tier(for: 20).roster.map { $0.type }
+        XCTAssertTrue(actII.contains(.plated))
+        XCTAssertTrue(actII.contains(.insulated))
+        XCTAssertTrue(actII.contains(.cinder))
+        let actIII = gs.tier(for: 35).roster.map { $0.type }
+        XCTAssertTrue(actIII.contains(.nullifier))
+        XCTAssertTrue(actIII.contains(.warden))
+    }
+
+    // MARK: resistanceMultiplier
+
+    func testResistanceMultiplier_noEntry_returnsOne() {
+        let enemy = Enemy(type: .basic, hitPoints: 100, speed: 1.0)
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .physical), 1.0, accuracy: 0.001)
+    }
+
+    func testResistanceMultiplier_nilType_returnsOne() {
+        let enemy = Enemy(type: .basic, hitPoints: 100, speed: 1.0)
+        enemy.resistances[.physical] = 1.0
+        XCTAssertEqual(enemy.resistanceMultiplier(for: nil), 1.0, accuracy: 0.001)
+    }
+
+    func testResistanceMultiplier_fractionalResist_reducesDamage() {
+        let enemy = Enemy(type: .basic, hitPoints: 100, speed: 1.0)
+        enemy.resistances[.energy] = 0.6
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .energy), 0.4, accuracy: 0.001)
+    }
+
+    func testResistanceMultiplier_vulnerability_increasesDamage() {
+        let enemy = Enemy(type: .basic, hitPoints: 100, speed: 1.0)
+        enemy.resistances[.fire] = -0.5
+        XCTAssertEqual(enemy.resistanceMultiplier(for: .fire), 1.5, accuracy: 0.001)
+    }
+
+    func testDealDamage_fractionalResistance_reducesDamageProportionally() {
+        let gs = makeGameState()
+        let enemy = makeActiveEnemy(type: .shield, hp: 100, atCell: 1, in: gs)
+        enemy.resistances[.physical] = 0.5
+        let tower = Tower(coord: HexCoord(q: 0, r: 0), type: .projectile)
+        var events = GameEvents()
+        gs.dealDamage(50, to: enemy, tower: tower, events: &events)
+        // 50 * (1 - 0.5) = 25 damage taken
+        XCTAssertEqual(enemy.hitPoints, 75, accuracy: 0.001)
     }
 
     func testDealDamage_moneyDoubler_doublesReward() {
@@ -389,6 +546,71 @@ final class CombatTests: XCTestCase {
         let success = gs.upgradeTower(tower)
         XCTAssertFalse(success)
         XCTAssertEqual(tower.level, 1)
+    }
+
+    // MARK: EnemyTier
+
+    func testTier_actIBoundary_round15IsActI_round16IsActII() {
+        let gs = makeGameState()
+        XCTAssertEqual(gs.tier(for: 15).act, 1)
+        XCTAssertEqual(gs.tier(for: 16).act, 2)
+    }
+
+    func testTier_actIIBoundary_round30IsActII_round31IsActIII() {
+        let gs = makeGameState()
+        XCTAssertEqual(gs.tier(for: 30).act, 2)
+        XCTAssertEqual(gs.tier(for: 31).act, 3)
+    }
+
+    func testTier_actI_reproducesLegacyHPFormula() {
+        let gs = makeGameState()
+        for round in 1...15 {
+            let expected = Float(256 + round * 102)
+            XCTAssertEqual(gs.tier(for: round).hp(atRound: round), expected, accuracy: 0.01,
+                           "round \(round)")
+        }
+    }
+
+    func testTier_actI_reproducesLegacySpeedFormula() {
+        let gs = makeGameState()
+        for round in 1...15 {
+            let expected = 1.2 + Float(round) * 0.03
+            XCTAssertEqual(gs.tier(for: round).speed(atRound: round), expected, accuracy: 0.001,
+                           "round \(round)")
+        }
+    }
+
+    func testTier_actII_hpFlatterThanActI() {
+        let gs = makeGameState()
+        let actIISlope = gs.tier(for: 20).hpSlope
+        let actISlope = gs.tier(for: 10).hpSlope
+        XCTAssertLessThan(actIISlope, actISlope)
+    }
+
+    func testStartRound_populatesEnemiesForRound1() {
+        let gs = makeGameState(pathLength: 10)
+        gs.startRound()
+        XCTAssertEqual(gs.round, 1)
+        XCTAssertFalse(gs.enemies.isEmpty)
+    }
+
+    /// Regression test: round 1 only has `basic` eligible in the roster, and the
+    /// "debut exclusion" rule in `pickSpawnType` used to remove it from the pool the moment it
+    /// spawned once, leaving zero eligible types and crashing on an empty random range.
+    func testPickSpawnType_round1_neverEmptiesPoolAfterFirstPick() {
+        for seed: UInt64 in 1...10 {
+            let gs = makeGameState(rng: SeededRandom(seed: seed))
+            gs.round = 1
+            var used: [EnemyType] = []
+            for _ in 0..<20 {
+                let type = gs.pickSpawnType(excludingIntro: used)
+                if gs.tier(for: 1).roster.first(where: { $0.type == type })?.minRound == 1 {
+                    used.append(type)
+                }
+            }
+            // Reaching here without a crash is the assertion; also sanity-check it's basic.
+            XCTAssertTrue(used.allSatisfy { $0 == .basic })
+        }
     }
 
     func testUseRepairItem_restoresOneHP() {

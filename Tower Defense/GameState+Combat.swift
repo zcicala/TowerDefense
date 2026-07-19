@@ -588,8 +588,9 @@ extension GameState {
                         for splashTarget in enemies where splashTarget.active {
                             guard let splashCoord = enemyNearestCoord(splashTarget) else { continue }
                             if splashCoord.distance(to: targetCoord) <= projectile.splashRadius {
-                                let hit = dealDamage(projectile.damage, to: splashTarget, tower: sourceTower, events: &events)
-                                if hit {
+                                let wasImmuneToTower = sourceTower.map { splashTarget.immuneTowerTypes.contains($0.type) } ?? false
+                                _ = dealDamage(projectile.damage, to: splashTarget, tower: sourceTower, events: &events)
+                                if !wasImmuneToTower {
                                     splashTarget.burning = true
                                     splashTarget.burnDPS = projectile.impactBurnDPS
                                     splashTarget.burnTimer = max(splashTarget.burnTimer, projectile.impactBurnDuration)

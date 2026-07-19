@@ -215,6 +215,32 @@ final class CombatTests: XCTestCase {
         XCTAssertEqual(gs.money, moneyBefore + gs.killReward * 2)
     }
 
+    // MARK: Fireball splash
+
+    func testFireballSplash_nonKillingHit_stillSetsEnemyBurning() {
+        let gs = makeGameState()
+        gs.phase = .combat
+        let survivor = makeActiveEnemy(hp: 1000, atCell: 2, in: gs)
+        let projectile = Projectile(
+            origin: SIMD3<Float>(0, 0, 0),
+            target: SIMD3<Float>(0, 0, 0),
+            totalFlightTime: 0.01,
+            damage: 50,
+            targetEnemyID: survivor.id,
+            burnOnImpact: true,
+            impactBurnDPS: 10,
+            impactBurnDuration: 3,
+            splashRadius: 0
+        )
+        projectile.elapsed = projectile.totalFlightTime
+        gs.projectiles.append(projectile)
+
+        _ = gs.update(deltaTime: 0.001)
+
+        XCTAssertTrue(survivor.active, "splash hit of 50 damage should not kill a 1000 HP enemy")
+        XCTAssertTrue(survivor.burning, "fireball splash should ignite enemies it damages, even when the hit doesn't kill")
+    }
+
     // MARK: applyAreaSlow
 
     func testApplyAreaSlow_slowsEnemiesOnTargetCell() {

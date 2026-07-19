@@ -616,9 +616,9 @@ final class CombatTests: XCTestCase {
     func testUseRepairItem_restoresOneHP() {
         let gs = makeGameState()
         gs.repairItemCount = 1
-        gs.baseTowerHP = 8
+        gs.baseTowerHP = gs.baseTowerMaxHP - 1
         gs.useRepairItem()
-        XCTAssertEqual(gs.baseTowerHP, 9)
+        XCTAssertEqual(gs.baseTowerHP, gs.baseTowerMaxHP)
         XCTAssertEqual(gs.repairItemCount, 0)
     }
 }

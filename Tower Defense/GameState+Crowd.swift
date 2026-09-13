@@ -69,6 +69,10 @@ enum CorridorTuning {
     /// Below this remaining distance to the desired lateral offset, snap directly to it
     /// instead of rate-limiting — kills residual per-frame vibration.
     static let lateralDeadband: Float = 0.005
+    /// Minimum lateral "need" (see scanCandidates) before steering engages at all — a
+    /// marginal, barely-nonzero overlap right at the edge of contact shouldn't commit an
+    /// enemy to a full avoidance decision.
+    static let lateralEngageThreshold: Float = 0.03
     /// Minimum time a freshly chosen avoidance side is locked in before it can be
     /// re-evaluated, so per-frame noise in the cost estimate can't flip it back and forth.
     static let avoidHoldTime: Float = 0.6
@@ -285,10 +289,15 @@ extension GameState {
             } ?? CandidateScan()
             // Engage steering either when a higher-priority enemy is genuinely slowing my
             // forward progress, or when I'm currently overlapping *anyone's* lane laterally
-            // (regardless of priority) — the latter is what lets a leader with an open road
-            // ahead still nudge aside a little for a follower trying to squeeze past, without
-            // ever slowing its own forward progress for them (see scanCandidates's doc comment).
-            let blocked = scan0.free < desiredStep - 0.0001 || scan0.needLeft > 0 || scan0.needRight > 0
+            // by more than a sliver (regardless of priority) — the latter is what lets a
+            // leader with an open road ahead still nudge aside a little for a follower trying
+            // to squeeze past, without ever slowing its own forward progress for them (see
+            // scanCandidates's doc comment). The small threshold, rather than a bare `> 0`,
+            // avoids committing to a full steering decision over a marginal, barely-nonzero
+            // overlap right at the edge of contact.
+            let blocked = scan0.free < desiredStep - 0.0001
+                || scan0.needLeft > CorridorTuning.lateralEngageThreshold
+                || scan0.needRight > CorridorTuning.lateralEngageThreshold
 
             updateLateralSteering(enemy, maxOffset: maxLateralOffset(for: enemy.enemyType), scan: scan0, blocked: blocked, dt: dt)
 
@@ -402,6 +411,15 @@ extension GameState {
                 let clearance = along - (r * r - side * side).squareRoot()
                 scan.free = min(scan.free, max(0, clearance))
             }
+
+            // Lateral courtesy uses a much tighter range than the forward-braking lookahead
+            // above: `side` starts at exactly 0 for two enemies both still centered on the
+            // lane, so needL = side + r = r is *always* > 0 for any same-lane pair, however
+            // far apart. Without this separate gate, virtually every enemy sharing a lane
+            // with any other enemy within the whole ~1.6-unit braking lookahead (nearly two
+            // tiles) would perpetually see a nonzero "need" and sit off-center — a constant,
+            // pervasive wiggle across the whole queue instead of only near actual contact.
+            guard abs(along) <= r + CorridorTuning.followDistance else { return }
             let needL = side + r
             if needL > scan.needLeft { scan.needLeft = needL; scan.tightLeftSeq = other.seq }
             let needR = r - side

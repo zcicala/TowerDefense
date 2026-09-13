@@ -1422,6 +1422,25 @@ final class CorridorTests: XCTestCase {
         XCTAssertLessThanOrEqual(sideChanges, 2, "avoidance side should not flip back and forth while passing")
     }
 
+    /// Regression: lateral courtesy used to inherit the same generous lookahead range used for
+    /// smooth forward braking (~1.6 world units, nearly two tiles), and `side = 0` for two
+    /// still-centered enemies always yields a nonzero "need" — so virtually any two enemies
+    /// loosely sharing a lane sat visibly off-center. One hex cell apart (~0.91 units) is well
+    /// inside that old range but well outside the actual contact-courtesy range, and moving at
+    /// the same speed keeps the gap constant, so this stays a pure "sharing a lane, no real
+    /// need to avoid" case for the whole run.
+    func testLateralSteering_doesNotEngageForLooselyQueuedEnemies() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 5, in: gs)
+        let b = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 4, in: gs)
+
+        for _ in 0..<40 { _ = gs.update(deltaTime: 0.05) } // 2s; same speed, gap never closes
+
+        XCTAssertEqual(a.lateralOffset, 0, accuracy: 0.001, "loosely queued same-lane enemies shouldn't wiggle")
+        XCTAssertEqual(b.lateralOffset, 0, accuracy: 0.001, "loosely queued same-lane enemies shouldn't wiggle")
+    }
+
     // MARK: Stage 5 — separation relaxation (overlaps the corridor solver above didn't create)
 
     /// Two enemies placed at an exact head-on overlap should be pushed apart purely laterally

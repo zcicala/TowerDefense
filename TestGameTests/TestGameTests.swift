@@ -1230,4 +1230,133 @@ final class CorridorTests: XCTestCase {
         let enemyAfter = makeActiveEnemy(atCell: 3, progress: 0.0, in: gs)
         XCTAssertEqual(gs.distanceToEnd(enemyBefore), gs.distanceToEnd(enemyAfter), accuracy: 0.002)
     }
+
+    // MARK: Stage 3 — solver skeleton (forward probe + eased deceleration, no lateral steering)
+
+    /// A faster tank stuck behind a slower one must queue up, never overlapping its body.
+    func testFollower_neverOverlapsLeader() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.5, atCell: 5, in: gs)
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+        let minDist = 2 * gs.enemyVisualRadius(for: .tank)
+
+        for _ in 0..<200 {
+            _ = gs.update(deltaTime: 0.05)
+            guard let lp = gs.enemyWorldPosition(leader), let fp = gs.enemyWorldPosition(follower) else { continue }
+            XCTAssertGreaterThanOrEqual(simd_distance(lp, fp), minDist - 0.01, "follower must never overlap the leader")
+        }
+    }
+
+    /// Being followed by a faster enemy must have zero effect on the leader's own progress.
+    func testFollower_neverPushesLeaderForward() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.5, atCell: 5, in: gs)
+        _ = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+        let chord = gs.hexChordDistance
+        let before = gs.distanceToEnd(leader)
+
+        var elapsed: Float = 0
+        while elapsed < 10 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+        }
+        let actualDelta = before - gs.distanceToEnd(leader)
+        let expectedDelta = leader.speed / chord * elapsed
+        XCTAssertEqual(actualDelta, expectedDelta, accuracy: expectedDelta * 0.02 + 0.01)
+    }
+
+    /// A follower behind a frozen leader must decelerate to a stop at contact distance, then
+    /// resume advancing once the leader thaws.
+    func testBlockedByFrozenLeader_decelerates_thenResumes() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 100
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 3, in: gs)
+        let r = gs.enemyVisualRadius(for: .tank)
+
+        for _ in 0..<60 { _ = gs.update(deltaTime: 0.05) } // 3s — plenty of time to catch up and settle
+        let distBlocked = simd_distance(gs.enemyWorldPosition(leader)!, gs.enemyWorldPosition(follower)!)
+        XCTAssertEqual(distBlocked, 2 * r, accuracy: 0.05, "follower should be sitting at contact with the frozen leader")
+
+        let beforeThaw = gs.distanceToEnd(follower)
+        leader.frozen = false
+        leader.frozenTimer = 0
+        for _ in 0..<4 { _ = gs.update(deltaTime: 0.05) } // 0.2s
+        XCTAssertLessThan(gs.distanceToEnd(follower), beforeThaw, "follower should resume shortly after the leader thaws")
+    }
+
+    /// speed == 0 is a test-only "immobile prop" convention (no real ability sets `speed`,
+    /// which is a `let`, at runtime) — the solver must never touch such an enemy, even with
+    /// a fast mover right behind it. This is the guard behind every existing prop-based test
+    /// that runs the real update loop with a stationary enemy.
+    func testSpeedZeroEnemy_isCompletelyImmovable() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let prop = makeActiveEnemy(type: .basic, hp: 5000, speed: 0, atCell: 3, in: gs)
+        let cellBefore = prop.currentCell
+        let progressBefore = prop.progress
+        let offsetBefore = prop.lateralOffset
+        _ = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 0, in: gs)
+
+        for _ in 0..<100 { _ = gs.update(deltaTime: 0.05) }
+
+        XCTAssertTrue(prop.currentCell === cellBefore)
+        XCTAssertEqual(prop.progress, progressBefore)
+        XCTAssertEqual(prop.lateralOffset, offsetBefore)
+    }
+
+    /// A single very large deltaTime (tests elsewhere use 1.0 and 5.0) must not let a fast
+    /// follower tunnel through a frozen leader — the free-distance clamp, not substepping
+    /// granularity, is what prevents this.
+    func testLargeDeltaTime_noTunneling() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 0, in: gs)
+
+        _ = gs.update(deltaTime: 5.0)
+
+        let r = gs.enemyVisualRadius(for: .tank)
+        let dist = simd_distance(gs.enemyWorldPosition(leader)!, gs.enemyWorldPosition(follower)!)
+        XCTAssertGreaterThanOrEqual(dist, 2 * r - 0.01, "a single large-deltaTime update must not tunnel the follower through the leader")
+        XCTAssertGreaterThan(gs.distanceToEnd(follower), gs.distanceToEnd(leader), "follower must still be behind, not past, the leader")
+    }
+
+    /// Regression: slow/freeze timers used to tick only inside the old moveEnemy, which
+    /// hoppers never called, so a frozen hopper never thawed.
+    func testFrozenHopperThaws() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 3, in: gs)
+        hopper.frozen = true
+        hopper.frozenTimer = 0.15
+
+        _ = gs.update(deltaTime: 0.1)
+        XCTAssertTrue(hopper.frozen, "should still be frozen after 0.1s of a 0.15s freeze")
+        _ = gs.update(deltaTime: 0.1)
+        XCTAssertFalse(hopper.frozen, "hopper freeze timers must tick even though hoppers never call moveEnemy")
+    }
+
+    /// Flying enemies (wisp, hive) pass straight through ground traffic — never blocked.
+    func testFlyingUnitsIgnoreCollision() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        tank.frozen = true
+        tank.frozenTimer = 999
+        let wisp = makeActiveEnemy(type: .wisp, hp: 5000, speed: 1.0, atCell: 4, progress: 0.48, in: gs)
+        let chord = gs.hexChordDistance
+        let expectedProgress = wisp.progress + wisp.speed * 0.05 / chord
+
+        _ = gs.update(deltaTime: 0.05)
+
+        XCTAssertEqual(wisp.progress, expectedProgress, accuracy: 0.0005, "flying enemies must not be blocked by ground traffic")
+        XCTAssertEqual(wisp.lateralOffset, 0)
+    }
 }

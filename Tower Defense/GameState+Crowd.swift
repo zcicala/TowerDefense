@@ -21,9 +21,263 @@ enum CorridorTuning {
     /// RealityKit tap-collision sphere ÷ the physical body radius (`EnemyType.bodyRadiusScale`).
     /// Slightly larger than the drawn/physical body so enemies stay easy to tap.
     static let tapColliderSlack: Float = 1.25
+
+    /// Skin distance kept between two bodies on top of the sum of their radii.
+    static let separationGap: Float = 0.02
+    /// Eased-deceleration horizon: at equilibrium a follower settles at roughly
+    /// `followDistance * leaderSpeed / followerDesiredSpeed` behind its leader, rather than
+    /// gluing to its surface (which pops apart/together every frame under float noise).
+    static let followDistance: Float = 0.18
+    /// Largest body radius in the game (the hive) — used to size the forward-probe range.
+    static let maxCorridorRadius: Float = 0.25
+    /// Extra slack added on top of the geometric minimum forward-probe range.
+    static let probeRangePadding: Float = 0.05
+    /// Hard cap on how many cells the forward probe walks looking for a blocker, however
+    /// large a single frame's desired step is (bounds the cost of a stalled substep count).
+    static let maxLookaheadCells = 16
+    /// Target world-space advance per substep; frames wanting to move further are split into
+    /// multiple substeps so a blocked/steering enemy gets more than one decision per frame.
+    /// This is purely a quality knob — see `solveCrowd`'s doc comment for why substepping
+    /// is not what prevents tunneling.
+    static let substepDistance: Float = 0.15
+    /// Ceiling on substeps per frame, bounding worst-case cost at very large `deltaTime`.
+    static let maxSubsteps = 8
 }
 
 extension GameState {
+
+    // MARK: - Corridor solver: status timers, ordering, and front-to-back collision
+
+    /// Ticks the slow/freeze status timers for one enemy. Extracted from the old `moveEnemy`
+    /// (which only ran for enemies taking the "normal walk" branch) and now called
+    /// unconditionally for every active enemy, so a frozen hopper thaws and a Gravity-Well
+    /// -pulled enemy's slow expires — both silently never happened before.
+    func tickStatusTimers(_ enemy: Enemy, deltaTime: Float) {
+        if enemy.slowed {
+            enemy.slowTimer -= deltaTime
+            if enemy.slowTimer <= 0 {
+                enemy.slowed = false
+                enemy.slowTimer = 0
+                enemy.slowFactor = 0.5
+            }
+        }
+        if enemy.frozen {
+            enemy.frozenTimer -= deltaTime
+            if enemy.frozenTimer <= 0 {
+                enemy.frozen = false
+                enemy.frozenTimer = 0
+            }
+        }
+    }
+
+    /// The speed `solveCrowd` should move this enemy at before any corridor blocking is
+    /// applied — same formula the old `moveEnemy` used.
+    func effectiveSpeed(of enemy: Enemy) -> Float {
+        enemy.frozen ? 0 : (enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed)
+    }
+
+    /// Flying enemies pass through ground traffic entirely: never blocked, never a blocker.
+    private func isFlyingType(_ type: EnemyType) -> Bool {
+        type == .wisp || type == .hive
+    }
+
+    /// Advances every surviving enemy in `movers` for this frame. Enemies pulled by the
+    /// Gravity Well this frame are skipped (it already moved them); hoppers keep their own
+    /// jump/teleport logic (`updateHopper`) untouched; enemies with `speed <= 0` (test props,
+    /// or an ability that should hold them in place) are never moved by the solver at all.
+    /// Everyone else ("walkers", including flying enemies, which still follow the path — they
+    /// just aren't blocked by or blockers of anyone) is advanced front-to-back: whoever is
+    /// further along the path (smaller `distanceToEnd`) is treated as immovable by everyone
+    /// behind them, so nothing is ever pushed forward and the yield relation is a strict total
+    /// order — deadlock-free by construction, with no iteration needed to converge.
+    ///
+    /// Substepping is for *quality*, not correctness: within a substep, `advanceWalkers`
+    /// clamps each enemy's step to the actual free distance ahead of it, so no amount of
+    /// splitting or not splitting `deltaTime` can let two enemies overlap. What substepping
+    /// buys is a steering enemy getting more than one decision over a long or fast frame,
+    /// and it incidentally fixes a latent bug where a very large `deltaTime` could advance
+    /// `progress` several cells past 1.0 in one step and evaluate the position spline far
+    /// outside its valid range.
+    func solveCrowd(deltaTime: Float, movers: [Enemy], pulledByWell: Set<UUID>) {
+        var walkers: [Enemy] = []
+        walkers.reserveCapacity(movers.count)
+        for enemy in movers {
+            if pulledByWell.contains(enemy.id) { continue }
+            if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
+                updateHopper(enemy, deltaTime: deltaTime)
+                continue
+            }
+            if enemy.speed <= 0 { continue }
+            walkers.append(enemy)
+        }
+        guard !walkers.isEmpty else { return }
+
+        // Front-to-back: smaller distanceToEnd (further along) always sorts first. Tiebreak
+        // on `seq` — needed because e.g. the Gravity Well can pin several enemies at exactly
+        // the same (cell, progress).
+        let keyed = walkers.map { ($0, distanceToEnd($0)) }
+            .sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.seq < $1.0.seq }
+        walkers = keyed.map { $0.0 }
+
+        let vmax = walkers.map { effectiveSpeed(of: $0) }.max() ?? 0
+        let steps: Int
+        if vmax > 0 {
+            steps = min(CorridorTuning.maxSubsteps, max(1, Int((vmax * deltaTime / CorridorTuning.substepDistance).rounded(.up))))
+        } else {
+            steps = 1
+        }
+        let h = deltaTime / Float(steps)
+        for _ in 0..<steps {
+            advanceWalkers(walkers, dt: h)
+        }
+    }
+
+    /// One substep: bucket walkers by their current cell, then advance each — in front-to-back
+    /// order, so a follower always sees its leader's already-updated position this same
+    /// substep (Gauss-Seidel), avoiding the one-substep-of-lag that would otherwise show up
+    /// as a follower bumping into where its leader used to be.
+    private func advanceWalkers(_ walkers: [Enemy], dt: Float) {
+        var byCell: [HexCoord: [Enemy]] = [:]
+        for enemy in walkers {
+            guard let coord = enemy.currentCell?.coord else { continue }
+            byCell[coord, default: []].append(enemy)
+        }
+
+        for enemy in walkers {
+            guard let cell = enemy.currentCell else { continue }
+            let speed = effectiveSpeed(of: enemy)
+            let desiredStep = speed * dt
+            guard desiredStep > 0 else { continue }
+
+            let frame = pathFrame(cell: cell, progress: enemy.progress)
+            let free: Float
+            if isFlyingType(enemy.enemyType) {
+                free = .greatestFiniteMagnitude
+            } else {
+                free = forwardFreeDistance(for: enemy, cell: cell, frame: frame, desiredStep: desiredStep, byCell: byCell)
+            }
+
+            // Eased slowdown rather than a hard `min(desired, free)`: at equilibrium this
+            // settles into a stable standing gap instead of the follower's surface gluing to
+            // the leader's and popping apart/together each frame under float noise. The
+            // `min(..., free)` term is the actual (hard) safety against ever overlapping.
+            let eased = free.isFinite ? desiredStep * min(1, free / CorridorTuning.followDistance) : desiredStep
+            let step = max(0, min(desiredStep, eased, free))
+
+            if step > 0 {
+                let visualRadius = enemyVisualRadius(for: enemy.enemyType)
+                enemy.rollDeltaAngle = step / visualRadius
+                enemy.rollAxis = SIMD3(frame.tangent.y, 0, -frame.tangent.x)
+            } else {
+                enemy.rollDeltaAngle = 0
+            }
+
+            advance(enemy, from: cell, by: step)
+        }
+    }
+
+    /// Distance `enemy` can advance along its own path tangent this substep before it would
+    /// overlap a higher-priority (further-along) walker. `.greatestFiniteMagnitude` when
+    /// nothing is in the way within the probe range.
+    ///
+    /// Works in the enemy's own tangent/lateral frame, so a blocker on a different cell (with
+    /// a different tangent, e.g. just past a corner) needs no coordinate conversion — only
+    /// its world position matters. "Ahead" is decided by path order (`distanceToEnd`), never
+    /// by geometry alone: that's what makes the yield relation acyclic. The `along > 0` check
+    /// below is only a geometric sanity filter — at a sharp corner, someone who is ahead in
+    /// path order can briefly be geometrically behind — not a priority test.
+    private func forwardFreeDistance(
+        for enemy: Enemy,
+        cell: HexCell,
+        frame: (tangent: SIMD2<Float>, lateral: SIMD2<Float>, speedScale: Float),
+        desiredStep: Float,
+        byCell: [HexCoord: [Enemy]]
+    ) -> Float {
+        guard let ePos3 = enemyWorldPosition(enemy) else { return .greatestFiniteMagnitude }
+        let ePos = SIMD2<Float>(ePos3.x, ePos3.z)
+        let eRadius = enemyVisualRadius(for: enemy.enemyType)
+        let myDistanceToEnd = distanceToEnd(enemy)
+
+        // The broadphase walk must always cover at least one full hex chord (~0.9093):
+        // a blocker exactly one cell ahead can already be at near-zero *physical* distance
+        // (self near progress 1 in its cell, blocker near progress 0 in the next one), even
+        // though the topological "accumulated chord" bookkeeping below says they're a whole
+        // segment apart. Flooring on `desiredStep` alone broke this for small/slow steps —
+        // a blocker one hop away is skipped by the `acc <= probeRange` check entirely, so a
+        // fast-approaching enemy that happens to have a small step this frame (or substep)
+        // never sees it coming and can end the frame already overlapping it.
+        let probeRange = max(desiredStep, hexChordDistance) + 2 * CorridorTuning.maxCorridorRadius
+            + CorridorTuning.followDistance + CorridorTuning.probeRangePadding
+
+        var free: Float = .greatestFiniteMagnitude
+        var walker: HexCell? = cell
+        var acc: Float = 0
+        var hops = 0
+        while let visitCell = walker, acc <= probeRange, hops <= CorridorTuning.maxLookaheadCells {
+            if let candidates = byCell[visitCell.coord] {
+                for other in candidates {
+                    guard other !== enemy, !isFlyingType(other.enemyType) else { continue }
+                    guard distanceToEnd(other) < myDistanceToEnd else { continue }
+                    guard let oPos3 = enemyWorldPosition(other) else { continue }
+                    let oPos = SIMD2<Float>(oPos3.x, oPos3.z)
+                    let d = oPos - ePos
+                    let along = simd_dot(d, frame.tangent)
+                    guard along > 0, along <= probeRange else { continue }
+                    let side = simd_dot(d, frame.lateral)
+                    let r = eRadius + enemyVisualRadius(for: other.enemyType) + CorridorTuning.separationGap
+                    guard abs(side) < r else { continue }
+                    let clearance = along - (r * r - side * side).squareRoot()
+                    free = min(free, max(0, clearance))
+                }
+            }
+            guard let next = visitCell.next else { break }
+            acc += simd_distance(visitCell.coord.worldPosition(spacing: spacing), next.coord.worldPosition(spacing: spacing))
+            walker = next
+            hops += 1
+        }
+        return free
+    }
+
+    /// Advances `enemy`'s `(currentCell, progress)` by `step` world units along the path,
+    /// crossing cell boundaries in a loop (rather than the single `if` the old `moveEnemy`
+    /// used) so a large step can cross several cells in one call without leaving `progress`
+    /// far outside `[0, 1]`. Writes `enemy`'s stored properties once at the end rather than
+    /// per cell crossed, since `Enemy` is `@Observable` and every write has observation cost.
+    private func advance(_ enemy: Enemy, from startCell: HexCell, by step: Float) {
+        guard step > 0 else { return }
+        var cell = startCell
+        var progress = enemy.progress
+        var remaining = step
+        while remaining > 0 {
+            guard let nextCell = cell.next else {
+                if cell !== enemy.currentCell { enemy.currentCell = cell }
+                enemy.progress = progress
+                enemy.active = false
+                enemy.reachedEnd = true
+                return
+            }
+            let segmentLength = simd_distance(cell.coord.worldPosition(spacing: spacing), nextCell.coord.worldPosition(spacing: spacing))
+            let remainingInSegment = max(0, (1 - progress) * segmentLength)
+            if remaining < remainingInSegment {
+                progress += remaining / segmentLength
+                remaining = 0
+            } else {
+                remaining -= remainingInSegment
+                cell = nextCell
+                progress = 0
+            }
+        }
+        if cell !== enemy.currentCell { enemy.currentCell = cell }
+        enemy.progress = progress
+    }
+}
+
+extension GameState {
+
+    /// Center-to-center distance between any two adjacent hex cells (`spacing * sqrt(3)`,
+    /// ≈0.9093 at the game's default `spacing`). Every neighbor pair is exactly this far
+    /// apart regardless of direction, which several corridor-solver distance estimates rely on.
+    var hexChordDistance: Float { spacing * Float(3.0).squareRoot() }
 
     // MARK: - Path frame (tangent/lateral axis at a point on the enemy spline)
 
@@ -67,7 +321,7 @@ extension GameState {
                 let d = p1 - prev.coord.worldPosition(spacing: spacing)
                 if simd_length(d) > 1e-4 { tangent = simd_normalize(d) }
             }
-            return (tangent, SIMD2(-tangent.y, tangent.x), spacing * Float(3.0).squareRoot())
+            return (tangent, SIMD2(-tangent.y, tangent.x), hexChordDistance)
         }
 
         let dx = catmullRomTangent(cp.p0.x, cp.p1.x, cp.p2.x, cp.p3.x, t)

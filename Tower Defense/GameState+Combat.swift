@@ -76,7 +76,12 @@ extension GameState {
         // Poison Cloud: infects (or refreshes) any enemy currently standing in an active cloud.
         updatePoisonCloud(deltaTime: deltaTime)
 
-        // Move enemies and apply burn/poison DOT
+        // Phase A: burn/poison DOT, status timers, and hive drops for every active enemy;
+        // collect survivors for the corridor solver. Building `movers` here (rather than
+        // re-filtering `enemies` afterward) preserves the existing behavior that a hopper
+        // dropped by a hive this frame doesn't move until the next one.
+        var movers: [Enemy] = []
+        movers.reserveCapacity(enemies.count)
         for enemy in enemies where enemy.active {
             // Burn damage tick
             if enemy.burning {
@@ -104,13 +109,12 @@ extension GameState {
                 }
             }
 
-            if pulledByWell.contains(enemy.id) {
-                // Movement handled by the Gravity Well this frame.
-            } else if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
-                updateHopper(enemy, deltaTime: deltaTime)
-            } else {
-                moveEnemy(enemy, deltaTime: deltaTime)
-            }
+            // Slow/freeze timers used to tick only inside moveEnemy, so a frozen hopper never
+            // thawed and a Gravity-Well-pulled enemy's slow never expired. Ticking them here,
+            // unconditionally, for every surviving active enemy fixes both.
+            tickStatusTimers(enemy, deltaTime: deltaTime)
+            movers.append(enemy)
+
             // Hive periodically drops a hopper while alive
             if enemy.enemyType == .hive {
                 enemy.hiveSpawnTimer -= deltaTime
@@ -131,7 +135,14 @@ extension GameState {
                     events.spawnedEnemies.append(hopper)
                 }
             }
+        }
 
+        // Phase C: advance every surviving enemy through the corridor solver (ground walkers
+        // collide front-to-back; hoppers/well-pulled/immobile enemies keep their own paths).
+        solveCrowd(deltaTime: deltaTime, movers: movers, pulledByWell: pulledByWell)
+
+        // Phase D: report results.
+        for enemy in movers {
             if enemy.reachedEnd {
                 print("[BaseDamage] \(enemy.enemyType) dealt \(enemy.baseDamage) damage to base tower (HP: \(baseTowerHP) → \(max(0, baseTowerHP - enemy.baseDamage)))")
                 damageBaseTower(damage: enemy.baseDamage, events: &events)
@@ -835,65 +846,6 @@ extension GameState {
 
         if baseTowerHP <= 0 {
             events.gameOver = true
-        }
-    }
-
-    func moveEnemy(_ enemy: Enemy, deltaTime: Float) {
-        guard let current = enemy.currentCell else { return }
-
-        guard let nextCell = current.next else {
-            // Reached the end — enemy hits the base tower
-            enemy.active = false
-            enemy.reachedEnd = true
-            return
-        }
-
-        // Tick down slow timer
-        if enemy.slowed {
-            enemy.slowTimer -= deltaTime
-            if enemy.slowTimer <= 0 {
-                enemy.slowed = false
-                enemy.slowTimer = 0
-                enemy.slowFactor = 0.5
-            }
-        }
-
-        // Tick down freeze timer — frozen enemies don't move at all, overriding any slow
-        if enemy.frozen {
-            enemy.frozenTimer -= deltaTime
-            if enemy.frozenTimer <= 0 {
-                enemy.frozen = false
-                enemy.frozenTimer = 0
-            }
-        }
-
-        let currentPos = current.coord.worldPosition(spacing: spacing)
-        let nextPos = nextCell.coord.worldPosition(spacing: spacing)
-        let distance = simd_distance(currentPos, nextPos)
-
-        let effectiveSpeed = enemy.frozen ? 0 : (enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed)
-        let distanceMoved = effectiveSpeed * deltaTime
-        enemy.progress += distanceMoved / distance
-
-        // Rolling: angular velocity = linear speed / visual radius
-        let visualRadius = enemyVisualRadius(for: enemy.enemyType)
-        enemy.rollDeltaAngle = distanceMoved / visualRadius
-        // Roll axis is perpendicular to movement direction in XZ plane
-        let dx = nextPos.x - currentPos.x
-        let dz = nextPos.y - currentPos.y   // worldPosition .y is world Z
-        let dirLen = sqrt(dx * dx + dz * dz)
-        if dirLen > 0.001 {
-            enemy.rollAxis = SIMD3(dz / dirLen, 0, -dx / dirLen)
-        }
-
-        if enemy.progress >= 1.0 {
-            enemy.progress -= 1.0
-            enemy.currentCell = nextCell
-            if let nextNext = nextCell.next {
-                let nextNextPos = nextNext.coord.worldPosition(spacing: spacing)
-                let nextDistance = simd_distance(nextPos, nextNextPos)
-                enemy.progress *= distance / nextDistance
-            }
         }
     }
 

@@ -315,6 +315,34 @@ enum EnemyType: CaseIterable {
         case .warden:       return "Warden"
         }
     }
+
+    /// Body half-width as a multiple of `GameState.enemyRadius` (0.1). SINGLE SOURCE OF
+    /// TRUTH for gameplay physics (corridor collision, roll rate), the rendered mesh size,
+    /// and the RealityKit tap-collision sphere — previously three separate, disagreeing
+    /// tables. For a box mesh, this is half its width (the box's horizontal extent is what
+    /// the corridor solver treats as the enemy's footprint; a taller/shallower box like the
+    /// boss is an intentional visual exception the collider does not need to track).
+    var bodyRadiusScale: Float {
+        switch self {
+        case .basic:         return 1.0
+        case .hopper:        return 1.1
+        case .tank:          return 2.0
+        case .mirroid:       return 2.0
+        case .wisp:          return 0.9
+        case .fastTank:      return 2.0
+        case .shield:        return 1.5
+        case .superHopper:   return 1.5
+        case .boss:          return 1.5   // half of box width (3r); box is 4r tall
+        case .exploder:      return 1.1   // half of box width (2.2r)
+        case .superExploder: return 1.5   // half of box width (3r)
+        case .hive:          return 2.5
+        case .plated:        return 2.0
+        case .insulated:     return 1.7
+        case .cinder:        return 1.6
+        case .nullifier:     return 2.2
+        case .warden:        return 1.9
+        }
+    }
 }
 
 // MARK: - Wave Themes

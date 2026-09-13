@@ -1471,26 +1471,10 @@ class SceneRenderer {
         } else {
             entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
         }
-        let collisionRadius: Float
-        switch enemy.enemyType {
-        case .basic:         collisionRadius = radius
-        case .hopper:        collisionRadius = radius * 1.1
-        case .tank:          collisionRadius = radius * 2
-        case .fastTank:      collisionRadius = radius * 2
-        case .shield:        collisionRadius = radius * 1.5
-        case .superHopper:   collisionRadius = radius * 1.5
-        case .boss:          collisionRadius = radius * 2
-        case .exploder:      collisionRadius = radius * 1.5
-        case .superExploder: collisionRadius = radius * 2
-        case .hive:          collisionRadius = radius * 2.5
-        case .mirroid:       collisionRadius = radius * 2
-        case .wisp:          collisionRadius = radius * 0.9
-        case .plated:        collisionRadius = radius * 2.0
-        case .insulated:     collisionRadius = radius * 1.7
-        case .cinder:        collisionRadius = radius * 1.6
-        case .nullifier:     collisionRadius = radius * 2.2
-        case .warden:        collisionRadius = radius * 1.9
-        }
+        // Tap-collision sphere: derived from the same EnemyType.bodyRadiusScale used for
+        // gameplay physics (was previously a separate, disagreeing table — see
+        // GameState+Crowd.swift). Slightly larger than the physical body for easy tapping.
+        let collisionRadius = radius * enemy.enemyType.bodyRadiusScale * CorridorTuning.tapColliderSlack
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: collisionRadius)]))
         entity.components.set(InputTargetComponent())
 

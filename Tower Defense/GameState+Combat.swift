@@ -898,26 +898,10 @@ extension GameState {
     }
 
     /// Returns the visual sphere/box radius used when rendering this enemy type.
+    /// Derived from `EnemyType.bodyRadiusScale`, the single source of truth shared with
+    /// the renderer's mesh sizing and tap-collision sphere.
     func enemyVisualRadius(for type: EnemyType) -> Float {
-        switch type {
-        case .basic:         return enemyRadius
-        case .hopper:        return enemyRadius * 1.1
-        case .tank:          return enemyRadius * 2.0
-        case .mirroid:       return enemyRadius * 2.0
-        case .wisp:          return enemyRadius * 0.9
-        case .fastTank:      return enemyRadius * 2.0
-        case .shield:        return enemyRadius * 1.5
-        case .superHopper:   return enemyRadius * 1.5
-        case .boss:          return enemyRadius * 1.5   // half of box width (3r)
-        case .exploder:      return enemyRadius * 1.1   // half of box width (2.2r)
-        case .superExploder: return enemyRadius * 1.5   // half of box width (3r)
-        case .hive:          return enemyRadius * 2.5
-        case .plated:        return enemyRadius * 2.0
-        case .insulated:     return enemyRadius * 1.7
-        case .cinder:        return enemyRadius * 1.6
-        case .nullifier:     return enemyRadius * 2.2
-        case .warden:        return enemyRadius * 1.9
-        }
+        enemyRadius * type.bodyRadiusScale
     }
 
     func updateHopper(_ enemy: Enemy, deltaTime: Float) {

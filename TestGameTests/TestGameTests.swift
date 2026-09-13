@@ -1119,3 +1119,28 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertEqual(gs.castleMaxEnergy, 20, accuracy: 0.001, "energy bonus is lost with the crystal")
     }
 }
+
+// MARK: - Corridor Collision Tests
+
+/// Tests for the enemy collision / intra-tile spread ("corridor") system.
+/// See /Users/zac/.claude/plans/okay-i-want-to-hidden-cocoa.md for the design.
+final class CorridorTests: XCTestCase {
+
+    // MARK: Stage 0 — radius unification
+
+    /// `enemyVisualRadius(for:)` (gameplay physics) must equal `enemyRadius * bodyRadiusScale`
+    /// for every enemy type. This is the single source of truth that the renderer's mesh
+    /// sizing and tap-collision sphere both derive from — this test locks the three tables
+    /// together so a future radius tweak can't silently desync them again.
+    func testBodyRadiusScale_isSingleSourceOfTruthForVisualRadius() {
+        let gs = makeGameState(pathLength: 3)
+        for type in EnemyType.allCases {
+            XCTAssertEqual(
+                gs.enemyVisualRadius(for: type),
+                gs.enemyRadius * type.bodyRadiusScale,
+                accuracy: 0.0001,
+                "\(type) visual radius must derive from bodyRadiusScale"
+            )
+        }
+    }
+}

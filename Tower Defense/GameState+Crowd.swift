@@ -42,6 +42,43 @@ enum CorridorTuning {
     static let substepDistance: Float = 0.15
     /// Ceiling on substeps per frame, bounding worst-case cost at very large `deltaTime`.
     static let maxSubsteps = 8
+
+    // MARK: Lateral steering (Stage 4)
+
+    /// Half the physical width of the "gate" between two adjacent path tiles (`hexRadius / 2`)
+    /// — the largest symmetric lateral offset that keeps an enemy's center within the union of
+    /// path-tile lanes on a straight run. Verified by sampling the actual Catmull-Rom curve
+    /// (see the plan doc): a tight double-turn pinches this down to ~0.164, so an enemy can
+    /// briefly overrun its lane by a few hundredths of a unit there — invisible in practice,
+    /// and the path generator biases hard against curling that tightly in the first place.
+    static let corridorHalfWidth: Float = 0.25
+    /// `maxLateralOffset = corridorHalfWidth − maxOffsetRadiusFactor * radius`. Half the
+    /// radius, not the full radius: subtracting the full radius would make a basic vs. tank
+    /// pass impossible and give the hive a negative budget.
+    static let maxOffsetRadiusFactor: Float = 0.5
+    /// Floor on `maxLateralOffset` so even the largest enemies keep some steering budget.
+    static let minMaxOffset: Float = 0.06
+    /// Lateral steering rate as a fraction of the enemy's own current forward speed.
+    static let lateralSpeedFactor: Float = 0.8
+    /// Absolute cap on lateral speed (world units/sec), independent of forward speed.
+    static let lateralSpeedMax: Float = 1.2
+    /// Recentring (drifting back to `lateralOffset = 0` once clear) uses this fraction of the
+    /// normal lateral rate — deliberately lazier than avoidance, so an enemy doesn't snap back
+    /// to center the instant a gap opens.
+    static let recentreSpeedFactor: Float = 0.5
+    /// Below this remaining distance to the desired lateral offset, snap directly to it
+    /// instead of rate-limiting — kills residual per-frame vibration.
+    static let lateralDeadband: Float = 0.005
+    /// Minimum time a freshly chosen avoidance side is locked in before it can be
+    /// re-evaluated, so per-frame noise in the cost estimate can't flip it back and forth.
+    static let avoidHoldTime: Float = 0.6
+    /// Once the hold expires, the other side must be better by at least this much (not
+    /// merely better) to justify switching — a second, independent anti-oscillation guard.
+    static let sideSwitchMargin: Float = 0.06
+    /// Seconds an enemy must be continuously unblocked before its avoidance side resets to
+    /// center — long enough that weaving past a multi-enemy queue doesn't trigger a recenter
+    /// attempt in the brief gaps between blockers.
+    static let recentreDelay: Float = 0.35
 }
 
 extension GameState {
@@ -150,12 +187,43 @@ extension GameState {
             guard desiredStep > 0 else { continue }
 
             let frame = pathFrame(cell: cell, progress: enemy.progress)
-            let free: Float
+
             if isFlyingType(enemy.enemyType) {
-                free = .greatestFiniteMagnitude
-            } else {
-                free = forwardFreeDistance(for: enemy, cell: cell, frame: frame, desiredStep: desiredStep, byCell: byCell)
+                // Flying enemies never engage the solver at all: never blocked, never a
+                // blocker, lateralOffset stays exactly 0.
+                advance(enemy, from: cell, by: desiredStep)
+                enemy.rollDeltaAngle = desiredStep / enemyVisualRadius(for: enemy.enemyType)
+                enemy.rollAxis = SIMD3(frame.tangent.y, 0, -frame.tangent.x)
+                continue
             }
+
+            let eRadius = enemyVisualRadius(for: enemy.enemyType)
+            let myDistanceToEnd = distanceToEnd(enemy)
+            let probeRange = max(desiredStep, hexChordDistance) + 2 * CorridorTuning.maxCorridorRadius
+                + CorridorTuning.followDistance + CorridorTuning.probeRangePadding
+
+            // Scan once at the current offset to decide whether — and which way — to steer.
+            let ePos0 = enemyWorldPosition(enemy).map { SIMD2($0.x, $0.z) }
+            let scan0 = ePos0.map {
+                scanCandidates(for: enemy, cell: cell, frame: frame, ePos: $0, eRadius: eRadius,
+                                probeRange: probeRange, myDistanceToEnd: myDistanceToEnd, byCell: byCell)
+            } ?? CandidateScan()
+            // Engage steering either when a higher-priority enemy is genuinely slowing my
+            // forward progress, or when I'm currently overlapping *anyone's* lane laterally
+            // (regardless of priority) — the latter is what lets a leader with an open road
+            // ahead still nudge aside a little for a follower trying to squeeze past, without
+            // ever slowing its own forward progress for them (see scanCandidates's doc comment).
+            let blocked = scan0.free < desiredStep - 0.0001 || scan0.needLeft > 0 || scan0.needRight > 0
+
+            updateLateralSteering(enemy, maxOffset: maxLateralOffset(for: enemy.enemyType), scan: scan0, blocked: blocked, dt: dt)
+
+            // Re-scan with the (possibly just-updated) offset before actually advancing —
+            // the offset change may have opened up or closed off the forward path.
+            let ePos1 = enemyWorldPosition(enemy).map { SIMD2($0.x, $0.z) }
+            let free = ePos1.map {
+                scanCandidates(for: enemy, cell: cell, frame: frame, ePos: $0, eRadius: eRadius,
+                                probeRange: probeRange, myDistanceToEnd: myDistanceToEnd, byCell: byCell).free
+            } ?? .greatestFiniteMagnitude
 
             // Eased slowdown rather than a hard `min(desired, free)`: at equilibrium this
             // settles into a stable standing gap instead of the follower's surface gluing to
@@ -165,8 +233,7 @@ extension GameState {
             let step = max(0, min(desiredStep, eased, free))
 
             if step > 0 {
-                let visualRadius = enemyVisualRadius(for: enemy.enemyType)
-                enemy.rollDeltaAngle = step / visualRadius
+                enemy.rollDeltaAngle = step / eRadius
                 enemy.rollAxis = SIMD3(frame.tangent.y, 0, -frame.tangent.x)
             } else {
                 enemy.rollDeltaAngle = 0
@@ -176,66 +243,182 @@ extension GameState {
         }
     }
 
-    /// Distance `enemy` can advance along its own path tangent this substep before it would
-    /// overlap a higher-priority (further-along) walker. `.greatestFiniteMagnitude` when
-    /// nothing is in the way within the probe range.
+    /// The largest `|lateralOffset|` this enemy type is allowed to steer to. Half the radius,
+    /// not the full radius, is subtracted from the corridor half-width — see
+    /// `CorridorTuning.maxOffsetRadiusFactor`'s doc comment for why.
+    func maxLateralOffset(for type: EnemyType) -> Float {
+        max(CorridorTuning.minMaxOffset,
+            CorridorTuning.corridorHalfWidth - CorridorTuning.maxOffsetRadiusFactor * enemyVisualRadius(for: type))
+    }
+
+    /// Result of `scanCandidates`.
+    private struct CandidateScan {
+        /// How far `enemy` can advance along its own tangent before touching a higher-priority
+        /// enemy ahead of it. `.greatestFiniteMagnitude` when nothing is in the way.
+        var free: Float = .greatestFiniteMagnitude
+        /// Largest lateral shift, in either direction, that would clear every enemy currently
+        /// overlapping `enemy`'s lane — see `scanCandidates`'s doc comment for why this side
+        /// is *not* priority-filtered the way `free` is.
+        var needLeft: Float = 0
+        var needRight: Float = 0
+        /// `seq` of whichever candidate is driving each `need*` value — used only to break a
+        /// symmetric tie deterministically (see `updateLateralSteering`).
+        var tightLeftSeq: Int?
+        var tightRightSeq: Int?
+    }
+
+    /// Scans every enemy within `probeRange` of `enemy` — ahead, behind, or beside, along its
+    /// own path — and returns a `CandidateScan`.
     ///
-    /// Works in the enemy's own tangent/lateral frame, so a blocker on a different cell (with
-    /// a different tangent, e.g. just past a corner) needs no coordinate conversion — only
-    /// its world position matters. "Ahead" is decided by path order (`distanceToEnd`), never
-    /// by geometry alone: that's what makes the yield relation acyclic. The `along > 0` check
-    /// below is only a geometric sanity filter — at a sharp corner, someone who is ahead in
-    /// path order can briefly be geometrically behind — not a priority test.
-    private func forwardFreeDistance(
+    /// `free` (the forward-yield clamp Stage 3 introduced) only ever comes from a
+    /// higher-priority enemy actually ahead (`along > 0`): that asymmetry is what guarantees a
+    /// lower-priority follower can never slow down or push a leader.
+    ///
+    /// `needLeft`/`needRight` (lateral clearance) are deliberately symmetric — computed
+    /// against *any* nearby enemy regardless of priority. Two bodies can only fit side by side
+    /// in the corridor if both of them contribute some of the required separation (see the
+    /// plan doc's pass-matrix math: `maxLateralOffset` alone, for either type, is smaller than
+    /// many pairs' required clearance — it only works out when both shift toward opposite
+    /// extremes). A leader with an open road ahead has no *forward* reason to move, but this
+    /// lets it still nudge sideways for a follower trying to get past, without that follower
+    /// ever being able to slow the leader's own advance.
+    ///
+    /// Works entirely in `enemy`'s own tangent/lateral frame, so a blocker on a different cell
+    /// (with a different tangent, e.g. just past a corner) needs no coordinate conversion —
+    /// only its world position matters. Walks both forward (`.next`) and backward (`.previous`)
+    /// from `cell`; `.previous` is lossy at a branch junction (see `HexCell.previous`'s doc
+    /// comment), so in that rare topology a leader simply won't know to make room for a
+    /// follower approaching across the merge — safe, just a missed courtesy, since the
+    /// follower's own hard `free` clamp still guarantees no overlap regardless.
+    private func scanCandidates(
         for enemy: Enemy,
         cell: HexCell,
         frame: (tangent: SIMD2<Float>, lateral: SIMD2<Float>, speedScale: Float),
-        desiredStep: Float,
+        ePos: SIMD2<Float>,
+        eRadius: Float,
+        probeRange: Float,
+        myDistanceToEnd: Float,
         byCell: [HexCoord: [Enemy]]
-    ) -> Float {
-        guard let ePos3 = enemyWorldPosition(enemy) else { return .greatestFiniteMagnitude }
-        let ePos = SIMD2<Float>(ePos3.x, ePos3.z)
-        let eRadius = enemyVisualRadius(for: enemy.enemyType)
-        let myDistanceToEnd = distanceToEnd(enemy)
+    ) -> CandidateScan {
+        var scan = CandidateScan()
 
-        // The broadphase walk must always cover at least one full hex chord (~0.9093):
-        // a blocker exactly one cell ahead can already be at near-zero *physical* distance
-        // (self near progress 1 in its cell, blocker near progress 0 in the next one), even
-        // though the topological "accumulated chord" bookkeeping below says they're a whole
-        // segment apart. Flooring on `desiredStep` alone broke this for small/slow steps —
-        // a blocker one hop away is skipped by the `acc <= probeRange` check entirely, so a
-        // fast-approaching enemy that happens to have a small step this frame (or substep)
-        // never sees it coming and can end the frame already overlapping it.
-        let probeRange = max(desiredStep, hexChordDistance) + 2 * CorridorTuning.maxCorridorRadius
-            + CorridorTuning.followDistance + CorridorTuning.probeRangePadding
+        func consider(_ other: Enemy) {
+            guard other !== enemy, !isFlyingType(other.enemyType) else { return }
+            guard let oPos3 = enemyWorldPosition(other) else { return }
+            let oPos = SIMD2<Float>(oPos3.x, oPos3.z)
+            let d = oPos - ePos
+            let along = simd_dot(d, frame.tangent)
+            guard abs(along) <= probeRange else { return }
+            let r = eRadius + enemyVisualRadius(for: other.enemyType) + CorridorTuning.separationGap
+            let side = simd_dot(d, frame.lateral)
+            guard abs(side) < r else { return }
 
-        var free: Float = .greatestFiniteMagnitude
+            if along > 0 && distanceToEnd(other) < myDistanceToEnd {
+                let clearance = along - (r * r - side * side).squareRoot()
+                scan.free = min(scan.free, max(0, clearance))
+            }
+            let needL = side + r
+            if needL > scan.needLeft { scan.needLeft = needL; scan.tightLeftSeq = other.seq }
+            let needR = r - side
+            if needR > scan.needRight { scan.needRight = needR; scan.tightRightSeq = other.seq }
+        }
+
         var walker: HexCell? = cell
         var acc: Float = 0
         var hops = 0
         while let visitCell = walker, acc <= probeRange, hops <= CorridorTuning.maxLookaheadCells {
-            if let candidates = byCell[visitCell.coord] {
-                for other in candidates {
-                    guard other !== enemy, !isFlyingType(other.enemyType) else { continue }
-                    guard distanceToEnd(other) < myDistanceToEnd else { continue }
-                    guard let oPos3 = enemyWorldPosition(other) else { continue }
-                    let oPos = SIMD2<Float>(oPos3.x, oPos3.z)
-                    let d = oPos - ePos
-                    let along = simd_dot(d, frame.tangent)
-                    guard along > 0, along <= probeRange else { continue }
-                    let side = simd_dot(d, frame.lateral)
-                    let r = eRadius + enemyVisualRadius(for: other.enemyType) + CorridorTuning.separationGap
-                    guard abs(side) < r else { continue }
-                    let clearance = along - (r * r - side * side).squareRoot()
-                    free = min(free, max(0, clearance))
-                }
-            }
+            byCell[visitCell.coord]?.forEach(consider)
             guard let next = visitCell.next else { break }
             acc += simd_distance(visitCell.coord.worldPosition(spacing: spacing), next.coord.worldPosition(spacing: spacing))
             walker = next
             hops += 1
         }
-        return free
+        walker = cell.previous
+        acc = 0
+        hops = 0
+        while let visitCell = walker, acc <= probeRange, hops <= CorridorTuning.maxLookaheadCells {
+            byCell[visitCell.coord]?.forEach(consider)
+            guard let prev = visitCell.previous else { break }
+            acc += simd_distance(visitCell.coord.worldPosition(spacing: spacing), prev.coord.worldPosition(spacing: spacing))
+            walker = prev
+            hops += 1
+        }
+
+        scan.needLeft = max(0, scan.needLeft)
+        scan.needRight = max(0, scan.needRight)
+        return scan
+    }
+
+    /// Updates `enemy.avoidSide`/`avoidHold`/`clearTimer`/`lateralOffset` for one substep.
+    /// Avoidance and recentring are branches of one if/else feeding a single rate-limited
+    /// integrator — never two summed forces — which is structurally why they can't fight each
+    /// other into a vibrating equilibrium. See the plan doc's anti-jitter section for the
+    /// three separate mechanisms (hold time, switch margin, recenter delay) guarding against
+    /// side-to-side oscillation specifically.
+    private func updateLateralSteering(_ enemy: Enemy, maxOffset: Float, scan: CandidateScan, blocked: Bool, dt: Float) {
+        enemy.avoidHold = max(0, enemy.avoidHold - dt)
+
+        if !blocked {
+            enemy.clearTimer += dt
+            if enemy.clearTimer >= CorridorTuning.recentreDelay {
+                enemy.avoidSide = 0
+            }
+        } else {
+            enemy.clearTimer = 0
+            if enemy.avoidHold <= 0 {
+                // Cost is the *residual* need left over after moving as far as our own
+                // maxOffset allows toward that side — not "is the full requirement feasible
+                // unilaterally." Many passable pairs (see the plan doc's pass-matrix math)
+                // only clear when BOTH enemies contribute part of the separation, so refusing
+                // to move at all unless our own budget alone fully resolves it would deadlock
+                // forever: neither party ever moves first. Moving partway is always taken —
+                // the other party's own solver pass supplies the rest over the following
+                // frames, and the hard forward `free` clamp stays the actual safety net
+                // regardless of how far either of us gets.
+                let targetPlus = min(maxOffset, enemy.lateralOffset + scan.needLeft)
+                let targetMinus = max(-maxOffset, enemy.lateralOffset - scan.needRight)
+                let residualPlus = max(0, scan.needLeft - (targetPlus - enemy.lateralOffset))
+                let residualMinus = max(0, scan.needRight - (enemy.lateralOffset - targetMinus))
+
+                if enemy.avoidSide == 1 && residualPlus <= residualMinus + CorridorTuning.sideSwitchMargin {
+                    // keep left
+                } else if enemy.avoidSide == -1 && residualMinus <= residualPlus + CorridorTuning.sideSwitchMargin {
+                    // keep right
+                } else if residualPlus == residualMinus {
+                    // A perfect tie (most commonly: two enemies approaching each other
+                    // head-on/dead-astern with zero lateral offset yet) must be broken
+                    // anti-symmetrically, not by a fixed preference — otherwise both parties
+                    // in a mutual negotiation pick the *same* side and stay locked together
+                    // forever, since a shared shift in one direction changes nothing between
+                    // them. Comparing against the specific candidate driving the tie (falling
+                    // back to our own seq, which only matters when there's no real
+                    // candidate) guarantees the other party's symmetric comparison resolves
+                    // to the opposite side.
+                    let otherSeq = scan.tightLeftSeq ?? scan.tightRightSeq ?? enemy.seq
+                    enemy.avoidSide = enemy.seq < otherSeq ? 1 : -1
+                } else {
+                    enemy.avoidSide = residualPlus < residualMinus ? 1 : -1
+                }
+                enemy.avoidHold = CorridorTuning.avoidHoldTime
+            }
+        }
+
+        let desiredLateral: Float
+        switch enemy.avoidSide {
+        case 1:  desiredLateral = min(maxOffset, enemy.lateralOffset + scan.needLeft)
+        case -1: desiredLateral = max(-maxOffset, enemy.lateralOffset - scan.needRight)
+        default: desiredLateral = 0
+        }
+
+        let baseRate = enemy.frozen ? 0 : min(CorridorTuning.lateralSpeedFactor * effectiveSpeed(of: enemy), CorridorTuning.lateralSpeedMax)
+        let rate = enemy.avoidSide != 0 ? baseRate : baseRate * CorridorTuning.recentreSpeedFactor
+        let delta = desiredLateral - enemy.lateralOffset
+        if abs(delta) <= CorridorTuning.lateralDeadband {
+            enemy.lateralOffset = desiredLateral
+        } else {
+            enemy.lateralOffset += max(-rate * dt, min(rate * dt, delta))
+        }
+        enemy.lateralOffset = max(-maxOffset, min(maxOffset, enemy.lateralOffset))
     }
 
     /// Advances `enemy`'s `(currentCell, progress)` by `step` world units along the path,

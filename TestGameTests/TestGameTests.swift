@@ -1343,6 +1343,85 @@ final class CorridorTests: XCTestCase {
         XCTAssertFalse(hopper.frozen, "hopper freeze timers must tick even though hoppers never call moveEnemy")
     }
 
+    // MARK: Stage 4 — lateral steering, recentring, hysteresis
+
+    /// Encodes the corridor-width design decision as an executable record: small enemies can
+    /// slip past big ones, but two enemies both wide enough to matter cannot pass each other.
+    /// If a future radius/width tweak flips one of these, it should be a deliberate choice.
+    func testPassMatrix_encodesDesignDecision() {
+        let gs = makeGameState(pathLength: 3)
+        func canPass(_ a: EnemyType, _ b: EnemyType) -> Bool {
+            let required = gs.enemyVisualRadius(for: a) + gs.enemyVisualRadius(for: b) + CorridorTuning.separationGap
+            return gs.maxLateralOffset(for: a) + gs.maxLateralOffset(for: b) >= required
+        }
+        XCTAssertTrue(canPass(.basic, .tank), "a small enemy must be able to slip past a tank")
+        XCTAssertFalse(canPass(.tank, .tank), "two tanks must not be able to pass each other")
+        XCTAssertFalse(canPass(.shield, .tank), "shield and tank are both too wide to pass each other")
+    }
+
+    /// A fast small enemy stuck behind a slow tank should steer around it and end up ahead,
+    /// then drift back toward the path centerline once clear.
+    func testSmallEnemyOvertakesTank() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 5, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 3.0, atCell: 3, in: gs)
+
+        var maxAbsOffset: Float = 0
+        var elapsed: Float = 0
+        while elapsed < 8 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+            maxAbsOffset = max(maxAbsOffset, abs(basic.lateralOffset))
+        }
+        XCTAssertLessThan(gs.distanceToEnd(basic), gs.distanceToEnd(tank), "the faster, smaller enemy should have overtaken the tank")
+        XCTAssertGreaterThan(maxAbsOffset, 0.10, "basic should have steered out noticeably to pass")
+
+        var elapsed2: Float = 0
+        while elapsed2 < 1.0 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed2 += 0.05
+        }
+        XCTAssertLessThan(abs(basic.lateralOffset), 0.02, "basic should recenter once clear of the tank")
+    }
+
+    /// Two tanks are both too wide to pass each other (see the pass matrix) — the one behind
+    /// must never overtake, only queue.
+    func testTwoTanksNeverOvertake() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let leadTank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 5, in: gs)
+        let chaseTank = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+
+        var elapsed: Float = 0
+        while elapsed < 10 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+            XCTAssertLessThanOrEqual(gs.distanceToEnd(leadTank), gs.distanceToEnd(chaseTank), "the lead tank must never be overtaken")
+        }
+    }
+
+    /// A small enemy passing a tank should commit to one side, not flip back and forth.
+    func testNoLateralOscillation() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 8, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+
+        var lastNonZeroSide: Int8 = 0
+        var sideChanges = 0
+        for _ in 0..<400 {
+            _ = gs.update(deltaTime: 0.016)
+            if basic.avoidSide != 0 {
+                if lastNonZeroSide != 0 && basic.avoidSide != lastNonZeroSide {
+                    sideChanges += 1
+                }
+                lastNonZeroSide = basic.avoidSide
+            }
+        }
+        XCTAssertLessThanOrEqual(sideChanges, 2, "avoidance side should not flip back and forth while passing")
+    }
+
     /// Flying enemies (wisp, hive) pass straight through ground traffic — never blocked.
     func testFlyingUnitsIgnoreCollision() {
         let gs = makeGameState(pathLength: 10)

@@ -1523,4 +1523,81 @@ final class CorridorTests: XCTestCase {
         XCTAssertEqual(wisp.progress, expectedProgress, accuracy: 0.0005, "flying enemies must not be blocked by ground traffic")
         XCTAssertEqual(wisp.lateralOffset, 0)
     }
+
+    // MARK: Stage 6 — consumers (roll, projectile lead, spawning)
+
+    /// Roll should reflect actual frame-to-frame displacement: rate matches distance moved
+    /// divided by body radius, and the rotation axis is perpendicular to the direction moved.
+    func testRoll_derivedFromDisplacement() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, in: gs)
+        _ = gs.update(deltaTime: 0.05) // establish a lastWorldPos baseline
+        let before = gs.enemyWorldPosition(enemy)!
+        _ = gs.update(deltaTime: 0.05)
+        let after = gs.enemyWorldPosition(enemy)!
+        let dx = after.x - before.x
+        let dz = after.z - before.z
+        let d = sqrt(dx * dx + dz * dz)
+
+        XCTAssertGreaterThan(d, 0, "enemy should have actually moved")
+        XCTAssertEqual(enemy.rollDeltaAngle, d / gs.enemyVisualRadius(for: .basic), accuracy: 0.0005)
+        XCTAssertEqual(simd_dot(SIMD2(enemy.rollAxis.x, enemy.rollAxis.z), SIMD2(dx, dz)), 0, accuracy: 0.0005,
+                       "roll axis must be perpendicular to the actual displacement")
+    }
+
+    /// A fully-blocked enemy shouldn't visibly keep rolling in place.
+    func testRoll_isZeroWhenFullyBlocked() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 0, in: gs)
+
+        for _ in 0..<60 { _ = gs.update(deltaTime: 0.05) } // reach contact and settle
+
+        XCTAssertEqual(follower.rollDeltaAngle, 0, accuracy: 0.001, "a fully blocked enemy should not visibly keep rolling")
+    }
+
+    /// A follower stuck in traffic should have its observed speed decay toward zero, and
+    /// `predictEnemyPosition` should follow suit rather than over-leading it as if free-running.
+    func testObservedSpeed_dropsWhenBlocked_andPredictionFollows() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 3, in: gs)
+
+        for _ in 0..<80 { _ = gs.update(deltaTime: 0.05) } // 4s — reach contact and let the EMA settle
+
+        XCTAssertLessThan(follower.observedSpeed, 0.1, "observed speed should have decayed toward zero while fully blocked")
+
+        let current = gs.enemyWorldPosition(follower)!
+        let predicted = gs.predictEnemyPosition(follower, afterTime: 0.5)!.position
+        XCTAssertLessThan(simd_distance(current, predicted), 0.05, "prediction for a blocked enemy should stay near its current position")
+    }
+
+    /// Two enemies spawned at the same start cell in quick succession should not begin
+    /// perfectly co-located.
+    func testSpawn_secondEnemyAtSameStart_isNotExactlyCoLocatedWithTheFirst() {
+        let gs = makeGameState(pathLength: 15)
+        gs.startRound()
+
+        var spawned: [Enemy] = []
+        var elapsed: Float = 0
+        while spawned.count < 2 && elapsed < 5 {
+            let events = gs.update(deltaTime: 0.05)
+            spawned.append(contentsOf: events.spawnedEnemies)
+            elapsed += 0.05
+        }
+
+        guard spawned.count >= 2 else {
+            XCTFail("expected at least two enemies to spawn within 5s")
+            return
+        }
+        XCTAssertNotEqual(spawned[0].lateralOffset, spawned[1].lateralOffset,
+                           "consecutive spawns at the same start cell should be jittered apart")
+    }
 }

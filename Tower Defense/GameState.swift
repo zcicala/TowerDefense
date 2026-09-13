@@ -410,6 +410,9 @@ class GameState {
     /// so more open paths directly means more total enemies spawned per second.
     var spawnTimers: [HexCoord: Float] = [:]
     var spawnIntervals: [HexCoord: Float] = [:]
+    /// How long each start cell has been continuously too congested to spawn into — see
+    /// `isStartCellCongested` (GameState+Crowd.swift) and `CorridorTuning.spawnBlockTimeout`.
+    var spawnBlockedFor: [HexCoord: Float] = [:]
 
     /// Cache for `cachedStepsToEnd(_:)` (GameState+Crowd.swift), invalidated by comparing
     /// `cachedPathVersion` against `hexGrid.pathVersion` — see that type for why.

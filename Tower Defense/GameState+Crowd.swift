@@ -93,6 +93,22 @@ enum CorridorTuning {
     /// Per-pair, per-iteration displacement cap, so a large overlap (many enemies pinned at
     /// literally the same point) can't produce an explosive one-frame pop.
     static let maxSeparationStep: Float = 0.15
+
+    // MARK: Consumers (Stage 6)
+
+    /// Time constant for `Enemy.observedSpeed`'s exponential moving average. Short enough
+    /// that projectile lead reacts within a fraction of a second of an enemy getting stuck in
+    /// traffic, long enough not to visibly chase single-frame noise.
+    static let speedEmaTau: Float = 0.25
+    /// Alternating spawn-time lateral nudge (by `seq` parity, not RNG — see the spawner) so
+    /// two enemies queued at the same start cell don't begin perfectly co-located.
+    static let spawnLateralJitter: Float = 0.05
+    /// Extra clearance required at a start cell, on top of both enemies' radii, before
+    /// spawning a new enemy there.
+    static let spawnClearance: Float = 0.04
+    /// After a start cell has been blocked this long, spawn anyway and let separation sort
+    /// it out — an escape hatch against a permanently parked obstruction stalling the round.
+    static let spawnBlockTimeout: Float = 3.0
 }
 
 extension GameState {
@@ -187,6 +203,46 @@ extension GameState {
         // frame at all — a Gravity Well pinning enemies with no ordinary walkers present
         // must still get its clump fanned out. See relaxSeparation's doc comment.
         relaxSeparation(movers)
+
+        commitFrameMotion(movers, deltaTime: deltaTime)
+    }
+
+    /// Once per frame, after everything above has finished moving enemies for this frame:
+    /// derives roll animation from actual net displacement (rather than intended speed, which
+    /// would keep a queued/blocked enemy visibly spinning in place, and wouldn't reflect
+    /// lateral drift while steering at all), and updates `observedSpeed` — an EMA of actual
+    /// along-path speed that `predictEnemyPosition` uses so projectile lead accounts for
+    /// enemies slowed or stopped by traffic instead of always assuming free-running motion.
+    ///
+    /// Skips hoppers while airborne or mid-hive-drop: `updateHopper` already drives their roll
+    /// from the jump arc directly, which this frame-level displacement measurement would only
+    /// fight (the arc's real displacement includes a vertical component this ground-plane
+    /// calculation doesn't account for).
+    private func commitFrameMotion(_ movers: [Enemy], deltaTime: Float) {
+        for enemy in movers where enemy.active && !enemy.isJumping && !enemy.isDroppingFromHive {
+            guard let now = enemyWorldPosition(enemy) else { continue }
+            defer { enemy.lastWorldPos = now }
+
+            guard let last = enemy.lastWorldPos else {
+                enemy.rollDeltaAngle = 0
+                continue
+            }
+            let dx = now.x - last.x
+            let dz = now.z - last.z
+            let d = sqrt(dx * dx + dz * dz)
+            if d > 1e-5 {
+                enemy.rollDeltaAngle = d / enemyVisualRadius(for: enemy.enemyType)
+                enemy.rollAxis = SIMD3(dz / d, 0, -dx / d)
+            } else {
+                enemy.rollDeltaAngle = 0
+            }
+
+            if deltaTime > 0 {
+                let instantSpeed = d / deltaTime
+                let alpha = min(1, deltaTime / CorridorTuning.speedEmaTau)
+                enemy.observedSpeed += (instantSpeed - enemy.observedSpeed) * alpha
+            }
+        }
     }
 
     /// One substep: bucket walkers by their current cell, then advance each — in front-to-back
@@ -210,10 +266,9 @@ extension GameState {
 
             if isFlyingType(enemy.enemyType) {
                 // Flying enemies never engage the solver at all: never blocked, never a
-                // blocker, lateralOffset stays exactly 0.
+                // blocker, lateralOffset stays exactly 0. (Roll is committed once per frame
+                // from actual displacement — see the end of solveCrowd.)
                 advance(enemy, from: cell, by: desiredStep)
-                enemy.rollDeltaAngle = desiredStep / enemyVisualRadius(for: enemy.enemyType)
-                enemy.rollAxis = SIMD3(frame.tangent.y, 0, -frame.tangent.x)
                 continue
             }
 
@@ -252,13 +307,6 @@ extension GameState {
             let eased = free.isFinite ? desiredStep * min(1, free / CorridorTuning.followDistance) : desiredStep
             let step = max(0, min(desiredStep, eased, free))
 
-            if step > 0 {
-                enemy.rollDeltaAngle = step / eRadius
-                enemy.rollAxis = SIMD3(frame.tangent.y, 0, -frame.tangent.x)
-            } else {
-                enemy.rollDeltaAngle = 0
-            }
-
             advance(enemy, from: cell, by: step)
         }
     }
@@ -269,6 +317,23 @@ extension GameState {
     func maxLateralOffset(for type: EnemyType) -> Float {
         max(CorridorTuning.minMaxOffset,
             CorridorTuning.corridorHalfWidth - CorridorTuning.maxOffsetRadiusFactor * enemyVisualRadius(for: type))
+    }
+
+    /// Whether spawning `candidate` at `startCell` right now would drop it on top of another
+    /// active enemy. A world-space circle test against every active enemy — start cells are
+    /// few and spawns are infrequent (at most a few per second per path), so this doesn't need
+    /// the corridor solver's cell-bucketed broadphase.
+    func isStartCellCongested(_ startCell: HexCell, for candidate: Enemy) -> Bool {
+        let startPos = startCell.coord.worldPosition(spacing: spacing)
+        let candidateRadius = enemyVisualRadius(for: candidate.enemyType)
+        for other in enemies where other.active && other !== candidate {
+            guard let pos3 = enemyWorldPosition(other) else { continue }
+            let dx = pos3.x - startPos.x
+            let dz = pos3.z - startPos.y // HexCoord.worldPosition's .y is world Z
+            let required = candidateRadius + enemyVisualRadius(for: other.enemyType) + CorridorTuning.spawnClearance
+            if dx * dx + dz * dz < required * required { return true }
+        }
+        return false
     }
 
     /// Result of `scanCandidates`.

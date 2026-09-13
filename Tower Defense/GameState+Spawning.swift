@@ -142,6 +142,7 @@ extension GameState {
             .map(\.coord).sorted { ($0.q, $0.r) < ($1.q, $1.r) }
         spawnTimers = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, Float(0)) })
         spawnIntervals = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, rng.randomFloat(in: 0.3...1.0)) })
+        spawnBlockedFor = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, Float(0)) })
 
         enemies.removeAll()
         projectiles.removeAll()

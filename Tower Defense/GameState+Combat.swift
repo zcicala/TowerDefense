@@ -40,14 +40,28 @@ extension GameState {
             spawnIntervals[startCell.coord] = interval
 
             let spawnedCount = enemies.filter { $0.currentCell != nil }.count
-            if spawnedCount < enemies.count && timer >= interval {
-                timer = 0
-                spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
-                if let enemy = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
-                    enemy.currentCell = startCell
-                    enemy.progress = 0
-                    enemy.active = true
-                    events.spawnedEnemies.append(enemy)
+            if spawnedCount < enemies.count && timer >= interval,
+               let candidate = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
+                let blockedSoFar = spawnBlockedFor[startCell.coord, default: 0]
+                if isStartCellCongested(startCell, for: candidate) && blockedSoFar < CorridorTuning.spawnBlockTimeout {
+                    // Leave `timer` at/above `interval` so spawning is retried next frame —
+                    // a delayed spawn only lengthens the round, never ends it early (see
+                    // the round-over check, which requires every enemy to have spawned).
+                    spawnBlockedFor[startCell.coord] = blockedSoFar + deltaTime
+                } else {
+                    spawnBlockedFor[startCell.coord] = 0
+                    timer = 0
+                    spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
+                    candidate.currentCell = startCell
+                    candidate.progress = 0
+                    // Alternate by creation order (not RNG, to keep the seeded draw sequence
+                    // untouched) so two enemies queued at the same start cell don't begin
+                    // perfectly co-located; the corridor solver's separation pass would fan
+                    // them out anyway, but this avoids a one-frame exact overlap.
+                    candidate.lateralOffset = (candidate.seq % 2 == 0 ? 1 : -1) * CorridorTuning.spawnLateralJitter
+                    candidate.lastWorldPos = nil
+                    candidate.active = true
+                    events.spawnedEnemies.append(candidate)
                 }
             }
             spawnTimers[startCell.coord] = timer
@@ -1114,6 +1128,32 @@ extension GameState {
         var progress = enemy.progress
         var remaining = time
 
+        // Use the enemy's observed (EMA) speed rather than its nominal top speed: an enemy
+        // stuck in traffic is correctly predicted to stay roughly where it is instead of
+        // projectiles always leading as if it were running free. A near-zero observed speed
+        // also means "essentially stationary" — return the current position immediately
+        // rather than dividing by it below.
+        let speed = max(0, enemy.observedSpeed)
+        guard speed > 0.001 else {
+            // Evaluate at the enemy's actual current progress (linearly interpolated, same as
+            // the non-early-return path below) — snapping to the bare cell center here would
+            // ignore however far through the segment the enemy already is.
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
+            let offset = enemy.lateralOffset
+            guard let nextCell = cell.next else {
+                let pos = cell.coord.worldPosition(spacing: spacing)
+                let y = cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+                return (SIMD3<Float>(pos.x + lateral.x * offset, y, pos.y + lateral.y * offset), cell.coord)
+            }
+            let cellPos = cell.coord.worldPosition(spacing: spacing)
+            let nextPos = nextCell.coord.worldPosition(spacing: spacing)
+            let x = cellPos.x + (nextPos.x - cellPos.x) * progress
+            let z = cellPos.y + (nextPos.y - cellPos.y) * progress
+            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+            let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
+            return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
+        }
+
         // Simulate the enemy moving forward in time
         while remaining > 0 {
             guard let nextCell = cell.next else {
@@ -1125,7 +1165,7 @@ extension GameState {
             let cellPos = cell.coord.worldPosition(spacing: spacing)
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let distance = simd_distance(cellPos, nextPos)
-            let progressPerSecond = enemy.speed / distance
+            let progressPerSecond = speed / distance
             let timeToNextCell = (1.0 - progress) / progressPerSecond
 
             if remaining < timeToNextCell {
@@ -1138,17 +1178,23 @@ extension GameState {
             }
         }
 
-        // Compute world position at predicted cell/progress
+        // Compute world position at predicted cell/progress, carrying the enemy's current
+        // lateral offset forward unchanged — holding it constant over a typical projectile
+        // flight (well under a second) is far more accurate than ignoring it and aiming at
+        // the lane centerline.
         let cellPos = cell.coord.worldPosition(spacing: spacing)
+        let offset = enemy.lateralOffset
         if let nextCell = cell.next {
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let x = cellPos.x + (nextPos.x - cellPos.x) * progress
             let z = cellPos.y + (nextPos.y - cellPos.y) * progress
             let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
             let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
-            return (SIMD3<Float>(x, y, z), nearestCoord)
+            return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
         } else {
-            return (SIMD3<Float>(cellPos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, cellPos.y), cell.coord)
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
+            return (SIMD3<Float>(cellPos.x + lateral.x * offset, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, cellPos.y + lateral.y * offset), cell.coord)
         }
     }
 

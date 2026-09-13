@@ -79,6 +79,20 @@ enum CorridorTuning {
     /// center — long enough that weaving past a multi-enemy queue doesn't trigger a recenter
     /// attempt in the brief gaps between blockers.
     static let recentreDelay: Float = 0.35
+
+    // MARK: Separation relaxation (Stage 5)
+
+    /// Fraction of overlap corrected per separation iteration/pair. Less than 1 so multiple
+    /// overlapping pairs relax smoothly toward each other's constraints rather than each
+    /// correction fighting the last one to convergence in a single jump.
+    static let separationStrength: Float = 0.5
+    /// Iterations of the separation pass per frame. 1 is enough visually; 2 resolves a
+    /// same-tile clump (e.g. several Gravity-Well-pinned enemies) in one frame instead of
+    /// visibly unstacking over several.
+    static let separationIterations = 2
+    /// Per-pair, per-iteration displacement cap, so a large overlap (many enemies pinned at
+    /// literally the same point) can't produce an explosive one-frame pop.
+    static let maxSeparationStep: Float = 0.15
 }
 
 extension GameState {
@@ -147,26 +161,32 @@ extension GameState {
             if enemy.speed <= 0 { continue }
             walkers.append(enemy)
         }
-        guard !walkers.isEmpty else { return }
 
-        // Front-to-back: smaller distanceToEnd (further along) always sorts first. Tiebreak
-        // on `seq` — needed because e.g. the Gravity Well can pin several enemies at exactly
-        // the same (cell, progress).
-        let keyed = walkers.map { ($0, distanceToEnd($0)) }
-            .sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.seq < $1.0.seq }
-        walkers = keyed.map { $0.0 }
+        if !walkers.isEmpty {
+            // Front-to-back: smaller distanceToEnd (further along) always sorts first.
+            // Tiebreak on `seq` — needed because e.g. the Gravity Well can pin several
+            // enemies at exactly the same (cell, progress).
+            let keyed = walkers.map { ($0, distanceToEnd($0)) }
+                .sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.seq < $1.0.seq }
+            walkers = keyed.map { $0.0 }
 
-        let vmax = walkers.map { effectiveSpeed(of: $0) }.max() ?? 0
-        let steps: Int
-        if vmax > 0 {
-            steps = min(CorridorTuning.maxSubsteps, max(1, Int((vmax * deltaTime / CorridorTuning.substepDistance).rounded(.up))))
-        } else {
-            steps = 1
+            let vmax = walkers.map { effectiveSpeed(of: $0) }.max() ?? 0
+            let steps: Int
+            if vmax > 0 {
+                steps = min(CorridorTuning.maxSubsteps, max(1, Int((vmax * deltaTime / CorridorTuning.substepDistance).rounded(.up))))
+            } else {
+                steps = 1
+            }
+            let h = deltaTime / Float(steps)
+            for _ in 0..<steps {
+                advanceWalkers(walkers, dt: h)
+            }
         }
-        let h = deltaTime / Float(steps)
-        for _ in 0..<steps {
-            advanceWalkers(walkers, dt: h)
-        }
+
+        // Once per frame (not per substep), independent of whether any "walker" moved this
+        // frame at all — a Gravity Well pinning enemies with no ordinary walkers present
+        // must still get its clump fanned out. See relaxSeparation's doc comment.
+        relaxSeparation(movers)
     }
 
     /// One substep: bucket walkers by their current cell, then advance each — in front-to-back
@@ -574,5 +594,140 @@ extension GameState {
     func distanceToEnd(_ enemy: Enemy) -> Float {
         guard let cell = enemy.currentCell else { return .greatestFiniteMagnitude }
         return Float(cachedStepsToEnd(cell.coord)) - enemy.progress
+    }
+
+    // MARK: - Separation relaxation (overlaps the corridor solver above didn't create)
+
+    private struct SeparationAgent {
+        let enemy: Enemy
+        let radius: Float
+        let maxOffset: Float
+        var pos: SIMD2<Float>
+        var tangent: SIMD2<Float>
+        var lateral: SIMD2<Float>
+        var key: Float
+    }
+
+    private func separationAgent(for enemy: Enemy, radius: Float, maxOffset: Float) -> SeparationAgent? {
+        guard let cell = enemy.currentCell, let pos3 = enemyWorldPosition(enemy) else { return nil }
+        let frame = pathFrame(cell: cell, progress: enemy.progress)
+        return SeparationAgent(enemy: enemy, radius: radius, maxOffset: maxOffset,
+                                pos: SIMD2(pos3.x, pos3.z), tangent: frame.tangent, lateral: frame.lateral,
+                                key: distanceToEnd(enemy))
+    }
+
+    /// Nudges apart any overlapping ground enemies that the corridor solver above didn't
+    /// create or resolve — a Gravity Well pinning several enemies at the exact same point, two
+    /// enemies spawned on top of each other, a hive drop landing near others, or a hopper
+    /// landing on an already-occupied cell. Runs once per frame (not per substep, unlike
+    /// `advanceWalkers`), over every active ground enemy including well-pulled enemies and
+    /// grounded hoppers — neither of which `solveCrowd`'s substep loop above touches at all.
+    ///
+    /// Unlike the corridor solver, this uses purely geometric neighbors (a cell's 6 hex
+    /// neighbors) rather than walking `.next`/`.previous` — deliberately, since it needs to
+    /// work even where path topology is lossy (a branch junction's `.previous`) or doesn't
+    /// exist in the useful direction at all (two enemies pinned on the same Gravity Well tile
+    /// have nothing to do with `.next` chains).
+    ///
+    /// Two invariants make this safe to run unconditionally every frame: only the
+    /// lower-priority ("rear") enemy of any overlapping pair ever moves, and if lateral
+    /// correction alone can't fully separate them, the remainder is applied as *backward*
+    /// progress only (`retreat`, below) — the one place outside the Gravity Well itself where
+    /// `progress` can decrease. Together these guarantee separation can never advance anyone,
+    /// let alone shove them toward the base.
+    func relaxSeparation(_ movers: [Enemy]) {
+        var agents: [SeparationAgent] = []
+        agents.reserveCapacity(movers.count)
+        for enemy in movers {
+            guard enemy.active, !isFlyingType(enemy.enemyType), !enemy.isJumping, !enemy.isDroppingFromHive, enemy.speed > 0 else { continue }
+            if let agent = separationAgent(for: enemy, radius: enemyVisualRadius(for: enemy.enemyType), maxOffset: maxLateralOffset(for: enemy.enemyType)) {
+                agents.append(agent)
+            }
+        }
+        guard agents.count > 1 else { return }
+
+        for _ in 0..<CorridorTuning.separationIterations {
+            var byCell: [HexCoord: [Int]] = [:]
+            for (i, agent) in agents.enumerated() {
+                guard let coord = agent.enemy.currentCell?.coord else { continue }
+                byCell[coord, default: []].append(i)
+            }
+
+            for i in agents.indices {
+                guard let coord = agents[i].enemy.currentCell?.coord else { continue }
+                var neighborIndices = byCell[coord] ?? []
+                for n in 0..<6 {
+                    if let ids = byCell[coord.neighbor(n)] { neighborIndices.append(contentsOf: ids) }
+                }
+
+                for j in neighborIndices where j != i {
+                    let rearIdx = agents[i].key >= agents[j].key ? i : j
+                    let frontIdx = rearIdx == i ? j : i
+
+                    let d = agents[rearIdx].pos - agents[frontIdx].pos
+                    let r = agents[frontIdx].radius + agents[rearIdx].radius + CorridorTuning.separationGap
+                    var dist = simd_length(d)
+                    let dir: SIMD2<Float>
+                    if dist < 1e-4 {
+                        // Perfectly stacked (e.g. two enemies spawned at the same instant):
+                        // split deterministically by identity, never by RNG.
+                        dir = agents[rearIdx].lateral * ((agents[rearIdx].enemy.seq % 2 == 0) ? 1 : -1)
+                        dist = 0
+                    } else {
+                        dir = d / dist
+                    }
+                    guard dist < r else { continue }
+
+                    let pen = min(r - dist, CorridorTuning.maxSeparationStep) * CorridorTuning.separationStrength
+                    let dLat = simd_dot(dir, agents[rearIdx].lateral) * pen
+                    let dTan = simd_dot(dir, agents[rearIdx].tangent) * pen
+
+                    let rearEnemy = agents[rearIdx].enemy
+                    let maxOffset = agents[rearIdx].maxOffset
+                    rearEnemy.lateralOffset = max(-maxOffset, min(maxOffset, rearEnemy.lateralOffset + dLat))
+                    if dTan < 0 {
+                        retreat(rearEnemy, by: -dTan)
+                    }
+                    if let refreshed = separationAgent(for: rearEnemy, radius: agents[rearIdx].radius, maxOffset: maxOffset) {
+                        agents[rearIdx] = refreshed
+                    }
+                }
+            }
+        }
+    }
+
+    /// Moves `enemy` backward along its path by `distance` world units (always positive) —
+    /// the mirror image of `advance`, used solely by `relaxSeparation` to make room when
+    /// lateral correction alone isn't enough. Stops at a `.start` cell (`previous == nil`)
+    /// rather than going negative — an unresolvable spawn-point overlap is simply tolerated
+    /// for a frame rather than corrupting `progress`.
+    private func retreat(_ enemy: Enemy, by distance: Float) {
+        guard distance > 0, var cell = enemy.currentCell else { return }
+        var progress = enemy.progress
+        var remaining = distance
+        while remaining > 0 {
+            let segmentLength: Float
+            if let next = cell.next {
+                segmentLength = simd_distance(cell.coord.worldPosition(spacing: spacing), next.coord.worldPosition(spacing: spacing))
+            } else {
+                segmentLength = hexChordDistance // `cell` is the true end; no real next segment
+            }
+            let distanceIntoSegment = progress * segmentLength
+            if remaining < distanceIntoSegment {
+                progress -= remaining / segmentLength
+                remaining = 0
+            } else {
+                remaining -= distanceIntoSegment
+                guard let prev = cell.previous else {
+                    progress = 0
+                    remaining = 0
+                    break
+                }
+                cell = prev
+                progress = 1
+            }
+        }
+        if cell !== enemy.currentCell { enemy.currentCell = cell }
+        enemy.progress = progress
     }
 }

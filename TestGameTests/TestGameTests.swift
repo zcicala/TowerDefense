@@ -1422,6 +1422,91 @@ final class CorridorTests: XCTestCase {
         XCTAssertLessThanOrEqual(sideChanges, 2, "avoidance side should not flip back and forth while passing")
     }
 
+    // MARK: Stage 5 — separation relaxation (overlaps the corridor solver above didn't create)
+
+    /// Two enemies placed at an exact head-on overlap should be pushed apart purely laterally
+    /// — the `dist < 1e-4` branch's direction is perpendicular to travel by construction, so
+    /// there's no tangential component to (mis)apply as forward or backward motion.
+    func testSeparation_resolvesExactOverlap_lateralOnly() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, progress: 0.3, in: gs)
+        let b = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, progress: 0.3, in: gs)
+        let r = gs.enemyVisualRadius(for: .basic)
+
+        for _ in 0..<10 { gs.relaxSeparation([a, b]) }
+
+        let dist = simd_distance(gs.enemyWorldPosition(a)!, gs.enemyWorldPosition(b)!)
+        XCTAssertGreaterThanOrEqual(dist, 2 * r - 0.01, "an exact overlap should be resolved laterally")
+        XCTAssertEqual(a.progress, 0.3, accuracy: 0.0001, "separation alone must not change progress for a head-on overlap")
+        XCTAssertEqual(b.progress, 0.3, accuracy: 0.0001)
+    }
+
+    /// Separation may retreat the rear enemy of an overlapping pair, but must never advance
+    /// anyone — tested in isolation (direct `relaxSeparation` calls) so ordinary forward
+    /// walking can't be confused with the pass under test.
+    func testSeparation_neverPushesAnyoneForward() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let b = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let c = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let before = [a, b, c].map { gs.distanceToEnd($0) }
+
+        for _ in 0..<10 { gs.relaxSeparation([a, b, c]) }
+
+        let after = [a, b, c].map { gs.distanceToEnd($0) }
+        for (b0, a0) in zip(before, after) {
+            // distanceToEnd only ever grows (retreat) or holds steady — it must never shrink,
+            // since shrinking would mean separation advanced someone toward the end.
+            XCTAssertGreaterThanOrEqual(a0, b0 - 0.0001, "separation must never advance an enemy toward the end")
+        }
+    }
+
+    /// Flying enemies never participate in separation, matching their exemption from the
+    /// corridor solver above.
+    func testSeparation_ignoresFlyingEnemies() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let wisp = makeActiveEnemy(type: .wisp, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let offsetBefore = wisp.lateralOffset
+
+        gs.relaxSeparation([wisp, tank])
+
+        XCTAssertEqual(wisp.lateralOffset, offsetBefore, "flying enemies never participate in separation")
+    }
+
+    /// A hopper mid-jump is exempt (its position is overridden by the jump arc entirely), but
+    /// a grounded hopper between jumps must still participate.
+    func testSeparation_ignoresMidJumpHopper() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        hopper.isJumping = true
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let offsetBefore = hopper.lateralOffset
+        let progressBefore = hopper.progress
+
+        gs.relaxSeparation([hopper, tank])
+
+        XCTAssertEqual(hopper.lateralOffset, offsetBefore)
+        XCTAssertEqual(hopper.progress, progressBefore)
+    }
+
+    func testSeparation_includesGroundedHopper() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let required = gs.enemyVisualRadius(for: .hopper) + gs.enemyVisualRadius(for: .basic) + CorridorTuning.separationGap
+
+        for _ in 0..<10 { gs.relaxSeparation([hopper, basic]) }
+
+        let dist = simd_distance(gs.enemyWorldPosition(hopper)!, gs.enemyWorldPosition(basic)!)
+        XCTAssertGreaterThanOrEqual(dist, required - 0.01, "a grounded (non-jumping) hopper must participate in separation")
+    }
+
     /// Flying enemies (wisp, hive) pass straight through ground traffic — never blocked.
     func testFlyingUnitsIgnoreCollision() {
         let gs = makeGameState(pathLength: 10)

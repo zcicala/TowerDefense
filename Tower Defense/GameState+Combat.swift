@@ -863,6 +863,10 @@ extension GameState {
             if enemy.hiveDropProgress >= 1.0 {
                 enemy.isDroppingFromHive = false
                 enemy.hopperJumpTimer = rng.randomFloat(in: enemy.hopperJumpInterval)
+                // Land centered on the path — the corridor solver's separation pass will
+                // fan it out from whatever it landed on, rather than carrying over the
+                // hive-drop scatter's own (unrelated) lateral offset.
+                enemy.lateralOffset = 0
             }
             return
         }

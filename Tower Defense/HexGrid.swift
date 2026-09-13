@@ -770,12 +770,41 @@ class Enemy {
     var jumpFromPos: SIMD3<Float>? = nil
     var jumpToPos: SIMD3<Float>? = nil
 
+    // MARK: - Corridor / crowd state (GameState+Crowd.swift)
+
+    /// Signed offset from the path centerline, in world units, perpendicular to the path
+    /// tangent in XZ (positive = left of travel). Rotates with the frame automatically at
+    /// corners and cell transitions — never needs conversion. Physical and cosmetic only;
+    /// never a targeting input (see `GameState.enemyNearestCoord`).
+    var lateralOffset: Float = 0
+    /// Latched avoidance side chosen by the corridor solver: -1 right, 0 none, +1 left.
+    /// Not re-evaluated while `avoidHold > 0`, which prevents side-to-side oscillation.
+    var avoidSide: Int8 = 0
+    /// Seconds the latched `avoidSide` stays locked in before it can be re-evaluated.
+    var avoidHold: Float = 0
+    /// Seconds this enemy has been continuously unblocked; gates recentring back to `avoidSide = 0`.
+    var clearTimer: Float = 0
+    /// Exponential moving average of actual along-path world speed, seeded to `speed`. Feeds
+    /// `predictEnemyPosition` so projectile lead accounts for enemies slowed/stopped by traffic.
+    var observedSpeed: Float
+    /// Previous frame's world position; used to derive `rollDeltaAngle`/`rollAxis` from actual
+    /// displacement rather than intended speed, so a blocked enemy doesn't visually keep rolling.
+    var lastWorldPos: SIMD3<Float>? = nil
+    /// Monotonic creation index — deterministic tiebreak when two enemies share a sort key
+    /// (e.g. pinned at the same gravity-well tile). Not a UUID: needs to be `Comparable`
+    /// and cheap to compare in the solver's inner loop.
+    let seq: Int
+    private static var nextSeq: Int = 0
+
     init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1,
          shieldAmount: Float = 0, explosionRadius: Int = 0, explosionDamage: Int = 0) {
         self.enemyType = type
         self.hitPoints = hitPoints
         self.maxHitPoints = hitPoints
         self.speed = speed
+        self.observedSpeed = speed
+        Enemy.nextSeq += 1
+        self.seq = Enemy.nextSeq
         self.baseDamage = baseDamage
         self.shieldMaxHP = shieldAmount
         self.shieldHP = shieldAmount
@@ -888,8 +917,14 @@ class BowlingBall {
 class HexGrid {
     private(set) var cells: [HexCoord: HexCell] = [:]
 
+    /// Bumped on every topology change (cell add/remove). Lets callers cache derived
+    /// path data (e.g. GameState.cachedStepsToEnd) and cheaply detect when it's stale,
+    /// without having to hook every individual call site that mutates the grid.
+    private(set) var pathVersion: Int = 0
+
     func addCell(_ cell: HexCell) {
         cells[cell.coord] = cell
+        pathVersion += 1
     }
 
     func cell(at coord: HexCoord) -> HexCell? {
@@ -900,9 +935,13 @@ class HexGrid {
         (0..<6).compactMap { cells[coord.neighbor($0)] }
     }
 
-    func removeAllCells() { cells.removeAll() }
+    func removeAllCells() {
+        cells.removeAll()
+        pathVersion += 1
+    }
 
     func removeCell(at coord: HexCoord) {
         cells.removeValue(forKey: coord)
+        pathVersion += 1
     }
 }

@@ -411,6 +411,11 @@ class GameState {
     var spawnTimers: [HexCoord: Float] = [:]
     var spawnIntervals: [HexCoord: Float] = [:]
 
+    /// Cache for `cachedStepsToEnd(_:)` (GameState+Crowd.swift), invalidated by comparing
+    /// `cachedPathVersion` against `hexGrid.pathVersion` — see that type for why.
+    var stepsToEndCache: [HexCoord: Int] = [:]
+    var cachedPathVersion: Int = -1
+
     // MARK: - Base Tower
 
     var baseTowerMaxHP: Int { 8 + (baseTowerTechLevel - 1) }

@@ -1,4 +1,5 @@
 import XCTest
+import simd
 @testable import Zac_s_Tower_Defense
 
 // MARK: - Test Helpers
@@ -31,10 +32,14 @@ func makeActiveEnemy(
     hp: Float = 100,
     speed: Float = 1.0,
     atCell cellIndex: Int,
+    progress: Float = 0,
+    offset: Float = 0,
     in gs: GameState
 ) -> Enemy {
     let enemy = Enemy(type: type, hitPoints: hp, speed: speed)
     enemy.currentCell = pathCell(at: cellIndex, in: gs)
+    enemy.progress = progress
+    enemy.lateralOffset = offset
     enemy.active = true
     gs.enemies.append(enemy)
     return enemy
@@ -1142,5 +1147,87 @@ final class CorridorTests: XCTestCase {
                 "\(type) visual radius must derive from bodyRadiusScale"
             )
         }
+    }
+
+    // MARK: Stage 1 — path frame + caches
+
+    func testPathFrame_straightPath_isOrthonormal() {
+        let gs = makeGameState(pathLength: 6)
+        let cell = pathCell(at: 2, in: gs)!
+        for t: Float in [0, 0.25, 0.5, 0.75] {
+            let frame = gs.pathFrame(cell: cell, progress: t)
+            XCTAssertEqual(simd_length(frame.tangent), 1, accuracy: 0.0001)
+            XCTAssertEqual(simd_length(frame.lateral), 1, accuracy: 0.0001)
+            XCTAssertEqual(simd_dot(frame.tangent, frame.lateral), 0, accuracy: 0.0001)
+            // On the q-axis path every hop is direction 0: (spacing*1.5, spacing*sqrt(3)/2),
+            // which normalizes to (0.866, 0.5).
+            XCTAssertEqual(frame.tangent.x, 0.866, accuracy: 0.001)
+            XCTAssertEqual(frame.tangent.y, 0.5, accuracy: 0.001)
+            XCTAssertEqual(frame.lateral.x, -0.5, accuracy: 0.001)
+            XCTAssertEqual(frame.lateral.y, 0.866, accuracy: 0.001)
+        }
+    }
+
+    func testPathFrame_startCell_pointsAtNext() {
+        let gs = makeGameState(pathLength: 5)
+        let start = pathCell(at: 0, in: gs)!
+        let next = pathCell(at: 1, in: gs)!
+        let expected = simd_normalize(next.coord.worldPosition(spacing: gs.spacing) - start.coord.worldPosition(spacing: gs.spacing))
+        let frame = gs.pathFrame(cell: start, progress: 0)
+        XCTAssertEqual(frame.tangent.x, expected.x, accuracy: 0.0001)
+        XCTAssertEqual(frame.tangent.y, expected.y, accuracy: 0.0001)
+    }
+
+    func testPathFrame_endCell_fallsBackToPreviousDirection() {
+        let gs = makeGameState(pathLength: 5)
+        let end = pathCell(at: 4, in: gs)!
+        let prev = pathCell(at: 3, in: gs)!
+        XCTAssertNil(end.next, "test assumes the last cell is terminal")
+        let expected = simd_normalize(end.coord.worldPosition(spacing: gs.spacing) - prev.coord.worldPosition(spacing: gs.spacing))
+        let frame = gs.pathFrame(cell: end, progress: 0)
+        XCTAssertEqual(frame.tangent.x, expected.x, accuracy: 0.0001)
+        XCTAssertEqual(frame.tangent.y, expected.y, accuracy: 0.0001)
+    }
+
+    func testEnemyWorldPosition_lateralOffsetIsPurelyPerpendicular() {
+        let gs = makeGameState(pathLength: 6)
+        let enemy = makeActiveEnemy(atCell: 2, progress: 0.4, in: gs)
+        let centeredPos = gs.enemyWorldPosition(enemy)!
+        enemy.lateralOffset = 0.1
+        let offsetPos = gs.enemyWorldPosition(enemy)!
+        let delta = SIMD2<Float>(offsetPos.x - centeredPos.x, offsetPos.z - centeredPos.z)
+        let frame = gs.pathFrame(cell: enemy.currentCell!, progress: enemy.progress)
+        XCTAssertEqual(simd_length(delta), 0.1, accuracy: 0.0001)
+        XCTAssertEqual(simd_dot(delta, frame.tangent), 0, accuracy: 0.0001, "offset must be purely perpendicular to travel")
+        XCTAssertEqual(offsetPos.y, centeredPos.y, accuracy: 0.0001, "offset must not affect height")
+    }
+
+    func testStepsToEndCache_matchesUncachedWalk() {
+        let gs = makeGameState(pathLength: 8)
+        for i in 0..<8 {
+            let cell = pathCell(at: i, in: gs)!
+            XCTAssertEqual(gs.cachedStepsToEnd(cell.coord), gs.stepsToEnd(of: cell), "cell \(i)")
+        }
+    }
+
+    func testStepsToEndCache_invalidatesWhenTopologyChanges() {
+        let gs = makeGameState(pathLength: 5)
+        XCTAssertEqual(gs.cachedStepsToEnd(HexCoord(q: 0, r: 0)), 4)
+
+        // Extend the path by one more cell past the old end.
+        let oldEnd = pathCell(at: 4, in: gs)!
+        let newCell = HexCell(coord: HexCoord(q: 5, r: 0), height: 1.0, type: .end)
+        newCell.previous = oldEnd
+        oldEnd.next = newCell
+        gs.hexGrid.addCell(newCell)
+
+        XCTAssertEqual(gs.cachedStepsToEnd(HexCoord(q: 0, r: 0)), 5, "cache must reflect the new topology, not the stale one")
+    }
+
+    func testDistanceToEnd_isContinuousAcrossCellTransition() {
+        let gs = makeGameState(pathLength: 6)
+        let enemyBefore = makeActiveEnemy(atCell: 2, progress: 0.999, in: gs)
+        let enemyAfter = makeActiveEnemy(atCell: 3, progress: 0.0, in: gs)
+        XCTAssertEqual(gs.distanceToEnd(enemyBefore), gs.distanceToEnd(enemyAfter), accuracy: 0.002)
     }
 }

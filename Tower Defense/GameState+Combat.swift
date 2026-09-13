@@ -967,7 +967,7 @@ extension GameState {
             // Using remaining steps rather than depth-from-start avoids a bug where
             // branch cells have higher depth-from-start than the junction they lead to,
             // causing the hopper to get stuck with no valid forward target.
-            let currentRemaining = stepsToEnd(of: current)
+            let currentRemaining = cachedStepsToEnd(current.coord)
             var best: HexCell? = nil
             var bestRemaining = currentRemaining
 
@@ -975,7 +975,7 @@ extension GameState {
                 guard cell.type == .path || cell.type == .end else { continue }
                 guard cell.coord.distance(to: current.coord) <= jumpRadius else { continue }
                 guard cell.coord != current.coord else { continue }
-                let remaining = stepsToEnd(of: cell)
+                let remaining = cachedStepsToEnd(cell.coord)
                 if remaining < bestRemaining {
                     bestRemaining = remaining
                     best = cell
@@ -1054,35 +1054,18 @@ extension GameState {
         let p1Pos = current.coord.worldPosition(spacing: spacing)
         let p1Y = current.height + enemyRadius + enemyHoverOffset
 
-        if let nextCell = current.next {
-            let p2Pos = nextCell.coord.worldPosition(spacing: spacing)
+        if let cp = splineControlPoints(for: current), let nextCell = current.next {
             let p2Y = nextCell.height + enemyRadius + enemyHoverOffset
+            let p0Y = current.previous.map { $0.height + enemyRadius + enemyHoverOffset } ?? (p1Y * 2 - p2Y)
+            let p3Y = nextCell.next.map { $0.height + enemyRadius + enemyHoverOffset } ?? (p2Y * 2 - p1Y)
 
-            let p0Pos: SIMD2<Float>
-            let p0Y: Float
-            if let prev = current.previous {
-                p0Pos = prev.coord.worldPosition(spacing: spacing)
-                p0Y = prev.height + enemyRadius + enemyHoverOffset
-            } else {
-                p0Pos = p1Pos * 2 - p2Pos
-                p0Y = p1Y * 2 - p2Y
-            }
-
-            let p3Pos: SIMD2<Float>
-            let p3Y: Float
-            if let nextNext = nextCell.next {
-                p3Pos = nextNext.coord.worldPosition(spacing: spacing)
-                p3Y = nextNext.height + enemyRadius + enemyHoverOffset
-            } else {
-                p3Pos = p2Pos * 2 - p1Pos
-                p3Y = p2Y * 2 - p1Y
-            }
-
-            let x = catmullRom(p0Pos.x, p1Pos.x, p2Pos.x, p3Pos.x, t)
-            let z = catmullRom(p0Pos.y, p1Pos.y, p2Pos.y, p3Pos.y, t)
+            let x = catmullRom(cp.p0.x, cp.p1.x, cp.p2.x, cp.p3.x, t)
+            let z = catmullRom(cp.p0.y, cp.p1.y, cp.p2.y, cp.p3.y, t)
             let y = catmullRom(p0Y, p1Y, p2Y, p3Y, t)
 
-            return [x, y + enemy.additionalHoverOffset, z]
+            let (_, lateral, _) = pathFrame(cell: current, progress: t)
+            let off = enemy.lateralOffset
+            return [x + lateral.x * off, y + enemy.additionalHoverOffset, z + lateral.y * off]
         } else {
             return [p1Pos.x, p1Y + enemy.additionalHoverOffset, p1Pos.y]
         }

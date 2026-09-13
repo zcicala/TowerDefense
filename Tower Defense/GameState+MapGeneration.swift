@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 extension GameState {
 
@@ -6,8 +7,44 @@ extension GameState {
 
     func generateMap() {
         generatePath()
+        pregenerateTerrain()
         ringItemCount = 1
         moveTowerItemCount = 1
+    }
+
+    /// Terrain field radius (in hex steps from the origin) pregenerated at startup, so terrain
+    /// stays consistent even once new path branches are drawn over these coords later.
+    private static let pregenerationRadius = 150
+
+    /// Rolls all coords within `pregenerationRadius` of the origin into `pregeneratedTerrain`,
+    /// using the same path-proximity weighting as `rollTerrainType`. Runs once, after the path
+    /// is generated (so `nearPath` weighting matches what live spawning would produce), and the
+    /// path never changes afterward (even across `restart()`), so this stays valid all session.
+    private func pregenerateTerrain() {
+        let radius = Self.pregenerationRadius
+        pregeneratedTerrain.reserveCapacity(3 * radius * radius + 3 * radius + 1)
+        for dq in -radius...radius {
+            let rLow = max(-radius, -dq - radius)
+            let rHigh = min(radius, -dq + radius)
+            for dr in rLow...rHigh {
+                let coord = HexCoord(q: dq, r: dr)
+                pregeneratedTerrain[coord] = rollTerrainType(at: coord)
+            }
+        }
+    }
+
+    /// Rolls a terrain type for `coord` based on proximity to the path, matching the existing
+    /// rarity distribution (rock/gold/energy field are more common near the path).
+    private func rollTerrainType(at coord: HexCoord) -> TerrainType {
+        let nearPath = hexGrid.cells.values.contains {
+            ($0.type == .path || $0.type == .start) && $0.coord.distance(to: coord) <= 2
+        }
+        let roll = rng.randomFloat(in: 0..<1)
+        if nearPath {
+            return roll < 0.10 ? .rock : roll < 0.15 ? .gold : roll < 0.18 ? .energyField : .grass
+        } else {
+            return roll < 0.05 ? .gold : roll < 0.07 ? .energyField : .grass
+        }
     }
 
     /// Adds a ring of terrain tiles around the base tower (end cell) as the starting board.
@@ -127,15 +164,9 @@ extension GameState {
             terrainHeight = avg * rng.randomFloat(in: 0.80...1.20)
         }
         let cell = HexCell(coord: coord, height: terrainHeight, type: .terrain)
-        let nearPath = hexGrid.cells.values.contains {
-            ($0.type == .path || $0.type == .start) && $0.coord.distance(to: coord) <= 2
-        }
-        let roll = rng.randomFloat(in: 0..<1)
-        if nearPath {
-            cell.terrainType = roll < 0.10 ? .rock : roll < 0.15 ? .gold : .grass
-        } else {
-            cell.terrainType = roll < 0.05 ? .gold : .grass
-        }
+        // Use the pregenerated field so terrain stays deterministic once decided;
+        // fall back to a fresh roll only if this coord is outside the pregenerated radius.
+        cell.terrainType = pregeneratedTerrain[coord] ?? rollTerrainType(at: coord)
         hexGrid.addCell(cell)
         return cell
     }
@@ -252,6 +283,8 @@ extension GameState {
             case .quarry:
                 tower.maxHitPoints += farm.accumulatedHP
                 tower.hitPoints = tower.maxHitPoints
+            case .crystalStructure:
+                break  // no tower bonus — building here simply gives up its energy bonus
             }
             cell.hasFarm = false
             farms.remove(at: farmIndex)
@@ -264,6 +297,13 @@ extension GameState {
 
     func tower(at coord: HexCoord) -> Tower? {
         towers.first(where: { $0.coord == coord })
+    }
+
+    /// World position of a tower's base, for status-indicator placement.
+    func towerWorldPosition(_ tower: Tower) -> SIMD3<Float>? {
+        guard let cell = hexGrid.cell(at: tower.coord) else { return nil }
+        let pos = tower.coord.worldPosition(spacing: spacing)
+        return SIMD3(pos.x, cell.height, pos.y)
     }
 
     func farm(at coord: HexCoord) -> Farm? {
@@ -280,6 +320,7 @@ extension GameState {
         cell.hasFarm = true
         let farmType: FarmType = cell.terrainType == .gold ? .bank
                                : cell.terrainType == .rock ? .quarry
+                               : cell.terrainType == .energyField ? .crystalStructure
                                : .farm
         farms.append(Farm(coord: coord, farmType: farmType))
         return expandTerrainAround(coord: coord, count: 2)
@@ -312,6 +353,11 @@ extension GameState {
                     farm.accumulatedHP += 1
                 }
                 money += 1
+
+            case .crystalStructure:
+                // No per-round accumulation — its castle energy bonus is computed live from
+                // crystalStructureCount for as long as it stands.
+                break
             }
         }
     }
@@ -477,6 +523,8 @@ extension GameState {
             case .quarry:
                 tower.maxHitPoints += farm.accumulatedHP
                 tower.hitPoints = min(tower.hitPoints + farm.accumulatedHP, tower.maxHitPoints)
+            case .crystalStructure:
+                break  // no tower bonus — building here simply gives up its energy bonus
             }
             newCell.hasFarm = false
             farms.remove(at: farmIndex)
@@ -699,7 +747,9 @@ extension GameState {
         if let cell = addSingleTerrainTileAlongPath() {
             newCells.append(cell)
         }
-        // Every 15 rounds add a new branch spawn path
+        // Every 10 rounds add a new branch spawn path — each branch's new .start cell gets
+        // its own independent spawn timer (see spawnTimers/spawnIntervals), so this also
+        // raises total enemy throughput, not just the number of entrances.
         if round % 10 == 0 && round > 0 {
             newCells.append(contentsOf: addBranchPath())
         }
@@ -792,6 +842,8 @@ extension GameState {
         enemies.removeAll()
         projectiles.removeAll()
         bowlingBalls.removeAll()
+        spawnTimers.removeAll()
+        spawnIntervals.removeAll()
         towerPlacedCount.removeAll()
         statsTowerBuilt.removeAll()
         statsKills.removeAll()

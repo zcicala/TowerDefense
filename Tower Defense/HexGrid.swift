@@ -41,9 +41,10 @@ struct HexCoord: Hashable {
 }
 
 enum TerrainType {
-    case grass   // 80% — regular farm, damage multiplier
-    case rock    // 10% — quarry, accumulates HP for tower
-    case gold    // 10% — bank, generates gold each round
+    case grass       // regular farm, damage multiplier
+    case rock        // quarry, accumulates HP for tower
+    case gold        // bank, generates gold each round
+    case energyField // crystal structure, boosts castle energy
 }
 
 enum HexCellType {
@@ -134,9 +135,10 @@ class HexCell {
 // MARK: - Farm
 
 enum FarmType {
-    case farm    // on grass — accumulates damage multiplier for tower placed on it
-    case bank    // on gold  — generates gold each round
-    case quarry  // on rock  — accumulates HP to boost the tower placed on it
+    case farm             // on grass       — accumulates damage multiplier for tower placed on it
+    case bank             // on gold        — generates gold each round
+    case quarry           // on rock        — accumulates HP to boost the tower placed on it
+    case crystalStructure // on energyField — boosts castle max energy and energy regen while it stands
 }
 
 class Farm {
@@ -169,6 +171,8 @@ struct LaserState {
     var lockedTargetID: UUID? = nil
     var rampMultiplier: Float = 1.0  // grows 5% per 0.1s of continuous fire
     var rampTimer: Float = 0          // accumulator for ramp ticks
+    /// Snapshotted at the start of a firing cycle: 2.0 while Overcharge is active, else 1.0.
+    var overchargeDPSMultiplier: Float = 1.0
 }
 
 struct LightningState {
@@ -178,6 +182,8 @@ struct LightningState {
     var timeRemaining: Float = 0
     var chainTargetIDs: [UUID] = []  // enemies hit this cast, in bolt order
     var chainDamages: [Float] = []   // total damage dealt to each chain target (falloff already applied)
+    /// Snapshotted at the start of a firing cycle: 2.0 while Overcharge is active, else 1.0.
+    var overchargeDPSMultiplier: Float = 1.0
 }
 
 struct ConeState {
@@ -187,6 +193,8 @@ struct ConeState {
     var timeRemaining: Float = 0
     var targetCoord: HexCoord? = nil
     var lockedTargetID: UUID? = nil
+    /// Snapshotted at the start of a firing cycle: 2.0 while Overcharge is active (fire tower only), else 1.0.
+    var overchargeDPSMultiplier: Float = 1.0
 }
 
 struct SwordState {
@@ -414,6 +422,11 @@ class Tower {
     var hitPoints: Int = 5
     var maxHitPoints: Int = 5
     var isInvulnerable: Bool = false
+    /// While > 0, this tower's firing cooldown recovers at 2× (Castle "Overcharge" ability).
+    var overchargeTimer: Float = 0
+    /// While > 0, this tower is treated as invulnerable via the Castle "Invulnerability" ability,
+    /// independently of the permanent `isInvulnerable` flag owned by the invulnerable bonus tile.
+    var abilityInvulnTimer: Float = 0
     var hasSlowAura: Bool = false
     var slowedCoords: Set<HexCoord> = []
     var hasDamageAura: Bool = false
@@ -460,22 +473,31 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 126.25)
+        t.cone = ConeState(duration: 3.5, dps: 157.8125)
         return t
     }
 
     static func makeIce(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .ice,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 0, cooldown: 1.0)
+                      projectileSpeed: 0, damage: 0, cooldown: 0.6)
         t.cone = ConeState(duration: 3.0, dps: 0)
         return t
     }
 
+    /// Ice tower's slow strength, scaling linearly from 20% at level 1 to 60% at max level.
+    var iceSlowPercent: Float {
+        0.20 + (0.60 - 0.20) * Float(level - 1) / Float(Tower.maxLevel - 1)
+    }
+
+    /// Chance per second a max-level ice tower freezes an enemy solid while in its cone.
+    static let iceFreezeChancePerSecond: Float = 0.10
+    static let iceFreezeDuration: Float = 5.0
+
     static func makeSword(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .sword,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 90, cooldown: 0.84)
+                      projectileSpeed: 0, damage: 112.5, cooldown: 0.84)
         t.sword = SwordState(swingDuration: 0.28)
         return t
     }
@@ -489,8 +511,8 @@ class Tower {
     static func makeFireball(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .fireball,
                       detectionRadius: 5, fireRadius: 5,
-                      projectileSpeed: 5.0, damage: 300, cooldown: 2.5)
-        t.fireball = FireballState(splashRadius: 1, burnDuration: 2.0, burnDPS: 40.0)
+                      projectileSpeed: 5.0, damage: 375, cooldown: 2.5)
+        t.fireball = FireballState(splashRadius: 1, burnDuration: 2.0, burnDPS: 50.0)
         return t
     }
 
@@ -603,7 +625,7 @@ class Tower {
         case .projectile: return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Second Turret" : "+33% dmg, -12% cooldown"
         case .laser:      return "+33% DPS, -20% cooldown"
         case .fire:       return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
-        case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +Double Slow" : "+20% duration, -18% cooldown"
+        case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +8% slow, +10%/s Freeze Chance" : "+20% duration, -18% cooldown, +8% slow"
         case .bowler:     return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
         case .sword:      return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
         case .healer:     return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
@@ -641,9 +663,14 @@ class Enemy {
     let baseDamage: Int           // damage dealt to base tower on reaching end
     var slowTimer: Float = 0      // remaining seconds of slow effect
     var slowFactor: Float = 0.5   // speed multiplier when slowed
+    var frozen: Bool = false      // fully immobilized (max-level Ice tower proc)
+    var frozenTimer: Float = 0    // remaining seconds of freeze
     var burning: Bool = false
     var burnTimer: Float = 0      // remaining seconds of burn
     var burnDPS: Float = 10.0     // damage per second while burning
+    var poisoned: Bool = false
+    var poisonTimer: Float = 0    // remaining seconds of poison (Poison castle ability)
+    var poisonDPS: Float = 0      // damage per second while poisoned — 1% of maxHitPoints
 
     // Shield properties (only used when enemyType == .shield)
     var shieldHP: Float

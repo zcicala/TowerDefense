@@ -67,37 +67,42 @@ struct ContentView: View {
                             .frame(height: 38, alignment: .top)
                         }
                         Spacer()
-                        Button("Restart") {
-                            guard let renderer else { return }
-                            let result = gameState.restart()
-                            for id in result.towerIDs { renderer.removeTower(id: id) }
-                            renderer.removeAllTerrainCells()
-                            renderer.removeAllEnemies()
-                            renderer.removeAllProjectiles()
-                            renderer.removeAllBeams()
-                            renderer.removeAllBolts()
-                            renderer.removeAllCones()
-                            renderer.removeAllBowlingBalls()
-                            renderer.removeAllBlades()
-                            renderer.removeAllBonusIndicators()
-                            renderer.removeAllFarms()
-                            renderer.removeAllSlowAuraIndicators()
-                            renderer.removeAllDamageAuraIndicators()
-                            renderer.removeRangeHighlights()
-                            selectedTower = nil
-                            selectedCell = nil
-                            showRoundOverMessage = false
-                            showingTechTree = false
-                            // Re-add path/start/end cells that were preserved in hexGrid
-                            for cell in gameState.hexGrid.cells.values {
-                                renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                        // Restart only makes sense once the run has actually ended — the tech tree
+                        // is now also reachable mid-run (every 10 rounds), where restarting would
+                        // discard an active game.
+                        if gameState.baseTowerHP <= 0 {
+                            Button("Restart") {
+                                guard let renderer else { return }
+                                let result = gameState.restart()
+                                for id in result.towerIDs { renderer.removeTower(id: id) }
+                                renderer.removeAllTerrainCells()
+                                renderer.removeAllEnemies()
+                                renderer.removeAllProjectiles()
+                                renderer.removeAllBeams()
+                                renderer.removeAllBolts()
+                                renderer.removeAllCones()
+                                renderer.removeAllBowlingBalls()
+                                renderer.removeAllBlades()
+                                renderer.removeAllBonusIndicators()
+                                renderer.removeAllFarms()
+                                renderer.removeAllSlowAuraIndicators()
+                                renderer.removeAllDamageAuraIndicators()
+                                renderer.removeRangeHighlights()
+                                selectedTower = nil
+                                selectedCell = nil
+                                showRoundOverMessage = false
+                                showingTechTree = false
+                                // Re-add path/start/end cells that were preserved in hexGrid
+                                for cell in gameState.hexGrid.cells.values {
+                                    renderer.addTerrainCell(cell, spacing: gameState.spacing, hexRadius: gameState.hexRadius)
+                                }
+                                guard let endCell = gameState.endCell else { return }
+                                let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
+                                renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos,
+                                                          blockCount: (gameState.baseTowerMaxHP + 1) / 2)
                             }
-                            guard let endCell = gameState.endCell else { return }
-                            let pos = endCell.coord.worldPosition(spacing: gameState.spacing)
-                            renderer.rebuildBaseTower(cellHeight: endCell.height, position: pos,
-                                                      blockCount: (gameState.baseTowerMaxHP + 1) / 2)
+                            .buttonStyle(.borderedProminent).tint(.red).font(.headline)
                         }
-                        .buttonStyle(.borderedProminent).tint(.red).font(.headline)
                         Button("Close") { showingTechTree = false }
                             .buttonStyle(.bordered).font(.headline)
                     }
@@ -171,6 +176,18 @@ struct ContentView: View {
 
                     let events = gameState.update(deltaTime: dt)
 
+                    // Ability status indicators — synced every frame from live tower/enemy state
+                    for tower in gameState.towers {
+                        guard let pos = gameState.towerWorldPosition(tower) else { continue }
+                        renderer.setOverchargeIndicator(for: tower, at: pos, active: tower.overchargeTimer > 0)
+                        renderer.setInvulnerabilityIndicator(for: tower, at: pos, active: tower.abilityInvulnTimer > 0)
+                    }
+                    for enemy in gameState.enemies where enemy.active {
+                        guard let pos = gameState.enemyWorldPosition(enemy) else { continue }
+                        renderer.setFrozenIndicator(for: enemy, at: pos, active: enemy.slowed && enemy.slowFactor <= 0.01)
+                        renderer.setGravityPullIndicator(for: enemy, at: pos, active: gameState.lastGravityWellPulledIDs.contains(enemy.id))
+                    }
+
                     // Spawn new enemy entities
                     for enemy in events.spawnedEnemies {
                         if let pos = gameState.enemyWorldPosition(enemy) {
@@ -196,6 +213,8 @@ struct ContentView: View {
                     // Remove killed enemies
                     for enemy in events.killedEnemies {
                         renderer.removeShieldDome(for: enemy)
+                        renderer.removeFrozenIndicator(for: enemy)
+                        renderer.removeGravityPullIndicator(for: enemy)
                         renderer.removeEnemy(enemy)
                         if selectedEnemy?.id == enemy.id { selectedEnemy = nil }
                     }
@@ -308,6 +327,7 @@ struct ContentView: View {
                         renderer.removeBeam(for: tower)
                         renderer.removeBolt(for: tower)
                         renderer.removeCone(for: tower)
+                        renderer.removeAbilityIndicators(forTower: tower.id)
                         renderer.removeTower(id: tower.id)
                         if tower.hasSlowAura { needsAuraRefresh = true }
                         if tower.hasDamageAura { needsAuraRefresh = true }
@@ -337,6 +357,7 @@ struct ContentView: View {
                         renderer.removeAllCones()
                         renderer.removeAllBowlingBalls()
                         renderer.removeAllBlades()
+                        renderer.removeAllAbilityIndicators()
                         selectedEnemy = nil
                     }
                 }
@@ -361,6 +382,18 @@ struct ContentView: View {
             }
             .onKeyPress(.space, phases: .down) { _ in
                 gameState.togglePause()
+                return .handled
+            }
+            .onKeyPress(keys: [.init("1"), .init("2"), .init("3"), .init("4")], phases: .down) { press in
+                // Number keys cast/cancel the matching castle ability during combat.
+                guard gameState.phase == .combat,
+                      let ability = CastleAbility.allCases.first(where: { String($0.hotkey) == press.characters })
+                else { return .ignored }
+                if gameState.pendingAbility == ability {
+                    gameState.cancelPendingAbility()
+                } else {
+                    gameState.beginAbility(ability)
+                }
                 return .handled
             }
             .gesture(DragGesture()
@@ -461,6 +494,8 @@ struct ContentView: View {
                                 .cornerRadius(4)
                         }
                     }
+
+                    castleAbilityBar()
                 }
 
                 if showRoundOverMessage {
@@ -486,6 +521,20 @@ struct ContentView: View {
                         Text("Round Complete!")
                             .font(.headline)
                             .foregroundColor(.green)
+
+                        // Tech tree opens up mid-run every 10 rounds — purchases here retroactively
+                        // apply to towers already on the board (see purchase(_:) in GameState).
+                        if gameState.round % 10 == 0 {
+                            Text("Points: \(gameState.upgradePoints)")
+                                .font(.caption)
+                                .foregroundColor(.yellow)
+
+                            Button("Tech Tree") {
+                                showingTechTree = true
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.purple)
+                        }
 
                         Button("Next Round") {
                             let newCells = gameState.returnToPlacing()
@@ -718,6 +767,28 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
+            // Castle ability — pick a target to cast on
+            if let ability = gameState.pendingAbility {
+                VStack(spacing: 6) {
+                    Text("\(ability.displayName) — Select a Target")
+                        .font(.headline)
+                        .foregroundColor(.orange)
+                    Text(ability.targetPrompt)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Button("Cancel") { gameState.cancelPendingAbility() }
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(12)
+                .background(.black.opacity(0.8))
+                .cornerRadius(10)
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 60)
+            }
+
             // Target lock — pick a path cell to restrict firing to
             if isPendingTargetLock {
                 VStack(spacing: 6) {
@@ -777,6 +848,80 @@ struct ContentView: View {
     }
 
     // MARK: - Placing Phase Controls
+
+    private func abilityTint(_ ability: CastleAbility) -> Color {
+        switch ability {
+        case .overcharge:      return .orange
+        case .freeze:          return .cyan
+        case .poison:          return .green
+        case .invulnerability: return .blue
+        case .gravityWell:     return .purple
+        }
+    }
+
+    private func abilityRingColor(_ ability: CastleAbility) -> (r: Double, g: Double, b: Double) {
+        switch ability {
+        case .overcharge:      return (1.0, 0.6, 0.1)
+        case .freeze:          return (0.3, 0.85, 1.0)
+        case .poison:          return (0.25, 0.9, 0.15)
+        case .invulnerability: return (0.3, 0.55, 1.0)
+        case .gravityWell:     return (0.7, 0.3, 1.0)
+        }
+    }
+
+    /// Spawns the glowy cast-ring effect at a hex cell's world position.
+    private func spawnAbilityCastRings(ability: CastleAbility, at coord: HexCoord) {
+        guard let renderer, let cell = gameState.hexGrid.cell(at: coord) else { return }
+        let pos = coord.worldPosition(spacing: gameState.spacing)
+        renderer.createAbilityCastRings(at: SIMD3(pos.x, cell.height + 0.05, pos.y),
+                                        color: abilityRingColor(ability))
+    }
+
+    /// Poison: spawns the green particle cloud across the cast radius, matching the cloud's
+    /// own 5s lifetime (separate from how long the poison DOT lingers on an infected enemy).
+    private func spawnPoisonCloud(at coord: HexCoord) {
+        guard let renderer else { return }
+        let cells = gameState.poisonCloudCells(around: coord)
+        guard !cells.isEmpty else { return }
+        renderer.showPoisonCloud(cells: cells, spacing: gameState.spacing,
+                                 duration: TimeInterval(CastleAbility.poison.duration))
+    }
+
+    /// Combat-phase HUD row of castle ability buttons (only those unlocked by castle level),
+    /// gated by the shared castle energy pool rather than individual cooldowns.
+    @ViewBuilder
+    private func castleAbilityBar() -> some View {
+        let unlocked = CastleAbility.allCases.filter { gameState.abilityUnlocked($0) }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("⚡ \(Int(gameState.castleEnergy))/\(Int(gameState.castleMaxEnergy))")
+                .font(.caption.bold().monospacedDigit())
+                .foregroundColor(.cyan)
+            HStack(spacing: 6) {
+                ForEach(unlocked, id: \.rawValue) { ability in
+                    let isPending = gameState.pendingAbility == ability
+                    let affordable = gameState.castleEnergy >= ability.energyCost
+                    Button {
+                        if isPending {
+                            gameState.cancelPendingAbility()
+                        } else {
+                            gameState.beginAbility(ability)
+                        }
+                    } label: {
+                        VStack(spacing: 1) {
+                            Text("\(String(ability.hotkey))  \(ability.displayName)")
+                                .font(.caption2.bold())
+                            Text("⚡\(Int(ability.energyCost))")
+                                .font(.system(size: 9, design: .monospaced))
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(isPending ? .white : abilityTint(ability))
+                    .foregroundColor(isPending ? .black : .white)
+                    .disabled(!affordable || (gameState.pendingAbility != nil && !isPending))
+                }
+            }
+        }
+    }
 
     @ViewBuilder
     private func placingPhaseControls() -> some View {
@@ -1017,11 +1162,14 @@ struct ContentView: View {
             case .ice:
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        statRow("Slow", "50%", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Slow", "\(Int(tower.iceSlowPercent * 100))%", label: statFont, labelColor: labelColor, valueColor: valueColor)
                         statRow("Duration", "\(String(format: "%.1f", tower.cone?.duration ?? 0))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        if tower.level == Tower.maxLevel {
+                            statRow("Freeze", "10%/s, 5s", label: statFont, labelColor: labelColor, valueColor: .cyan)
+                        }
                     }
                 }
             case .bowler:
@@ -1195,7 +1343,11 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundColor(.orange)
                 }
-                if enemy.slowed {
+                if enemy.frozen {
+                    Label(String(format: "%.0fs", enemy.frozenTimer), systemImage: "snowflake.circle.fill")
+                        .font(.caption)
+                        .foregroundColor(.cyan)
+                } else if enemy.slowed {
                     Label(String(format: "%.0fs", enemy.slowTimer), systemImage: "snowflake")
                         .font(.caption)
                         .foregroundColor(.cyan)
@@ -1397,9 +1549,10 @@ struct ContentView: View {
         // Terrain type header
         let (terrainName, terrainColor): (String, Color) = {
             switch cell.terrainType {
-            case .grass: return ("Grass", .green)
-            case .rock:  return ("Rock", Color(red: 0.6, green: 0.55, blue: 0.5))
-            case .gold:  return ("Gold", Color(red: 1.0, green: 0.78, blue: 0.2))
+            case .grass:       return ("Grass", .green)
+            case .rock:        return ("Rock", Color(red: 0.6, green: 0.55, blue: 0.5))
+            case .gold:        return ("Gold", Color(red: 1.0, green: 0.78, blue: 0.2))
+            case .energyField: return ("Energy Field", Color(red: 0.65, green: 0.4, blue: 1.0))
             }
         }()
         HStack(spacing: 6) {
@@ -1432,9 +1585,10 @@ struct ContentView: View {
         let adjacentFarms = gameState.hexGrid.neighbors(of: farm.coord).filter { $0.hasFarm }.count
         let (title, titleColor): (String, Color) = {
             switch farm.farmType {
-            case .farm:   return ("Farm", .green)
-            case .bank:   return ("Bank", Color(red: 1.0, green: 0.78, blue: 0.2))
-            case .quarry: return ("Quarry", Color(red: 0.6, green: 0.55, blue: 0.5))
+            case .farm:             return ("Farm", .green)
+            case .bank:             return ("Bank", Color(red: 1.0, green: 0.78, blue: 0.2))
+            case .quarry:           return ("Quarry", Color(red: 0.6, green: 0.55, blue: 0.5))
+            case .crystalStructure: return ("Crystal Structure", Color(red: 0.65, green: 0.4, blue: 1.0))
             }
         }()
         Text(title)
@@ -1490,6 +1644,21 @@ struct ContentView: View {
                 .foregroundColor(.white.opacity(0.4))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
+        case .crystalStructure:
+            let bonus = 2 + adjacentFarms
+            Text("+\(bonus) max castle energy, +\(bonus)% energy regen")
+                .font(.caption)
+                .foregroundColor(Color(red: 0.65, green: 0.4, blue: 1.0))
+                .frame(maxWidth: .infinity, alignment: .center)
+            Text("Base +2\(adjacentFarms > 0 ? ", +\(adjacentFarms) from \(adjacentFarms) neighbor\(adjacentFarms == 1 ? "" : "s")" : "")")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .center)
+            Text("Placing a tower here removes it and its bonus.")
+                .font(.caption2)
+                .foregroundColor(.white.opacity(0.4))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -1532,7 +1701,7 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundColor(i < tower.hitPoints ? .red : .gray)
             }
-            if tower.isInvulnerable {
+            if tower.isInvulnerable || tower.abilityInvulnTimer > 0 {
                 Image(systemName: "shield.fill")
                     .font(.caption2)
                     .foregroundColor(.cyan)
@@ -1706,6 +1875,23 @@ struct ContentView: View {
 
     private func handleTap(entity: Entity) {
         guard let renderer else { return }
+
+        // Castle ability — resolve on the tapped target (a tower for Invuln, else a cell).
+        if let ability = gameState.pendingAbility {
+            if ability.targetsTower {
+                if let coord = renderer.coord(for: entity), let tower = gameState.tower(at: coord),
+                   gameState.castPendingAbility(onTower: tower) {
+                    spawnAbilityCastRings(ability: ability, at: coord)
+                }
+            } else if let coord = renderer.coord(for: entity),
+                      gameState.castPendingAbility(atCell: coord) {
+                spawnAbilityCastRings(ability: ability, at: coord)
+                if ability == .poison {
+                    spawnPoisonCloud(at: coord)
+                }
+            }
+            return
+        }
 
         // Manual attack lock — clicking an enemy sets it as the focused target
         if isPendingManualTarget {

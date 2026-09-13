@@ -143,6 +143,54 @@ final class TowerTests: XCTestCase {
         tower.applyUpgrade()
         XCTAssertEqual(tower.healer!.charges, 2)
     }
+
+    // MARK: Tech tree purchase — retroactive tower upgrades
+
+    func testPurchase_towerLevelUpgrade_retroactivelyUpgradesPlacedTowers() {
+        let gs = makeGameState()
+        let towerA = Tower(coord: HexCoord(q: 0, r: 0), type: .projectile)
+        let towerB = Tower(coord: HexCoord(q: 1, r: 0), type: .projectile)
+        gs.towers = [towerA, towerB]
+        gs.upgradePoints = 20
+
+        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
+        XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
+        XCTAssertEqual(towerA.level, 2)
+        XCTAssertEqual(towerB.level, 2)
+
+        XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 3)))
+        XCTAssertEqual(towerA.level, 3)
+        XCTAssertEqual(towerB.level, 3)
+    }
+
+    func testPurchase_towerLevelUpgrade_doesNotExceedPurchasedLevel() {
+        let gs = makeGameState()
+        let tower = Tower(coord: HexCoord(q: 0, r: 0), type: .projectile)
+        tower.applyUpgrade() // already at level 2 from in-run gold upgrades
+        XCTAssertEqual(tower.level, 2)
+        gs.towers = [tower]
+        gs.upgradePoints = 20
+
+        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
+        XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
+
+        // Tower was already at level 2 — purchasing the 1→2 node must not push it to 3.
+        XCTAssertEqual(tower.level, 2)
+    }
+
+    func testPurchase_towerLevelUpgrade_onlyAffectsMatchingType() {
+        let gs = makeGameState()
+        let projectileTower = Tower(coord: HexCoord(q: 0, r: 0), type: .projectile)
+        let laserTower = Tower.makeLaser(coord: HexCoord(q: 1, r: 0))
+        gs.towers = [projectileTower, laserTower]
+        gs.upgradePoints = 20
+
+        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
+        XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
+
+        XCTAssertEqual(projectileTower.level, 2)
+        XCTAssertEqual(laserTower.level, 1, "purchasing a projectile upgrade must not affect other tower types")
+    }
 }
 
 // MARK: - Combat Tests
@@ -562,20 +610,20 @@ final class CombatTests: XCTestCase {
         XCTAssertEqual(gs.tier(for: 31).act, 3)
     }
 
-    func testTier_actI_reproducesLegacyHPFormula() {
+    func testTier_actI_hpIs2Point5xLegacyFormula() {
         let gs = makeGameState()
         for round in 1...15 {
-            let expected = Float(256 + round * 102)
-            XCTAssertEqual(gs.tier(for: round).hp(atRound: round), expected, accuracy: 0.01,
+            let legacy = Float(256 + round * 102)
+            XCTAssertEqual(gs.tier(for: round).hp(atRound: round), legacy * 2.5, accuracy: 0.01,
                            "round \(round)")
         }
     }
 
-    func testTier_actI_reproducesLegacySpeedFormula() {
+    func testTier_actI_speedIsHalfLegacyFormula() {
         let gs = makeGameState()
         for round in 1...15 {
-            let expected = 1.2 + Float(round) * 0.03
-            XCTAssertEqual(gs.tier(for: round).speed(atRound: round), expected, accuracy: 0.001,
+            let legacy = 1.2 + Float(round) * 0.03
+            XCTAssertEqual(gs.tier(for: round).speed(atRound: round), legacy * 0.5, accuracy: 0.001,
                            "round \(round)")
         }
     }
@@ -585,6 +633,56 @@ final class CombatTests: XCTestCase {
         let actIISlope = gs.tier(for: 20).hpSlope
         let actISlope = gs.tier(for: 10).hpSlope
         XCTAssertLessThan(actIISlope, actISlope)
+    }
+
+    // MARK: Per-path spawn timers
+
+    func testStartRound_initializesPerPathSpawnTimers() {
+        let gs = makeGameState(pathLength: 30)
+        // Simulate a branch path's new .start cell merging into the main path partway along —
+        // mirrors what addBranchPath() produces in production.
+        let branchStart = HexCell(coord: HexCoord(q: 100, r: 0), height: 1.0, type: .start)
+        branchStart.next = pathCell(at: 5, in: gs)
+        gs.hexGrid.addCell(branchStart)
+
+        gs.startRound()
+
+        XCTAssertEqual(gs.spawnTimers.count, 2)
+        XCTAssertEqual(gs.spawnIntervals.count, 2)
+        XCTAssertNotNil(gs.spawnTimers[HexCoord(q: 0, r: 0)])
+        XCTAssertNotNil(gs.spawnTimers[HexCoord(q: 100, r: 0)])
+    }
+
+    func testUpdate_morePaths_increasesSpawnThroughput() {
+        func spawnedCount(afterSeconds seconds: Float, extraStartCells: Int, seed: UInt64) -> Int {
+            let gs = makeGameState(pathLength: 30, rng: SeededRandom(seed: seed))
+            for i in 0..<extraStartCells {
+                let branchStart = HexCell(coord: HexCoord(q: 100 + i, r: 0), height: 1.0, type: .start)
+                branchStart.next = pathCell(at: 5, in: gs)
+                gs.hexGrid.addCell(branchStart)
+            }
+            gs.round = 9  // startRound() below advances this to round 10, queuing a large enemy pool (33)
+            gs.startRound()
+
+            var elapsed: Float = 0
+            let step: Float = 0.05
+            while elapsed < seconds {
+                _ = gs.update(deltaTime: step)
+                elapsed += step
+            }
+            return gs.enemies.filter { $0.currentCell != nil }.count
+        }
+
+        // Spawn intervals are randomized per path (0.3–1.5s), so a single short sample is noisy.
+        // Average several seeds over a longer window to compare the underlying throughput rather
+        // than one run's luck.
+        let seeds: [UInt64] = [7, 11, 23, 41, 59]
+        let window: Float = 6.0
+        let singleTotal = seeds.reduce(0) { $0 + spawnedCount(afterSeconds: window, extraStartCells: 0, seed: $1) }
+        let tripleTotal = seeds.reduce(0) { $0 + spawnedCount(afterSeconds: window, extraStartCells: 2, seed: $1) }
+
+        XCTAssertGreaterThan(tripleTotal, singleTotal,
+                             "more active paths should spawn more enemies over the same time window")
     }
 
     func testStartRound_populatesEnemiesForRound1() {
@@ -620,5 +718,404 @@ final class CombatTests: XCTestCase {
         gs.useRepairItem()
         XCTAssertEqual(gs.baseTowerHP, gs.baseTowerMaxHP)
         XCTAssertEqual(gs.repairItemCount, 0)
+    }
+}
+
+// MARK: - Castle Ability Tests
+
+final class CastleAbilityTests: XCTestCase {
+
+    // MARK: Unlock gating
+
+    func testAbilityUnlocked_gatedByCastleLevel() {
+        let gs = makeGameState()
+        // Default castle level 1: only Overcharge unlocked.
+        XCTAssertTrue(gs.abilityUnlocked(.overcharge))
+        XCTAssertFalse(gs.abilityUnlocked(.freeze))
+        XCTAssertFalse(gs.abilityUnlocked(.poison))
+        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(2))
+        XCTAssertTrue(gs.abilityUnlocked(.freeze))
+        XCTAssertFalse(gs.abilityUnlocked(.poison))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(3))
+        XCTAssertTrue(gs.abilityUnlocked(.poison))
+        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(4))
+        XCTAssertTrue(gs.abilityUnlocked(.invulnerability))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+    }
+
+    func testBeginAbility_requiresCombatUnlockedAndReady() {
+        let gs = makeGameState()
+        gs.phase = .placing
+        XCTAssertFalse(gs.beginAbility(.overcharge), "cannot cast outside combat")
+
+        gs.phase = .combat
+        XCTAssertFalse(gs.beginAbility(.freeze), "locked ability cannot begin")
+        XCTAssertTrue(gs.beginAbility(.overcharge))
+        XCTAssertEqual(gs.pendingAbility, .overcharge)
+
+        // Already pending: a second begin is rejected.
+        XCTAssertFalse(gs.beginAbility(.overcharge))
+        gs.cancelPendingAbility()
+        XCTAssertNil(gs.pendingAbility)
+
+        // Not enough energy: not ready.
+        gs.castleEnergy = 0
+        XCTAssertFalse(gs.beginAbility(.overcharge))
+    }
+
+    // MARK: Overcharge
+
+    func testOvercharge_affectsCellAndNeighborsOnly_andSpendsEnergy() {
+        let gs = makeGameState(pathLength: 6)
+        let towerOn = Tower(coord: HexCoord(q: 2, r: 0))
+        let towerAdjA = Tower(coord: HexCoord(q: 1, r: 0))   // distance 1
+        let towerAdjB = Tower(coord: HexCoord(q: 3, r: 0))   // distance 1
+        let towerFar = Tower(coord: HexCoord(q: 4, r: 0))    // distance 2
+        gs.towers.append(contentsOf: [towerOn, towerAdjA, towerAdjB, towerFar])
+
+        let energyBefore = gs.castleEnergy
+        gs.pendingAbility = .overcharge
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 2, r: 0)))
+
+        XCTAssertEqual(towerOn.overchargeTimer, CastleAbility.overcharge.duration, accuracy: 0.001)
+        XCTAssertEqual(towerAdjA.overchargeTimer, CastleAbility.overcharge.duration, accuracy: 0.001)
+        XCTAssertEqual(towerAdjB.overchargeTimer, CastleAbility.overcharge.duration, accuracy: 0.001)
+        XCTAssertEqual(towerFar.overchargeTimer, 0, accuracy: 0.001)
+
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.overcharge.energyCost, accuracy: 0.001)
+        XCTAssertNil(gs.pendingAbility)
+    }
+
+    func testOvercharge_doublesCooldownRecovery() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        // Keep an active enemy so the round doesn't immediately end; place it out of fire range.
+        _ = makeActiveEnemy(hp: 1000, atCell: 3, in: gs)
+
+        let boosted = Tower(coord: HexCoord(q: 0, r: 0), detectionRadius: 1, fireRadius: 1, cooldown: 2.0)
+        boosted.cooldownRemaining = 2.0
+        boosted.overchargeTimer = 3.0
+        let control = Tower(coord: HexCoord(q: 5, r: 0), detectionRadius: 1, fireRadius: 1, cooldown: 2.0)
+        control.cooldownRemaining = 2.0
+        gs.towers.append(contentsOf: [boosted, control])
+
+        _ = gs.update(deltaTime: 0.1)
+
+        XCTAssertEqual(boosted.cooldownRemaining, 1.8, accuracy: 0.01, "overcharged tower recovers at 2×")
+        XCTAssertEqual(control.cooldownRemaining, 1.9, accuracy: 0.01, "normal tower recovers at 1×")
+    }
+
+    // MARK: Freeze
+
+    func testFreeze_freezesCellAndNeighbors_notFarEnemies() {
+        let gs = makeGameState(pathLength: 6)
+        let onCell = makeActiveEnemy(atCell: 2, in: gs)     // (2,0)
+        let neighbor = makeActiveEnemy(atCell: 3, in: gs)   // (3,0), distance 1
+        let far = makeActiveEnemy(atCell: 4, in: gs)        // (4,0), distance 2
+
+        gs.pendingAbility = .freeze
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 2, r: 0)))
+
+        XCTAssertTrue(onCell.slowed)
+        XCTAssertEqual(onCell.slowFactor, 0, accuracy: 0.001, "freeze fully stops the enemy")
+        XCTAssertTrue(neighbor.slowed)
+        XCTAssertEqual(neighbor.slowFactor, 0, accuracy: 0.001)
+        XCTAssertFalse(far.slowed)
+    }
+
+    // MARK: Invulnerability
+
+    func testInvulnerability_protectsTowerFromExploder() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        let tower = Tower(coord: HexCoord(q: 1, r: 0))
+        tower.hitPoints = 5
+        gs.towers.append(tower)
+
+        gs.pendingAbility = .invulnerability
+        XCTAssertTrue(gs.castPendingAbility(onTower: tower))
+        XCTAssertEqual(tower.abilityInvulnTimer, CastleAbility.invulnerability.duration, accuracy: 0.001)
+
+        killExploderAdjacent(to: tower, at: 2, in: gs)
+        XCTAssertEqual(tower.hitPoints, 5, "invulnerable tower takes no exploder damage")
+    }
+
+    func testInvulnerability_expiresAndTowerBecomesVulnerable() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        let tower = Tower(coord: HexCoord(q: 1, r: 0))
+        tower.hitPoints = 5
+        gs.towers.append(tower)
+        // Keep a stationary out-of-range enemy so the round doesn't end while we advance time.
+        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 3, in: gs)
+
+        gs.pendingAbility = .invulnerability
+        _ = gs.castPendingAbility(onTower: tower)
+
+        // Advance beyond the 5s duration.
+        for _ in 0..<60 { _ = gs.update(deltaTime: 0.1) }
+        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+
+        killExploderAdjacent(to: tower, at: 2, in: gs)
+        XCTAssertLessThan(tower.hitPoints, 5, "once invuln expires the tower takes exploder damage")
+    }
+
+    /// Spawns an exploder adjacent to `tower` and kills it via a completed projectile so the
+    /// exploder-death damage pass runs inside `update`.
+    private func killExploderAdjacent(to tower: Tower, at cellIndex: Int, in gs: GameState) {
+        let exploder = Enemy(type: .exploder, hitPoints: 1, speed: 0,
+                             explosionRadius: 1, explosionDamage: 1)
+        exploder.currentCell = pathCell(at: cellIndex, in: gs)
+        exploder.active = true
+        gs.enemies.append(exploder)
+
+        let projectile = Projectile(
+            origin: SIMD3<Float>(0, 0, 0),
+            target: SIMD3<Float>(0, 0, 0),
+            totalFlightTime: 0.01,
+            damage: 100,
+            targetEnemyID: exploder.id
+        )
+        projectile.elapsed = projectile.totalFlightTime
+        gs.projectiles.append(projectile)
+
+        _ = gs.update(deltaTime: 0.05)
+        XCTAssertFalse(exploder.active, "exploder should have died from the projectile")
+    }
+
+    // MARK: Gravity Well
+
+    func testGravityWell_pullsEnemyTowardTile() {
+        let gs = makeGameState(pathLength: 8)
+        gs.phase = .combat
+        // High HP so the base sentinel doesn't kill it mid-pull.
+        let enemy = makeActiveEnemy(hp: 5000, atCell: 5, in: gs)   // (5,0)
+
+        gs.pendingAbility = .gravityWell
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 3, r: 0)))
+        XCTAssertEqual(gs.gravityWellTimer, CastleAbility.gravityWell.duration, accuracy: 0.001)
+
+        // Advance within the well's duration.
+        for _ in 0..<25 { _ = gs.update(deltaTime: 0.1) }
+
+        let q = enemy.currentCell?.coord.q ?? -1
+        XCTAssertLessThan(q, 5, "enemy should be pulled back from (5,0) toward the well at (3,0)")
+        XCTAssertGreaterThanOrEqual(q, 3, "enemy should not be pulled past the well tile")
+    }
+
+    // MARK: Poison
+
+    func testCastPoison_spendsEnergyAndClearsPending() {
+        let gs = makeGameState()
+        let energyBefore = gs.castleEnergy
+        gs.pendingAbility = .poison
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 0, r: 0)))
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.poison.energyCost, accuracy: 0.001)
+        XCTAssertNil(gs.pendingAbility)
+    }
+
+    func testCastPoison_opensCloudAtCoordWithFullDuration() {
+        let gs = makeGameState()
+        gs.pendingAbility = .poison
+        let coord = HexCoord(q: 2, r: 0)
+        XCTAssertTrue(gs.castPendingAbility(atCell: coord))
+        XCTAssertEqual(gs.poisonCloudCoord, coord)
+        XCTAssertEqual(gs.poisonCloudTimer, CastleAbility.poison.duration, accuracy: 0.001)
+    }
+
+    func testPoisonCloudCells_returnsExistingCellsWithinRadius() {
+        let gs = makeGameState(pathLength: 10)
+        let center = pathCell(at: 5, in: gs)!.coord
+
+        let cells = gs.poisonCloudCells(around: center)
+        let coords = Set(cells.map { $0.coord })
+
+        XCTAssertTrue(coords.contains(center))
+        XCTAssertTrue(coords.contains(HexCoord(q: 3, r: 0)), "distance 2 — inside the radius")
+        XCTAssertTrue(coords.contains(HexCoord(q: 7, r: 0)), "distance 2 — inside the radius")
+        XCTAssertFalse(coords.contains(HexCoord(q: 2, r: 0)), "distance 3 — outside the radius")
+        XCTAssertFalse(coords.contains(HexCoord(q: 8, r: 0)), "distance 3 — outside the radius")
+    }
+
+    func testUpdatePoisonCloud_infectsEnemyWithinRadius() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(hp: 1000, atCell: 5, in: gs)
+        gs.pendingAbility = .poison
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 5, r: 0)))
+
+        gs.updatePoisonCloud(deltaTime: 0.1)
+
+        XCTAssertTrue(enemy.poisoned)
+        XCTAssertEqual(enemy.poisonTimer, gs.poisonDOTDuration, accuracy: 0.001)
+        XCTAssertEqual(enemy.poisonDPS, enemy.maxHitPoints * 0.01, accuracy: 0.001)
+    }
+
+    func testUpdatePoisonCloud_ignoresEnemyOutsideRadius() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(hp: 1000, atCell: 9, in: gs)
+        gs.pendingAbility = .poison
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 0, r: 0)))
+
+        gs.updatePoisonCloud(deltaTime: 0.1)
+
+        XCTAssertFalse(enemy.poisoned)
+    }
+
+    func testUpdatePoisonCloud_expiresAfterDuration() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        gs.pendingAbility = .poison
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 5, r: 0)))
+
+        gs.updatePoisonCloud(deltaTime: CastleAbility.poison.duration + 0.1)
+
+        XCTAssertNil(gs.poisonCloudCoord)
+        XCTAssertEqual(gs.poisonCloudTimer, 0, accuracy: 0.001)
+    }
+
+    func testPoisonDOT_dealsOnePercentOfMaxHPPerSecond_viaRealUpdateLoop() {
+        let gs = makeGameState(pathLength: 30)  // long path so the enemy can't reach the end
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(hp: 1000, speed: 0, atCell: 5, in: gs)
+        gs.pendingAbility = .poison
+        XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 5, r: 0)))
+
+        // 1 second of ticking, well within the cloud's own 5s lifetime.
+        for _ in 0..<10 { _ = gs.update(deltaTime: 0.1) }
+
+        XCTAssertTrue(enemy.poisoned)
+        let expectedDamage = enemy.maxHitPoints * 0.01  // 1% per second
+        XCTAssertEqual(1000 - enemy.hitPoints, expectedDamage, accuracy: expectedDamage * 0.15)
+    }
+
+    func testPregenerateTerrain_fillsFieldAroundOrigin_afterGenerateMap() {
+        let gs = GameState(rng: RandomSource())
+        XCTAssertTrue(gs.pregeneratedTerrain.isEmpty)
+        gs.generateMap()
+        XCTAssertFalse(gs.pregeneratedTerrain.isEmpty)
+        XCTAssertNotNil(gs.pregeneratedTerrain[HexCoord(q: 0, r: 0)])
+        XCTAssertNotNil(gs.pregeneratedTerrain[HexCoord(q: 10, r: -5)])
+    }
+
+    // MARK: Round reset
+
+    func testResetAbilities_refillsEnergyAndClearsTimers() {
+        let gs = makeGameState()
+        let tower = Tower(coord: HexCoord(q: 0, r: 0))
+        tower.overchargeTimer = 2
+        tower.abilityInvulnTimer = 4
+        gs.towers.append(tower)
+        gs.castleEnergy = 3
+        gs.pendingAbility = .freeze
+        gs.gravityWellCoord = HexCoord(q: 1, r: 0)
+        gs.gravityWellTimer = 3
+
+        gs.resetAbilities()
+
+        XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001)
+        XCTAssertNil(gs.pendingAbility)
+        XCTAssertNil(gs.gravityWellCoord)
+        XCTAssertEqual(gs.gravityWellTimer, 0, accuracy: 0.001)
+        XCTAssertEqual(tower.overchargeTimer, 0, accuracy: 0.001)
+        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+    }
+
+    func testStartRound_refillsCastleEnergy() {
+        let gs = makeGameState()
+        gs.phase = .placing
+        gs.castleEnergy = 2
+        gs.startRound()
+        XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001, "energy refills at the start of each round")
+    }
+
+    // MARK: Castle Energy
+
+    func testCastleEnergy_regeneratesOverTimeUpToMax() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 3, in: gs)
+        gs.castleEnergy = 18
+
+        _ = gs.update(deltaTime: 1.0)
+        XCTAssertEqual(gs.castleEnergy, 19, accuracy: 0.01, "regenerates 1 energy/sec at 0 crystals")
+
+        _ = gs.update(deltaTime: 5.0)
+        XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001, "never exceeds max energy")
+    }
+
+    // MARK: Crystal Structures
+
+    /// Adds an Energy Field terrain cell and places a farm on it, returning the resulting Farm.
+    @discardableResult
+    private func makeCrystalStructure(at coord: HexCoord, in gs: GameState) -> Farm? {
+        let cell = HexCell(coord: coord, height: 1.0, type: .terrain)
+        cell.terrainType = .energyField
+        gs.hexGrid.addCell(cell)
+        gs.purchasedTechNodes.insert(.farmUnlock)
+        gs.phase = .placing
+        _ = gs.placeFarm(at: coord)
+        return gs.farm(at: coord)
+    }
+
+    func testPlaceFarm_onEnergyField_createsCrystalStructure() {
+        let gs = makeGameState(pathLength: 6)
+        let farm = makeCrystalStructure(at: HexCoord(q: 10, r: 10), in: gs)
+        XCTAssertEqual(farm?.farmType, .crystalStructure)
+    }
+
+    func testCrystalStructure_baseBonusIsTwoPerStructure_whenNotAdjacentToAnyFarm() {
+        let gs = makeGameState(pathLength: 6)
+        XCTAssertEqual(gs.castleMaxEnergy, 20, accuracy: 0.001)
+        XCTAssertEqual(gs.castleEnergyRegenRate, 1.0, accuracy: 0.001)
+
+        // Far apart — not adjacent to each other or anything else.
+        makeCrystalStructure(at: HexCoord(q: 10, r: 10), in: gs)
+        makeCrystalStructure(at: HexCoord(q: 30, r: 30), in: gs)
+
+        XCTAssertEqual(gs.crystalStructureCount, 2)
+        XCTAssertEqual(gs.castleMaxEnergy, 24, accuracy: 0.001, "+2 max energy per crystal structure with no adjacent farms")
+        XCTAssertEqual(gs.castleEnergyRegenRate, 1.04, accuracy: 0.001, "+2% regen rate per crystal structure with no adjacent farms")
+    }
+
+    func testCrystalStructure_adjacentFarm_addsOneMoreToEachBonus() {
+        let gs = makeGameState(pathLength: 6)
+        let crystalCoord = HexCoord(q: 10, r: 10)
+        makeCrystalStructure(at: crystalCoord, in: gs)
+        XCTAssertEqual(gs.castleMaxEnergy, 22, accuracy: 0.001, "base +2 with no neighbors yet")
+
+        // Place a plain farm directly adjacent to the crystal structure.
+        let neighborCoord = crystalCoord.neighbor(0)
+        let neighborCell = HexCell(coord: neighborCoord, height: 1.0, type: .terrain)
+        gs.hexGrid.addCell(neighborCell)
+        _ = gs.placeFarm(at: neighborCoord)
+
+        XCTAssertEqual(gs.castleMaxEnergy, 23, accuracy: 0.001, "+1 more max energy for the adjacent farm")
+        XCTAssertEqual(gs.castleEnergyRegenRate, 1.03, accuracy: 0.001, "+1% more regen for the adjacent farm")
+    }
+
+    func testPlaceTower_onCrystalStructure_consumesItWithNoTowerBonus() {
+        let gs = makeGameState(pathLength: 6)
+        let coord = HexCoord(q: 10, r: 10)
+        makeCrystalStructure(at: coord, in: gs)
+        XCTAssertEqual(gs.crystalStructureCount, 1)
+
+        gs.phase = .placing
+        gs.purchasedTechNodes.insert(.towerUnlock(.projectile))
+        gs.selectedTowerType = .projectile
+        gs.money = 10000
+        let result = gs.placeTower(at: coord)
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(gs.crystalStructureCount, 0, "placing a tower consumes the crystal structure")
+        XCTAssertNil(gs.farm(at: coord))
+        XCTAssertEqual(gs.castleMaxEnergy, 20, accuracy: 0.001, "energy bonus is lost with the crystal")
     }
 }

@@ -386,6 +386,57 @@ class SceneRenderer {
                 materials: [mat(0.30, 0.28, 0.32)]))
             post.position = [0, 0.15, 0]
             root.addChild(post)
+
+        case .crystalStructure:
+            func crystalMat(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> UnlitMaterial {
+                UnlitMaterial(color: .init(red: r, green: g, blue: b, alpha: 1))
+            }
+
+            // Dark pedestal
+            let base = Entity()
+            base.components.set(ModelComponent(
+                mesh: .generateBox(width: 0.5, height: 0.04, depth: 0.5),
+                materials: [mat(0.16, 0.13, 0.20)]))
+            base.position = [0, 0.02, 0]
+            root.addChild(base)
+
+            // Cluster of angular glowing crystal shards
+            let shards: [(x: Float, z: Float, h: Float, w: Float, angle: Float)] = [
+                (0.00,  0.00, 0.32, 0.09,  0.0),
+                (0.12,  0.08, 0.22, 0.07,  0.4),
+                (-0.11, 0.06, 0.20, 0.07, -0.5),
+                (0.06, -0.12, 0.18, 0.06,  0.9),
+                (-0.08, -0.10, 0.16, 0.06, -0.8),
+            ]
+            for shard in shards {
+                let crystal = Entity()
+                crystal.components.set(ModelComponent(
+                    mesh: .generateBox(width: shard.w, height: shard.h, depth: shard.w, cornerRadius: shard.w * 0.3),
+                    materials: [crystalMat(0.55, 0.35, 0.95)]))
+                crystal.position = [shard.x, 0.04 + shard.h / 2, shard.z]
+                crystal.orientation = simd_quatf(angle: shard.angle, axis: [0.2, 1, 0.1])
+                root.addChild(crystal)
+            }
+
+            // Glow particles rising off the cluster
+            var emitter = ParticleEmitterComponent()
+            emitter.emitterShape = .torus
+            emitter.emitterShapeSize = [0.18, 0.02, 0.18]
+            emitter.speed = 0.15
+            emitter.speedVariation = 0.05
+            emitter.mainEmitter.birthRate = 30
+            emitter.mainEmitter.lifeSpan = 1.0
+            emitter.mainEmitter.size = 0.035
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 0.75, green: 0.45, blue: 1.0, alpha: 0.9)),
+                end: .single(.init(red: 0.4, green: 0.2, blue: 0.8, alpha: 0.0))
+            )
+            emitter.mainEmitter.blendMode = .additive
+            emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+            let glow = Entity()
+            glow.components.set(emitter)
+            glow.position = [0, 0.25, 0]
+            root.addChild(glow)
         }
 
         content.add(root)
@@ -1594,6 +1645,266 @@ class SceneRenderer {
         removeAllShieldDomes()
     }
 
+    /// A pair of quick, glowy rings that radiate outward from a castle ability's cast point.
+    func createAbilityCastRings(at position: SIMD3<Float>, color: (r: Double, g: Double, b: Double)) {
+        guard content != nil else { return }
+
+        func spawnRing(startRadius: Float) {
+            guard let content else { return }
+            var emitter = ParticleEmitterComponent()
+            emitter.emitterShape = .torus
+            emitter.emitterShapeSize = [startRadius, 0.02, startRadius]
+            emitter.speed = 3.2
+            emitter.speedVariation = 0.3
+            emitter.mainEmitter.birthRate = 900
+            emitter.mainEmitter.lifeSpan = 0.35
+            emitter.mainEmitter.lifeSpanVariation = 0.05
+            emitter.mainEmitter.size = 0.06
+            emitter.mainEmitter.sizeVariation = 0.02
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: CGFloat(color.r), green: CGFloat(color.g), blue: CGFloat(color.b), alpha: 1.0)),
+                end: .single(.init(red: CGFloat(color.r), green: CGFloat(color.g), blue: CGFloat(color.b), alpha: 0.0))
+            )
+            emitter.mainEmitter.blendMode = .additive
+            emitter.timing = .once(warmUp: 0, emit: .init(duration: 0.05))
+
+            let entity = Entity()
+            entity.components.set(emitter)
+            entity.position = position
+            content.add(entity)
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(0.6))
+                entity.removeFromParent()
+            }
+        }
+
+        spawnRing(startRadius: 0.12)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(0.09))
+            spawnRing(startRadius: 0.22)
+        }
+    }
+
+    /// Shows a green particle cloud over every cell within the Poison ability's cast radius,
+    /// auto-removed after `duration` (the cloud's own lifetime — see `showSlowAuraIndicator`
+    /// for the sibling per-cell torus-emitter pattern this follows).
+    func showPoisonCloud(cells: [(coord: HexCoord, height: Float)], spacing: Float, duration: TimeInterval) {
+        guard let content else { return }
+        var entities: [Entity] = []
+        for (coord, height) in cells {
+            let pos = coord.worldPosition(spacing: spacing)
+            var emitter = ParticleEmitterComponent()
+            emitter.emitterShape = .torus
+            emitter.emitterShapeSize = [0.3, 0.06, 0.3]
+            emitter.speed = 0.3
+            emitter.speedVariation = 0.1
+            emitter.mainEmitter.birthRate = 60
+            emitter.mainEmitter.lifeSpan = 1.4
+            emitter.mainEmitter.size = 0.1
+            emitter.mainEmitter.sizeVariation = 0.03
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 0.25, green: 0.9, blue: 0.15, alpha: 0.9)),
+                end:   .single(.init(red: 0.1, green: 0.5, blue: 0.05, alpha: 0.0))
+            )
+            emitter.mainEmitter.blendMode = .additive
+            emitter.timing = .repeating(warmUp: 0, emit: .init(duration: duration), idle: .init(duration: 0))
+
+            let entity = Entity()
+            entity.components.set(emitter)
+            entity.position = SIMD3(pos.x, height + 0.1, pos.y)
+            content.add(entity)
+            entities.append(entity)
+        }
+        guard !entities.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(duration))
+            for entity in entities { entity.removeFromParent() }
+        }
+    }
+
+    // MARK: - Ability Status Indicators
+    //
+    // Persistent per-entity indicators that stay visible for as long as a tower or enemy
+    // is affected by a castle ability. Each is a simple create-if-missing / remove-if-inactive
+    // toggle driven every frame from live `Tower`/`Enemy` state, mirroring the shield-dome pattern.
+
+    private var overchargeIndicatorEntities: [UUID: Entity] = [:]
+    private var invulnerabilityIndicatorEntities: [UUID: Entity] = [:]
+    private var frozenIndicatorEntities: [UUID: Entity] = [:]
+    private var gravityPullIndicatorEntities: [UUID: Entity] = [:]
+
+    private func makeOverchargeIndicator(at position: SIMD3<Float>) -> Entity {
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .torus
+        emitter.emitterShapeSize = [0.22, 0.03, 0.22]
+        emitter.speed = 0.15
+        emitter.speedVariation = 0.05
+        emitter.mainEmitter.birthRate = 90
+        emitter.mainEmitter.lifeSpan = 0.4
+        emitter.mainEmitter.size = 0.05
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 1.0, green: 0.7, blue: 0.15, alpha: 1.0)),
+            end: .single(.init(red: 1.0, green: 0.4, blue: 0.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = SIMD3(position.x, position.y + 0.3, position.z)
+        return entity
+    }
+
+    /// Shows or hides the orange spark ring above a tower while Overcharge is active on it.
+    func setOverchargeIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
+        if active {
+            if let entity = overchargeIndicatorEntities[tower.id] {
+                entity.position = SIMD3(position.x, position.y + 0.3, position.z)
+            } else if let content {
+                let entity = makeOverchargeIndicator(at: position)
+                content.add(entity)
+                overchargeIndicatorEntities[tower.id] = entity
+            }
+        } else {
+            overchargeIndicatorEntities[tower.id]?.removeFromParent()
+            overchargeIndicatorEntities.removeValue(forKey: tower.id)
+        }
+    }
+
+    private func makeInvulnerabilityShell(at position: SIMD3<Float>) -> Entity {
+        let mesh = MeshResource.generateSphere(radius: 0.32)
+        var material = UnlitMaterial(color: .init(red: 0.3, green: 0.55, blue: 1.0, alpha: 0.28))
+        material.blending = .transparent(opacity: .init(floatLiteral: 0.28))
+
+        let entity = Entity()
+        entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
+        entity.position = SIMD3(position.x, position.y + 0.2, position.z)
+        return entity
+    }
+
+    /// Shows or hides the translucent blue shield shell while a tower is ability-invulnerable.
+    func setInvulnerabilityIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
+        if active {
+            if let entity = invulnerabilityIndicatorEntities[tower.id] {
+                entity.position = SIMD3(position.x, position.y + 0.2, position.z)
+            } else if let content {
+                let entity = makeInvulnerabilityShell(at: position)
+                content.add(entity)
+                invulnerabilityIndicatorEntities[tower.id] = entity
+            }
+        } else {
+            invulnerabilityIndicatorEntities[tower.id]?.removeFromParent()
+            invulnerabilityIndicatorEntities.removeValue(forKey: tower.id)
+        }
+    }
+
+    private func makeFrozenIndicator(at position: SIMD3<Float>) -> Entity {
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .sphere
+        emitter.emitterShapeSize = [0.18, 0.18, 0.18]
+        emitter.speed = 0.05
+        emitter.speedVariation = 0.03
+        emitter.mainEmitter.birthRate = 40
+        emitter.mainEmitter.lifeSpan = 0.6
+        emitter.mainEmitter.size = 0.04
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 0.75, green: 0.92, blue: 1.0, alpha: 0.9)),
+            end: .single(.init(red: 0.6, green: 0.85, blue: 1.0, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = position
+        return entity
+    }
+
+    /// Shows or hides the frost sparkle around an enemy held by Freeze.
+    func setFrozenIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
+        if active {
+            if let entity = frozenIndicatorEntities[enemy.id] {
+                entity.position = position
+            } else if let content {
+                let entity = makeFrozenIndicator(at: position)
+                content.add(entity)
+                frozenIndicatorEntities[enemy.id] = entity
+            }
+        } else {
+            frozenIndicatorEntities[enemy.id]?.removeFromParent()
+            frozenIndicatorEntities.removeValue(forKey: enemy.id)
+        }
+    }
+
+    func removeFrozenIndicator(for enemy: Enemy) {
+        frozenIndicatorEntities[enemy.id]?.removeFromParent()
+        frozenIndicatorEntities.removeValue(forKey: enemy.id)
+    }
+
+    private func makeGravityPullIndicator(at position: SIMD3<Float>) -> Entity {
+        var emitter = ParticleEmitterComponent()
+        emitter.emitterShape = .torus
+        emitter.emitterShapeSize = [0.16, 0.02, 0.16]
+        emitter.speed = 0.1
+        emitter.speedVariation = 0.05
+        emitter.mainEmitter.birthRate = 70
+        emitter.mainEmitter.lifeSpan = 0.5
+        emitter.mainEmitter.size = 0.045
+        emitter.mainEmitter.color = .evolving(
+            start: .single(.init(red: 0.75, green: 0.35, blue: 1.0, alpha: 0.9)),
+            end: .single(.init(red: 0.45, green: 0.1, blue: 0.7, alpha: 0.0))
+        )
+        emitter.mainEmitter.blendMode = .additive
+        emitter.timing = .repeating(warmUp: 0, emit: .init(duration: 1.0), idle: .init(duration: 0))
+
+        let entity = Entity()
+        entity.components.set(emitter)
+        entity.position = position
+        return entity
+    }
+
+    /// Shows or hides the purple swirl around an enemy currently held by Gravity Well.
+    func setGravityPullIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
+        if active {
+            if let entity = gravityPullIndicatorEntities[enemy.id] {
+                entity.position = position
+            } else if let content {
+                let entity = makeGravityPullIndicator(at: position)
+                content.add(entity)
+                gravityPullIndicatorEntities[enemy.id] = entity
+            }
+        } else {
+            gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
+            gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+        }
+    }
+
+    func removeGravityPullIndicator(for enemy: Enemy) {
+        gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
+        gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+    }
+
+    /// Removes all per-tower ability indicators (called when a tower is destroyed).
+    func removeAbilityIndicators(forTower id: UUID) {
+        overchargeIndicatorEntities[id]?.removeFromParent()
+        overchargeIndicatorEntities.removeValue(forKey: id)
+        invulnerabilityIndicatorEntities[id]?.removeFromParent()
+        invulnerabilityIndicatorEntities.removeValue(forKey: id)
+    }
+
+    /// Removes all per-enemy and per-tower ability indicators (called on round-over cleanup).
+    func removeAllAbilityIndicators() {
+        for (_, entity) in overchargeIndicatorEntities { entity.removeFromParent() }
+        overchargeIndicatorEntities.removeAll()
+        for (_, entity) in invulnerabilityIndicatorEntities { entity.removeFromParent() }
+        invulnerabilityIndicatorEntities.removeAll()
+        for (_, entity) in frozenIndicatorEntities { entity.removeFromParent() }
+        frozenIndicatorEntities.removeAll()
+        for (_, entity) in gravityPullIndicatorEntities { entity.removeFromParent() }
+        gravityPullIndicatorEntities.removeAll()
+    }
+
     // MARK: - Projectiles
 
     private var projectileEntities: [UUID: Entity] = [:]
@@ -1741,6 +2052,10 @@ class SceneRenderer {
                 tint = SimpleMaterial.Color(red: CGFloat(0.70 + 0.12 * t),
                                             green: CGFloat(0.56 + 0.10 * t),
                                             blue: CGFloat(0.14), alpha: 1)
+            case .energyField:
+                tint = SimpleMaterial.Color(red: CGFloat(0.30 + 0.08 * t),
+                                            green: CGFloat(0.14 + 0.05 * t),
+                                            blue: CGFloat(0.52 + 0.14 * t), alpha: 1)
             }
         }
         material.baseColor = CustomMaterial.BaseColor(tint: tint)

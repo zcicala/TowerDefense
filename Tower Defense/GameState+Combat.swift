@@ -12,25 +12,45 @@ extension GameState {
         isPaused.toggle()
     }
 
+    /// Overcharge timing for a dps-style tower (Laser, Fire, Lightning) starting a new firing
+    /// cycle: while overcharged the cycle is compressed to half its normal duration at double
+    /// dps, so total damage per cycle is unchanged but delivered twice as fast.
+    private func overchargeFiringParams(for tower: Tower, baseDuration: Float) -> (dpsMultiplier: Float, duration: Float) {
+        guard tower.overchargeTimer > 0 else { return (1.0, baseDuration) }
+        return (2.0, baseDuration * 0.5)
+    }
+
     func update(deltaTime: Float) -> GameEvents {
         guard phase == .combat && !isPaused else { return GameEvents() }
 
         var events = GameEvents()
 
-        // Spawn enemies
-        spawnTimer += deltaTime
-        let spawnedCount = enemies.filter { $0.currentCell != nil }.count
-        let startCells = hexGrid.cells.values.filter { $0.type == .start }
+        // Regenerate castle energy
+        tickCastleEnergy(deltaTime: deltaTime)
 
-        if spawnedCount < enemies.count && spawnTimer >= spawnInterval {
-            spawnTimer = 0
-            spawnInterval = rng.randomFloat(in: 0.5...1.5)
-            if let enemy = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
-                enemy.currentCell = rng.randomElement(startCells)
-                enemy.progress = 0
-                enemy.active = true
-                events.spawnedEnemies.append(enemy)
+        // Spawn enemies — each path (start cell) ticks its own independent timer, so
+        // additional branch paths (opened every 10 rounds) raise total spawn throughput
+        // rather than just diversifying which entrance a shared spawn stream uses.
+        // Sorted for a stable, seed-reproducible processing/RNG-draw order (see startRound()).
+        let startCells = hexGrid.cells.values.filter { $0.type == .start }
+            .sorted { ($0.coord.q, $0.coord.r) < ($1.coord.q, $1.coord.r) }
+        for startCell in startCells {
+            var timer = spawnTimers[startCell.coord, default: 0] + deltaTime
+            let interval = spawnIntervals[startCell.coord] ?? rng.randomFloat(in: 0.5...1.5)
+            spawnIntervals[startCell.coord] = interval
+
+            let spawnedCount = enemies.filter { $0.currentCell != nil }.count
+            if spawnedCount < enemies.count && timer >= interval {
+                timer = 0
+                spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
+                if let enemy = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
+                    enemy.currentCell = startCell
+                    enemy.progress = 0
+                    enemy.active = true
+                    events.spawnedEnemies.append(enemy)
+                }
             }
+            spawnTimers[startCell.coord] = timer
         }
 
         // Regenerate shields
@@ -49,7 +69,14 @@ extension GameState {
         // Warden aura: buffs nearby enemies' resistances while a warden is alive and in range
         applyWardenAura()
 
-        // Move enemies and apply burn DOT
+        // Gravity Well: pull affected enemies toward the well tile; their normal movement is skipped.
+        let pulledByWell = updateGravityWell(deltaTime: deltaTime)
+        lastGravityWellPulledIDs = pulledByWell
+
+        // Poison Cloud: infects (or refreshes) any enemy currently standing in an active cloud.
+        updatePoisonCloud(deltaTime: deltaTime)
+
+        // Move enemies and apply burn/poison DOT
         for enemy in enemies where enemy.active {
             // Burn damage tick
             if enemy.burning {
@@ -64,7 +91,22 @@ extension GameState {
                 }
             }
 
-            if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
+            // Poison damage tick
+            if enemy.poisoned {
+                enemy.poisonTimer -= deltaTime
+                if enemy.poisonTimer <= 0 {
+                    enemy.poisoned = false
+                    enemy.poisonTimer = 0
+                } else {
+                    if dealDamage(enemy.poisonDPS * deltaTime, to: enemy, events: &events) {
+                        continue
+                    }
+                }
+            }
+
+            if pulledByWell.contains(enemy.id) {
+                // Movement handled by the Gravity Well this frame.
+            } else if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
                 updateHopper(enemy, deltaTime: deltaTime)
             } else {
                 moveEnemy(enemy, deltaTime: deltaTime)
@@ -76,7 +118,7 @@ extension GameState {
                     enemy.hiveSpawnTimer = 4.0
                     let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
                     let hp: Float = tier(for: round).hp(atRound: round)
-                    let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
+                    let hopper = makeEnemy(type: .hopper, hp: hp, speed: tier(for: round).speed(atRound: round))
                     hopper.currentCell = enemy.currentCell
                     hopper.progress = enemy.progress
                     hopper.isDroppingFromHive = true
@@ -124,9 +166,14 @@ extension GameState {
 
         // Update tower aiming and firing
         for tower in towers {
+            // Tick castle-ability timers on every tower (targeting towers included).
+            if tower.overchargeTimer > 0 { tower.overchargeTimer = max(0, tower.overchargeTimer - deltaTime) }
+            if tower.abilityInvulnTimer > 0 { tower.abilityInvulnTimer = max(0, tower.abilityInvulnTimer - deltaTime) }
+
             if tower.type == .targeting { continue }
 
-            tower.cooldownRemaining = max(0, tower.cooldownRemaining - deltaTime)
+            // Overcharge doubles the rate at which the firing cooldown recovers.
+            tower.cooldownRemaining = max(0, tower.cooldownRemaining - deltaTime * (tower.overchargeTimer > 0 ? 2 : 1))
 
             // Sword: stabs to an adjacent path tile when an enemy is on it
             if tower.type == .sword {
@@ -272,8 +319,9 @@ extension GameState {
                     if tower.type == .fire {
                         let nearCells = coneCells.filter { tower.coord.distance(to: $0) <= 1 }
                         let farCells  = coneCells.filter { tower.coord.distance(to: $0) == 2 }
-                        applyAreaDamage(cells: nearCells, dps: tower.cone!.dps, deltaTime: deltaTime, tower: tower, events: &events)
-                        applyAreaDamage(cells: farCells,  dps: tower.cone!.dps * 0.5, deltaTime: deltaTime, tower: tower, events: &events)
+                        let coneDPS = tower.cone!.dps * tower.cone!.overchargeDPSMultiplier
+                        applyAreaDamage(cells: nearCells, dps: coneDPS, deltaTime: deltaTime, tower: tower, events: &events)
+                        applyAreaDamage(cells: farCells,  dps: coneDPS * 0.5, deltaTime: deltaTime, tower: tower, events: &events)
                         if tower.level == Tower.maxLevel {
                             applyBurning(cells: coneCells)
                         }
@@ -299,7 +347,18 @@ extension GameState {
                             }
                         }
                         if let target = tower.cone!.targetCoord {
-                            applyAreaSlow(cells: [target], slowFactor: tower.level == Tower.maxLevel ? 0.25 : 0.5)
+                            applyAreaSlow(cells: [target], slowFactor: 1.0 - tower.iceSlowPercent)
+
+                            // Max level: chance to freeze enemies solid for a few seconds
+                            if tower.level == Tower.maxLevel {
+                                for enemy in enemies where enemy.active && !enemy.frozen {
+                                    guard let coord = enemyNearestCoord(enemy), coord == target else { continue }
+                                    if rng.randomFloat(in: 0..<1) < Tower.iceFreezeChancePerSecond * deltaTime {
+                                        enemy.frozen = true
+                                        enemy.frozenTimer = Tower.iceFreezeDuration
+                                    }
+                                }
+                            }
                         }
                     }
                     // Stop firing if no enemies remain in the targeted area
@@ -419,7 +478,7 @@ extension GameState {
 
                     let killCountBefore = events.killedEnemies.count
                     if let target = lockedTarget {
-                        _ = dealDamage(tower.laser!.dps * deltaTime * tower.laser!.rampMultiplier, to: target, tower: tower, events: &events)
+                        _ = dealDamage(tower.laser!.dps * deltaTime * tower.laser!.rampMultiplier * tower.laser!.overchargeDPSMultiplier, to: target, tower: tower, events: &events)
                     }
 
                     if events.killedEnemies.count > killCountBefore {
@@ -450,7 +509,7 @@ extension GameState {
 
                 for (index, targetID) in tower.lightning!.chainTargetIDs.enumerated() {
                     guard let target = enemies.first(where: { $0.id == targetID && $0.active }) else { continue }
-                    let dps = tower.lightning!.chainDamages[index] / tower.lightning!.duration
+                    let dps = tower.lightning!.chainDamages[index] / tower.lightning!.duration * tower.lightning!.overchargeDPSMultiplier
                     _ = dealDamage(dps * deltaTime, to: target, tower: tower, events: &events)
                 }
 
@@ -492,14 +551,21 @@ extension GameState {
 
             if tower.cooldownRemaining <= 0 && isAimed {
                 if tower.type == .laser {
+                    let params = overchargeFiringParams(for: tower, baseDuration: tower.laser!.duration)
                     tower.laser!.isFiring = true
-                    tower.laser!.timeRemaining = tower.laser!.duration
+                    tower.laser!.overchargeDPSMultiplier = params.dpsMultiplier
+                    tower.laser!.timeRemaining = params.duration
                     tower.laser!.lockedTargetID = closestEnemy?.id
                     events.beamsStarted.append(tower)
                 } else if tower.type == .fire || tower.type == .ice {
                     if let target = closestEnemy, let coord = enemyNearestCoord(target) {
+                        // Only the Fire tower actually deals dps; Ice's cone is a pure slow effect.
+                        let params = tower.type == .fire
+                            ? overchargeFiringParams(for: tower, baseDuration: tower.cone!.duration)
+                            : (dpsMultiplier: 1.0, duration: tower.cone!.duration)
                         tower.cone!.isFiring = true
-                        tower.cone!.timeRemaining = tower.cone!.duration
+                        tower.cone!.overchargeDPSMultiplier = params.dpsMultiplier
+                        tower.cone!.timeRemaining = params.duration
                         tower.cone!.targetCoord = coord
                         tower.cone!.lockedTargetID = target.id
                         events.conesStarted.append(tower)
@@ -513,8 +579,10 @@ extension GameState {
                             perTargetDamage.append(hitDamage)
                             hitDamage *= 0.8
                         }
+                        let params = overchargeFiringParams(for: tower, baseDuration: tower.lightning!.duration)
                         tower.lightning!.isFiring = true
-                        tower.lightning!.timeRemaining = tower.lightning!.duration
+                        tower.lightning!.overchargeDPSMultiplier = params.dpsMultiplier
+                        tower.lightning!.timeRemaining = params.duration
                         tower.lightning!.chainTargetIDs = chain.map { $0.id }
                         tower.lightning!.chainDamages = perTargetDamage
                         events.boltsStarted.append(tower)
@@ -623,10 +691,10 @@ extension GameState {
         for enemy in events.killedEnemies where enemy.enemyType == .hive {
             let spawnCell = enemy.currentCell
             let hiveWorldY = enemyWorldPosition(enemy)?.y ?? 0
-            let hp: Float = Float(256 + round * 102)
+            let hp: Float = tier(for: round).hp(atRound: round)
             let scatterRadius: Float = 0.4
             for i in 0..<5 {
-                let hopper = makeEnemy(type: .hopper, hp: hp, speed: 1.2)
+                let hopper = makeEnemy(type: .hopper, hp: hp, speed: tier(for: round).speed(atRound: round))
                 hopper.currentCell = spawnCell
                 hopper.progress = enemy.progress + Float(i) * 0.06
                 hopper.isDroppingFromHive = true
@@ -650,7 +718,8 @@ extension GameState {
                 events.explosions.append(pos)
             }
             for tower in towers {
-                if tower.coord.distance(to: coord) <= enemy.explosionRadius && !tower.isInvulnerable {
+                if tower.coord.distance(to: coord) <= enemy.explosionRadius
+                    && !(tower.isInvulnerable || tower.abilityInvulnTimer > 0) {
                     tower.hitPoints -= enemy.explosionDamage
                     if tower.hitPoints <= 0 {
                         events.destroyedTowers.append(tower)
@@ -680,6 +749,7 @@ extension GameState {
 
         // Check round over: all enemies dead or escaped
         let allDone = enemies.allSatisfy { !$0.active }
+        let spawnedCount = enemies.filter { $0.currentCell != nil }.count
         if allDone && spawnedCount == enemies.count {
             phase = .roundOver
             events.roundOver = true
@@ -788,11 +858,20 @@ extension GameState {
             }
         }
 
+        // Tick down freeze timer — frozen enemies don't move at all, overriding any slow
+        if enemy.frozen {
+            enemy.frozenTimer -= deltaTime
+            if enemy.frozenTimer <= 0 {
+                enemy.frozen = false
+                enemy.frozenTimer = 0
+            }
+        }
+
         let currentPos = current.coord.worldPosition(spacing: spacing)
         let nextPos = nextCell.coord.worldPosition(spacing: spacing)
         let distance = simd_distance(currentPos, nextPos)
 
-        let effectiveSpeed = enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed
+        let effectiveSpeed = enemy.frozen ? 0 : (enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed)
         let distanceMoved = effectiveSpeed * deltaTime
         enemy.progress += distanceMoved / distance
 

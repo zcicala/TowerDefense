@@ -12,6 +12,69 @@ enum GamePhase {
     case roundOver // All enemies defeated or escaped
 }
 
+// MARK: - Castle Abilities
+
+/// Manually-activated spells cast from the castle during combat. One is unlocked per castle level
+/// (`baseTowerTechLevel`); level 1 is the default so the first ability is available on a fresh run.
+/// The `rawValue` doubles as both the required castle level and the number-key hotkey.
+enum CastleAbility: Int, CaseIterable {
+    case overcharge = 1      // towers on/adjacent to a cell fire 2× as fast
+    case freeze = 2          // freeze enemies in a cell and its neighbors
+    case poison = 3          // green cloud in a radius; enemies that walk through it get poisoned
+    case invulnerability = 4 // make a tower invulnerable
+    case gravityWell = 5     // pull nearby enemies toward a tile and hold them
+
+    /// Castle level required to have unlocked this ability.
+    var requiredLevel: Int { rawValue }
+
+    /// Number-key hotkey used to activate the ability.
+    var hotkey: Character { Character("\(rawValue)") }
+
+    var displayName: String {
+        switch self {
+        case .overcharge:      return "Overcharge"
+        case .freeze:          return "Freeze"
+        case .poison:          return "Poison"
+        case .invulnerability: return "Invuln"
+        case .gravityWell:     return "Gravity Well"
+        }
+    }
+
+    /// Energy cost to cast, drawn from the shared castle energy pool.
+    var energyCost: Float {
+        switch self {
+        case .overcharge:      return 8
+        case .freeze:          return 10
+        case .poison:          return 6
+        case .invulnerability: return 15
+        case .gravityWell:     return 18
+        }
+    }
+
+    /// How long the ability's effect lasts once cast. For Poison this is the cloud's own
+    /// lifetime — how long it keeps infecting enemies that walk through it — not how long the
+    /// poison DOT lingers on an enemy afterward (see `GameState.poisonDOTDuration`).
+    var duration: Float {
+        switch self {
+        case .overcharge:      return 3
+        case .freeze:          return 2
+        case .poison:          return 5
+        case .invulnerability: return 5
+        case .gravityWell:     return 3
+        }
+    }
+
+    /// True when the ability targets a tower (Invulnerability); false when it targets a cell.
+    var targetsTower: Bool { self == .invulnerability }
+
+    /// Short instruction shown while selecting a target.
+    var targetPrompt: String {
+        if targetsTower { return "Click a tower to protect it." }
+        if self == .poison { return "Click a cell to release poison gas." }
+        return "Click a cell to cast."
+    }
+}
+
 // MARK: - Tech Tree Types
 
 enum TechNodeID: Hashable {
@@ -101,12 +164,18 @@ class GameState {
                            cost: 1, prerequisites: []))
 
         // Level upgrade chain for every tower type including Sword.
-        // Cost for level N = N - 1 points (Lv2 = 1pt, Lv3 = 2pts, … Lv6 = 5pts).
+        // Cost for level N = (N - 1) * costMultiplier points (Lv2 = 1pt, Lv3 = 2pts, … Lv6 = 5pts
+        // at the default 1x multiplier). Laser/Fireball/Lightning use 2x — their individual
+        // in-game upgradeCost (50/53/48 gold per level) runs roughly double the typical tower's
+        // (~25.5 avg for projectile/fire/bowler/sword/healer/antiAir), so their tech-tree cost
+        // is scaled to match.
         let allTowers: [TowerType] = [
             .sword, .projectile, .bowler, .laser, .fire,
             .fireball, .ice, .antiAir, .healer, .lightning
         ]
+        let towerCostMultiplier: [TowerType: Int] = [.laser: 2, .fireball: 2, .lightning: 2]
         for type in allTowers {
+            let costMultiplier = towerCostMultiplier[type] ?? 1
             for level in 2...Tower.maxLevel {
                 let prereqs: [TechNodeID] = level == 2
                     ? (type == .sword ? [] : [.towerUnlock(type)])
@@ -115,19 +184,20 @@ class GameState {
                     id: .towerLevel(type, level),
                     title: "\(type.displayName) Lv\(level)",
                     description: "New \(type.displayName) towers start at level \(level).",
-                    cost: level - 1,
+                    cost: (level - 1) * costMultiplier,
                     prerequisites: prereqs))
             }
         }
 
-        // Base tower upgrades — each level costs 1 pt (final level costs 3), grants +1 HP, +30% damage, +1 range
+        // Base tower upgrades — Lv2 costs 1pt, Lv3-4 cost 2pt, Lv5-6 cost 3pt. Grants +1 HP, +75% damage, +1 range.
         for level in 2...6 {
             let prereqs: [TechNodeID] = level == 2 ? [] : [.baseTowerLevel(level - 1)]
+            let cost: Int = level == 2 ? 1 : (level <= 4 ? 2 : 3)
             nodes.append(.init(
                 id: .baseTowerLevel(level),
                 title: "Castle Lv\(level)",
-                description: "+1 HP, +2x dmg, +1 range",
-                cost: level == 6 ? 3 : 1,
+                description: "+1 HP, +75% dmg, +1 range",
+                cost: cost,
                 prerequisites: prereqs))
         }
 
@@ -201,6 +271,15 @@ class GameState {
         let cost = GameState.techNodes.first(where: { $0.id == nodeID })!.cost
         upgradePoints -= cost
         purchasedTechNodes.insert(nodeID)
+
+        // Retroactively bring already-placed towers of this type up to the purchased level —
+        // towers already at or above it are left alone (this only ever raises a tower to
+        // exactly the newly-purchased level, never beyond).
+        if case .towerLevel(let type, let level) = nodeID {
+            for tower in towers where tower.type == type {
+                while tower.level < level { tower.applyUpgrade() }
+            }
+        }
         return true
     }
 
@@ -295,7 +374,7 @@ class GameState {
     func ensureBaseSentinel() {
         guard baseSentinelTower == nil, let end = endCell else { return }
         let lvl = baseTowerTechLevel
-        let dmg = 60.0 * pow(2.0 as Float, Float(lvl - 1))
+        let dmg = 125.0 * pow(1.75 as Float, Float(lvl - 1))
         let range = 2 + (lvl - 1)
         let t = Tower(coord: end.coord, type: .projectile,
                       detectionRadius: range, fireRadius: range,
@@ -326,8 +405,11 @@ class GameState {
     var enemies: [Enemy] = []
 
     var enemiesToSpawn: Int = 0
-    var spawnInterval: Float = 0.5  // seconds between spawns
-    var spawnTimer: Float = 0
+    /// Per-start-cell spawn state, keyed by that path's `.start` coord — each active path
+    /// (the original entrance plus any branch paths added every 10 rounds) spawns independently,
+    /// so more open paths directly means more total enemies spawned per second.
+    var spawnTimers: [HexCoord: Float] = [:]
+    var spawnIntervals: [HexCoord: Float] = [:]
 
     // MARK: - Base Tower
 
@@ -339,6 +421,72 @@ class GameState {
     var isPendingSlowAura: Bool = false
     /// True when a damage aura item is active and the player is picking a path tile target.
     var isPendingDamageAura: Bool = false
+
+    // MARK: - Castle Abilities
+
+    /// The ability awaiting a target tap, or nil. Mirrors the other `isPending…` selection flags.
+    var pendingAbility: CastleAbility? = nil
+    /// Current castle energy, spent on ability casts and regenerated over time. Refilled to
+    /// `castleMaxEnergy` at the start of each round.
+    var castleEnergy: Float = 20
+    /// Center of the active Gravity Well, or nil when inactive.
+    var gravityWellCoord: HexCoord? = nil
+    /// Remaining seconds the Gravity Well pulls enemies.
+    var gravityWellTimer: Float = 0
+    /// Radius (in hex steps) of the Gravity Well's pull.
+    let gravityWellRadius = 2
+    /// Ids of enemies currently held by the Gravity Well, as of the last `update(deltaTime:)` call.
+    /// Exposed so the renderer can show a per-enemy pull indicator.
+    var lastGravityWellPulledIDs: Set<UUID> = []
+    /// Center of the active Poison cloud, or nil when inactive.
+    var poisonCloudCoord: HexCoord? = nil
+    /// Remaining seconds the Poison cloud keeps infecting enemies that walk through it.
+    var poisonCloudTimer: Float = 0
+    /// Radius (in hex steps) of the Poison cloud.
+    let poisonCloudRadius = 2
+    /// How long the poison DOT lingers on an enemy once infected (refreshed while still inside
+    /// an active cloud) — distinct from the cloud's own `CastleAbility.poison.duration` lifetime.
+    let poisonDOTDuration: Float = 10
+
+    /// Terrain types pregenerated at startup for a large hex region around the map origin. This
+    /// is the authoritative source for a cell's terrain once it actually spawns (`makeTerrainCell`
+    /// looks it up instead of rolling fresh randomness), so terrain stays consistent even once
+    /// new path branches are drawn over these coords.
+    var pregeneratedTerrain: [HexCoord: TerrainType] = [:]
+
+    /// Number of Crystal Structures on the board (farms placed on Energy Field tiles).
+    var crystalStructureCount: Int {
+        farms.filter { $0.farmType == .crystalStructure }.count
+    }
+
+    /// Summed castle-energy bonus units across all Crystal Structures. Each contributes 2 base
+    /// units plus 1 per adjacent farm (of any type). Used as both a flat max-energy bonus and a
+    /// percentage-point energy-regen bonus.
+    var crystalStructureEnergyBonus: Int {
+        let farmCoords = Set(farms.map { $0.coord })
+        return farms.filter { $0.farmType == .crystalStructure }.reduce(0) { total, crystal in
+            let adjacentFarmCount = hexGrid.neighbors(of: crystal.coord)
+                .filter { farmCoords.contains($0.coord) }
+                .count
+            return total + 2 + adjacentFarmCount
+        }
+    }
+
+    /// Maximum castle energy: base 20, +2 per Crystal Structure, +1 more per farm adjacent to it.
+    var castleMaxEnergy: Float { 20 + Float(crystalStructureEnergyBonus) }
+
+    /// Energy regenerated per second: base 1, +2% per Crystal Structure, +1% more per adjacent farm.
+    var castleEnergyRegenRate: Float { 1.0 * (1 + 0.01 * Float(crystalStructureEnergyBonus)) }
+
+    /// True when the given ability has been unlocked by the current castle level.
+    func abilityUnlocked(_ ability: CastleAbility) -> Bool {
+        baseTowerTechLevel >= ability.requiredLevel
+    }
+
+    /// True when there's enough castle energy to cast the given ability.
+    func abilityReady(_ ability: CastleAbility) -> Bool {
+        castleEnergy >= ability.energyCost
+    }
 
     // MARK: - Inventory
 
@@ -431,20 +579,21 @@ class GameState {
     }
 
     /// Source of truth for the round-by-round difficulty curve and roster.
-    /// Act I's `hpBase`/`hpSlope`/`speedBase`/`speedSlope` are chosen so `hp(atRound:)` and
-    /// `speed(atRound:)` exactly reproduce the legacy `256 + 102·round` / `1.2 + 0.03·round`
-    /// formulas for rounds 1–15 — the early game is unchanged by this system.
+    /// Every tier's `hpBase`/`hpSlope` is 2.5x and `speedBase`/`speedSlope` is 0.5x the values
+    /// that originally reproduced the legacy `256 + 102·round` / `1.2 + 0.03·round` formulas —
+    /// enemies now have 2.5x HP (2x, then a further +25% pass) and half speed across every act.
     static let tiers: [EnemyTier] = [
         EnemyTier(
             act: 1, name: "Vanguard", rounds: 1...15,
-            hpBase: 358, hpSlope: 102,
-            speedBase: 1.23, speedSlope: 0.03,
+            hpBase: 895, hpSlope: 255,
+            speedBase: 0.615, speedSlope: 0.015,
             bossMultiplier: 1.0,
             roster: [
                 // basic's minRound is 0 (not 1) so it never collides with the round-1 "debut
                 // exclusion" rule in pickSpawnType — at round 1 it's the only eligible type,
                 // and excluding it after the first pick would leave the pool empty.
-                .init(type: .basic,    minRound: 0,  weight: 10),
+                // Stops spawning after round 9 (maxRound 9) — basic is retired from round 10 on.
+                .init(type: .basic,    minRound: 0,  maxRound: 9, weight: 10),
                 .init(type: .tank,     minRound: 6,  weight: 4),
                 .init(type: .hopper,   minRound: 8,  weight: 5),
                 .init(type: .exploder, minRound: 10, weight: 3),
@@ -454,11 +603,10 @@ class GameState {
         ),
         EnemyTier(
             act: 2, name: "Hardened", rounds: 16...30,
-            hpBase: 1950, hpSlope: 45,
-            speedBase: 1.75, speedSlope: 0.025,
+            hpBase: 4875, hpSlope: 112.5,
+            speedBase: 0.875, speedSlope: 0.0125,
             bossMultiplier: 1.3,
             roster: [
-                .init(type: .basic,       minRound: 16, weight: 6),
                 .init(type: .tank,        minRound: 16, weight: 4),
                 .init(type: .hopper,      minRound: 16, weight: 4),
                 .init(type: .exploder,    minRound: 16, weight: 3),
@@ -474,11 +622,10 @@ class GameState {
         ),
         EnemyTier(
             act: 3, name: "Apex", rounds: 31...Int.max,
-            hpBase: 2750, hpSlope: 15,
-            speedBase: 2.4, speedSlope: 0.04,
+            hpBase: 6875, hpSlope: 37.5,
+            speedBase: 1.2, speedSlope: 0.02,
             bossMultiplier: 1.6,
             roster: [
-                .init(type: .basic,         minRound: 31, weight: 4),
                 .init(type: .tank,          minRound: 31, weight: 3),
                 .init(type: .hopper,        minRound: 31, weight: 3),
                 .init(type: .exploder,      minRound: 31, weight: 2),
@@ -533,7 +680,10 @@ class SeededRandom: RandomSource {
     }
 
     private func unitFloat() -> Float {
-        Float(next() >> 8) / 16_777_216.0  // 2^24
+        // Keep only the top 24 bits (64 - 24 = 40) so the result actually lands in [0, 1) —
+        // shifting by just 8 (the old code) still left up to 56 significant bits, so dividing
+        // by 2^24 could produce values many orders of magnitude outside the intended range.
+        Float(next() >> 40) / 16_777_216.0  // 2^24
     }
 
     override func randomBool() -> Bool { next() & 1 == 0 }

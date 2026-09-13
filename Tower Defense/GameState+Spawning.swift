@@ -20,26 +20,26 @@ extension GameState {
         case .tank:
             return Enemy(type: .tank, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
         case .mirroid:
-            let e = Enemy(type: .mirroid, hitPoints: hp * 4, speed: speed * 1, baseDamage: 2)
+            let e = Enemy(type: .mirroid, hitPoints: hp * 4, speed: speed * 1, baseDamage: 3)
             e.resistances[.energy] = 1.0
             return e
         case .fastTank:
-            return Enemy(type: .fastTank, hitPoints: hp * 4, speed: speed * 1.4, baseDamage: 2)
+            return Enemy(type: .fastTank, hitPoints: hp * 8, speed: speed * 1.4, baseDamage: 2)
         case .exploder:
             return Enemy(type: .exploder, hitPoints: hp * 0.8, speed: speed * 1.5,
                          explosionRadius: 1, explosionDamage: 1)
         case .superExploder:
-            return Enemy(type: .superExploder, hitPoints: hp * 1.2, speed: speed * 1.2,
+            return Enemy(type: .superExploder, hitPoints: hp * 2.4, speed: speed * 1.2,
                          explosionRadius: 2, explosionDamage: 2)
         case .shield:
             let shieldAmt = Float(270 + 120 * round)
-            let e = Enemy(type: .shield, hitPoints: hp, speed: speed * 0.75, shieldAmount: shieldAmt)
+            let e = Enemy(type: .shield, hitPoints: hp * 2, speed: speed * 0.75, shieldAmount: shieldAmt)
             e.resistances[.physical] = 0.5
             return e
         case .hopper:
             return Enemy(type: .hopper, hitPoints: hp * 0.7, speed: speed)
         case .superHopper:
-            return Enemy(type: .superHopper, hitPoints: hp * 1.5, speed: speed * 1.2)
+            return Enemy(type: .superHopper, hitPoints: hp * 3.0, speed: speed * 1.2)
         case .boss:
             let bossHP = 100 + hp * Float(round) * tier(for: round).bossMultiplier
             return Enemy(type: .boss, hitPoints: bossHP, speed: speed * 0.5, baseDamage: 5)
@@ -53,22 +53,22 @@ extension GameState {
             return e
         case .plated:
             // Act II "Hardened": heavily armored against physical towers.
-            let e = Enemy(type: .plated, hitPoints: hp * 2.2, speed: speed * 0.9, baseDamage: 2)
+            let e = Enemy(type: .plated, hitPoints: hp * 4.4, speed: speed * 0.9, baseDamage: 2)
             e.resistances[.physical] = 0.6
             return e
         case .insulated:
             // Act II "Hardened": fractional mirroid successor — resists energy but isn't immune.
-            let e = Enemy(type: .insulated, hitPoints: hp * 1.6, speed: speed * 1.05)
+            let e = Enemy(type: .insulated, hitPoints: hp * 3.2, speed: speed * 1.05)
             e.resistances[.energy] = 0.6
             return e
         case .cinder:
             // Act II "Hardened": resists fire damage and shrugs off burning entirely (see `isBurnImmune`).
-            let e = Enemy(type: .cinder, hitPoints: hp * 1.4, speed: speed * 1.1)
+            let e = Enemy(type: .cinder, hitPoints: hp * 2.8, speed: speed * 1.1)
             e.resistances[.fire] = 0.7
             return e
         case .nullifier:
             // Act III "Apex": resists everything a little rather than one thing a lot.
-            let e = Enemy(type: .nullifier, hitPoints: hp * 2.0, speed: speed * 0.85, baseDamage: 2)
+            let e = Enemy(type: .nullifier, hitPoints: hp * 4.0, speed: speed * 0.85, baseDamage: 2)
             e.resistances[.physical] = 0.4
             e.resistances[.energy] = 0.4
             e.resistances[.fire] = 0.4
@@ -76,7 +76,7 @@ extension GameState {
         case .warden:
             // Act III "Apex": support unit — grants nearby enemies a temporary resistance
             // buff while alive (see `applyWardenAura` in GameState+Combat.swift).
-            return Enemy(type: .warden, hitPoints: hp * 1.8, speed: speed * 0.8, baseDamage: 2)
+            return Enemy(type: .warden, hitPoints: hp * 3.6, speed: speed * 0.8, baseDamage: 2)
         }
     }
 
@@ -116,6 +116,9 @@ extension GameState {
         round += 1
         phase = .combat
 
+        // Castle abilities start each round ready to cast.
+        resetAbilities()
+
         // Consume the pre-picked theme (or pick one now for round 1, before returnToPlacing has run)
         if round % 3 == 0 && upcomingWaveTheme == nil {
             let eligible = WaveTheme.allCases.filter { $0.minRound <= round }
@@ -130,8 +133,15 @@ extension GameState {
         let speed: Float = activeTier.speed(atRound: round)
 
         enemiesToSpawn = enemyCount
-        spawnInterval = rng.randomFloat(in: 0.3...1.0)
-        spawnTimer = 0
+        // Reset every active path's spawn timer for the new round (paths that no longer
+        // exist, e.g. after a restart, are simply dropped rather than carried forward).
+        // Sorted for a stable RNG draw order — Dictionary.values has no guaranteed iteration
+        // order, and without sorting, which start cell gets which random interval (and thus
+        // all RNG state downstream) would vary run-to-run even with the same seed.
+        let startCoords = hexGrid.cells.values.filter { $0.type == .start }
+            .map(\.coord).sorted { ($0.q, $0.r) < ($1.q, $1.r) }
+        spawnTimers = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, Float(0)) })
+        spawnIntervals = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, rng.randomFloat(in: 0.3...1.0)) })
 
         enemies.removeAll()
         projectiles.removeAll()

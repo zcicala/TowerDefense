@@ -492,8 +492,8 @@ class Tower {
     static func makeLaser(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .laser,
                       detectionRadius: 6, fireRadius: 6,
-                      projectileSpeed: 0, damage: 0, cooldown: 6.0)
-        t.laser = LaserState(duration: 3.0, dps: 180, range: 6)
+                      projectileSpeed: 0, damage: 0, cooldown: 6.0 * 1.15)
+        t.laser = LaserState(duration: 3.0, dps: 180 * 1.2, range: 6)
         return t
     }
 
@@ -501,7 +501,7 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 157.8125)
+        t.cone = ConeState(duration: 3.5, dps: 157.8125 * 1.1)
         return t
     }
 

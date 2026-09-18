@@ -525,7 +525,7 @@ class Tower {
     static func makeSword(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .sword,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 112.5 * 1.15, cooldown: 0.84)
+                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5, cooldown: 0.84)
         t.sword = SwordState(swingDuration: 0.28)
         return t
     }

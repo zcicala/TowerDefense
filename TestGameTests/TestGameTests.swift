@@ -127,6 +127,23 @@ final class TowerTests: XCTestCase {
         XCTAssertEqual(tower.damage, damageBefore, accuracy: 0.001)
     }
 
+    func testSwordUpgrade_gainsExtraHeartAtLevel4Only() {
+        let tower = Tower.makeSword(coord: HexCoord(q: 0, r: 0))
+        let hpBefore = tower.maxHitPoints
+        tower.applyUpgrade() // level 2
+        tower.applyUpgrade() // level 3
+        XCTAssertEqual(tower.maxHitPoints, hpBefore, "no bonus heart before level 4")
+
+        tower.applyUpgrade() // level 4
+        XCTAssertEqual(tower.level, 4)
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + 1, "level 4 should grant exactly one extra heart")
+        XCTAssertEqual(tower.hitPoints, hpBefore + 1)
+
+        tower.applyUpgrade() // level 5
+        tower.applyUpgrade() // level 6 (max)
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + 1, "levels 5/6 should not grant additional hearts")
+    }
+
     func testUpgradeCost_scalesWithLevel() {
         let tower = Tower(coord: HexCoord(q: 0, r: 0))
         let cost1 = tower.upgradeCost

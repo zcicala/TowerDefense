@@ -622,6 +622,13 @@ class Tower {
         case .sword:
             damage *= boost
             cooldown *= 0.88
+            // Reaching level 4 grants a permanent extra heart of life (levels 5/6 don't add
+            // another — this fires exactly once, on the level 3 -> 4 transition, whether
+            // purchased one level at a time or applied retroactively via a tech node).
+            if level == 4 {
+                hitPoints += 1
+                maxHitPoints += 1
+            }
         case .healer:
             healer!.charges = level
             cooldown *= 0.90
@@ -655,7 +662,10 @@ class Tower {
         case .fire:       return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
         case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +8% slow, +10%/s Freeze Chance" : "+20% duration, -18% cooldown, +8% slow"
         case .bowler:     return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
-        case .sword:      return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
+        case .sword:
+            if level == Tower.maxLevel - 1 { return "+33% dmg, -12% cooldown, +Swipe Arc" }
+            if level == 3 { return "+33% dmg, -12% cooldown, +1 Heart" }
+            return "+33% dmg, -12% cooldown"
         case .healer:     return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
         case .fireball:   return level == Tower.maxLevel - 1 ? "+33% dmg, +33% burn DPS, -12% cooldown, +Splash Radius" : "+33% dmg, +33% burn DPS, -12% cooldown"
         case .antiAir:    return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"

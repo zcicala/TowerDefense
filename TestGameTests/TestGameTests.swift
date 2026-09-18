@@ -274,6 +274,52 @@ final class CombatTests: XCTestCase {
         XCTAssertEqual(enemy.shieldMaxHP, 0, "the universal round-25 personal shield wall should be removed")
     }
 
+    // MARK: Regular enemies no longer scale HP/damage with round (except the boss)
+
+    /// A regular enemy's HP is pinned to 120% of what the old always-scaling formula would
+    /// have produced at its debut round — spawning the same type much later should give the
+    /// exact same HP, not a bigger one.
+    func testMakeEnemy_regularEnemyHP_isFrozenAtDebutRoundPlus20Percent() {
+        let gs = makeGameState()
+        let debutRound = GameState.debutRound(for: .tank)
+        XCTAssertEqual(debutRound, 6, "tank debuts in Act I's roster at round 6")
+
+        gs.round = debutRound
+        let atDebut = gs._makeEnemy(type: .tank, hp: gs.tier(for: debutRound).hp(atRound: debutRound), speed: 1.0)
+
+        gs.round = 30
+        let muchLater = gs._makeEnemy(type: .tank, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+
+        let expectedHP = gs.tier(for: debutRound).hp(atRound: debutRound) * 4.0 * 1.2
+        XCTAssertEqual(atDebut.hitPoints, expectedHP, accuracy: 0.01)
+        XCTAssertEqual(muchLater.hitPoints, expectedHP, accuracy: 0.01,
+                       "HP must not keep growing with round for a regular enemy")
+    }
+
+    /// A regular enemy's baseDamage was already round-independent; lock that in explicitly now
+    /// that HP scaling has been removed too, so a future change can't silently reintroduce it.
+    func testMakeEnemy_regularEnemyDamage_neverScalesWithRound() {
+        let gs = makeGameState()
+        gs.round = 6
+        let early = gs._makeEnemy(type: .tank, hp: gs.tier(for: 6).hp(atRound: 6), speed: 1.0)
+        gs.round = 30
+        let later = gs._makeEnemy(type: .tank, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+        XCTAssertEqual(early.baseDamage, later.baseDamage, "regular enemy damage must stay flat across rounds")
+    }
+
+    /// The boss is the one enemy that should still get proportionally harder over time —
+    /// both its HP (unchanged formula) and now its damage-to-base.
+    func testMakeEnemy_boss_hpAndDamageStillScaleWithRound() {
+        let gs = makeGameState()
+        gs.round = 5
+        let early = gs._makeEnemy(type: .boss, hp: gs.tier(for: 5).hp(atRound: 5), speed: 1.0)
+        gs.round = 30
+        let later = gs._makeEnemy(type: .boss, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+
+        XCTAssertGreaterThan(later.hitPoints, early.hitPoints, "boss HP should keep growing with round")
+        XCTAssertGreaterThan(later.baseDamage, early.baseDamage, "boss damage should keep growing with round")
+    }
+
     func testShield_debutsAtRound16_notInActITier() {
         let gs = makeGameState()
         XCTAssertFalse(gs.tier(for: 15).roster.contains { $0.type == .shield },

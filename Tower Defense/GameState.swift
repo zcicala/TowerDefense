@@ -657,6 +657,16 @@ class GameState {
     func tier(for round: Int) -> EnemyTier {
         GameState.tiers.first(where: { $0.rounds.contains(round) }) ?? GameState.tiers[0]
     }
+
+    /// The earliest round `type` can spawn, across every tier's roster (a type can be listed
+    /// in more than one tier — e.g. tank debuts in Act I but is re-listed in Act II/III too —
+    /// so this takes the minimum). Used to pin a regular enemy's HP to what it would have been
+    /// the moment it first became eligible, rather than letting it keep scaling with the
+    /// current round — see `GameState.debutHP(for:multiplier:)`.
+    static func debutRound(for type: EnemyType) -> Int {
+        let minRounds = tiers.flatMap { $0.roster }.filter { $0.type == type }.map { $0.minRound }
+        return max(1, minRounds.min() ?? 1)
+    }
 }
 
 // MARK: - Random Source

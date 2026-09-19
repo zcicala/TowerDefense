@@ -1716,7 +1716,7 @@ class SceneRenderer {
     private var overchargeIndicatorEntities: [UUID: Entity] = [:]
     private var overchargeHealIndicatorEntities: [UUID: Entity] = [:]
     private var frozenIndicatorEntities: [UUID: Entity] = [:]
-    private var gravityPullIndicatorEntities: [UUID: Entity] = [:]
+    private var gravityWaveIndicatorEntities: [UUID: Entity] = [:]
 
     private func makeOverchargeIndicator(at position: SIMD3<Float>) -> Entity {
         var emitter = ParticleEmitterComponent()
@@ -1827,7 +1827,7 @@ class SceneRenderer {
         frozenIndicatorEntities.removeValue(forKey: enemy.id)
     }
 
-    private func makeGravityPullIndicator(at position: SIMD3<Float>) -> Entity {
+    private func makeGravityWaveIndicator(at position: SIMD3<Float>) -> Entity {
         var emitter = ParticleEmitterComponent()
         emitter.emitterShape = .torus
         emitter.emitterShapeSize = [0.16, 0.02, 0.16]
@@ -1849,25 +1849,25 @@ class SceneRenderer {
         return entity
     }
 
-    /// Shows or hides the purple swirl around an enemy currently held by Gravity Well.
-    func setGravityPullIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
+    /// Shows or hides the purple swirl around an enemy currently standing in a Gravity Wave field.
+    func setGravityWaveIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
         if active {
-            if let entity = gravityPullIndicatorEntities[enemy.id] {
+            if let entity = gravityWaveIndicatorEntities[enemy.id] {
                 entity.position = position
             } else if let content {
-                let entity = makeGravityPullIndicator(at: position)
+                let entity = makeGravityWaveIndicator(at: position)
                 content.add(entity)
-                gravityPullIndicatorEntities[enemy.id] = entity
+                gravityWaveIndicatorEntities[enemy.id] = entity
             }
         } else {
-            gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
-            gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+            gravityWaveIndicatorEntities[enemy.id]?.removeFromParent()
+            gravityWaveIndicatorEntities.removeValue(forKey: enemy.id)
         }
     }
 
-    func removeGravityPullIndicator(for enemy: Enemy) {
-        gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
-        gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+    func removeGravityWaveIndicator(for enemy: Enemy) {
+        gravityWaveIndicatorEntities[enemy.id]?.removeFromParent()
+        gravityWaveIndicatorEntities.removeValue(forKey: enemy.id)
     }
 
     /// Removes all per-tower ability indicators (called when a tower is destroyed).
@@ -1886,8 +1886,8 @@ class SceneRenderer {
         overchargeHealIndicatorEntities.removeAll()
         for (_, entity) in frozenIndicatorEntities { entity.removeFromParent() }
         frozenIndicatorEntities.removeAll()
-        for (_, entity) in gravityPullIndicatorEntities { entity.removeFromParent() }
-        gravityPullIndicatorEntities.removeAll()
+        for (_, entity) in gravityWaveIndicatorEntities { entity.removeFromParent() }
+        gravityWaveIndicatorEntities.removeAll()
     }
 
     // MARK: - Projectiles

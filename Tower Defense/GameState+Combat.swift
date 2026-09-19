@@ -83,9 +83,10 @@ extension GameState {
         // Warden aura: buffs nearby enemies' resistances while a warden is alive and in range
         applyWardenAura()
 
-        // Gravity Well: pull affected enemies toward the well tile; their normal movement is skipped.
-        let pulledByWell = updateGravityWell(deltaTime: deltaTime)
-        lastGravityWellPulledIDs = pulledByWell
+        // Gravity Wave: marks which enemies are currently standing in the field (read by hopper
+        // jumps, flyer hover height, and flyer targetability below/elsewhere) — a passive area
+        // effect that never overrides movement, unlike the Gravity Well ability it replaced.
+        updateGravityWaveField(deltaTime: deltaTime)
 
         // Poison Cloud: infects (or refreshes) any enemy currently standing in an active cloud.
         updatePoisonCloud(deltaTime: deltaTime)
@@ -124,8 +125,8 @@ extension GameState {
             }
 
             // Slow/freeze timers used to tick only inside moveEnemy, so a frozen hopper never
-            // thawed and a Gravity-Well-pulled enemy's slow never expired. Ticking them here,
-            // unconditionally, for every surviving active enemy fixes both.
+            // thawed (hoppers never call moveEnemy). Ticking them here, unconditionally, for
+            // every surviving active enemy fixes that.
             tickStatusTimers(enemy, deltaTime: deltaTime)
             movers.append(enemy)
 
@@ -152,8 +153,8 @@ extension GameState {
         }
 
         // Phase C: advance every surviving enemy through the corridor solver (ground walkers
-        // collide front-to-back; hoppers/well-pulled/immobile enemies keep their own paths).
-        solveCrowd(deltaTime: deltaTime, movers: movers, pulledByWell: pulledByWell)
+        // collide front-to-back; hoppers/immobile enemies keep their own paths).
+        solveCrowd(deltaTime: deltaTime, movers: movers)
 
         // Phase D: report results.
         for enemy in movers {
@@ -926,7 +927,8 @@ extension GameState {
 
     func triggerHopperJump(_ enemy: Enemy) {
         guard let current = enemy.currentCell else { return }
-        let jumpRadius = rng.randomInt(in: enemy.hopperJumpRange)
+        // A Gravity Wave field grounds hoppers to short hops — see CastleAbility.gravityWave.
+        let jumpRadius = enemy.inGravityWave ? 1 : rng.randomInt(in: enemy.hopperJumpRange)
 
         let fromPos = enemyWorldPosition(enemy) ?? {
             let p = current.coord.worldPosition(spacing: spacing)
@@ -1039,9 +1041,9 @@ extension GameState {
 
             let (_, lateral, _) = pathFrame(cell: current, progress: t)
             let off = enemy.lateralOffset
-            return [x + lateral.x * off, y + enemy.additionalHoverOffset, z + lateral.y * off]
+            return [x + lateral.x * off, y + enemy.effectiveHoverOffset, z + lateral.y * off]
         } else {
-            return [p1Pos.x, p1Y + enemy.additionalHoverOffset, p1Pos.y]
+            return [p1Pos.x, p1Y + enemy.effectiveHoverOffset, p1Pos.y]
         }
     }
 
@@ -1146,14 +1148,14 @@ extension GameState {
             let offset = enemy.lateralOffset
             guard let nextCell = cell.next else {
                 let pos = cell.coord.worldPosition(spacing: spacing)
-                let y = cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+                let y = cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
                 return (SIMD3<Float>(pos.x + lateral.x * offset, y, pos.y + lateral.y * offset), cell.coord)
             }
             let cellPos = cell.coord.worldPosition(spacing: spacing)
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let x = cellPos.x + (nextPos.x - cellPos.x) * progress
             let z = cellPos.y + (nextPos.y - cellPos.y) * progress
-            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
             let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
             return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
         }
@@ -1163,7 +1165,7 @@ extension GameState {
             guard let nextCell = cell.next else {
                 // Enemy will reach end before projectile arrives
                 let pos = cell.coord.worldPosition(spacing: spacing)
-                return (SIMD3<Float>(pos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, pos.y), cell.coord)
+                return (SIMD3<Float>(pos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset, pos.y), cell.coord)
             }
 
             let cellPos = cell.coord.worldPosition(spacing: spacing)
@@ -1192,13 +1194,13 @@ extension GameState {
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let x = cellPos.x + (nextPos.x - cellPos.x) * progress
             let z = cellPos.y + (nextPos.y - cellPos.y) * progress
-            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
             let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
             let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
             return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
         } else {
             let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
-            return (SIMD3<Float>(cellPos.x + lateral.x * offset, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, cellPos.y + lateral.y * offset), cell.coord)
+            return (SIMD3<Float>(cellPos.x + lateral.x * offset, cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset, cellPos.y + lateral.y * offset), cell.coord)
         }
     }
 

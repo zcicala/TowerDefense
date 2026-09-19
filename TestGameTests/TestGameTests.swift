@@ -802,7 +802,7 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertFalse(gs.abilityUnlocked(.freeze))
         XCTAssertFalse(gs.abilityUnlocked(.poison))
         XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
-        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(2))
         XCTAssertTrue(gs.abilityUnlocked(.freeze))
@@ -814,7 +814,7 @@ final class CastleAbilityTests: XCTestCase {
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(4))
         XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
-        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
     }
 
     func testBeginAbility_requiresCombatUnlockedAndReady() {
@@ -959,24 +959,79 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertEqual(healer.healer!.charges, 0, "overcharged heals must not consume a charge")
     }
 
-    // MARK: Gravity Well
+    // MARK: Gravity Wave
 
-    func testGravityWell_pullsEnemyTowardTile() {
+    func testGravityWave_marksEnemiesInsideFieldOnly() {
         let gs = makeGameState(pathLength: 8)
         gs.phase = .combat
-        // High HP so the base sentinel doesn't kill it mid-pull.
-        let enemy = makeActiveEnemy(hp: 5000, atCell: 5, in: gs)   // (5,0)
+        let inField = makeActiveEnemy(hp: 5000, atCell: 3, in: gs)   // (3,0), distance 0 from well
+        let onEdge = makeActiveEnemy(hp: 5000, atCell: 5, in: gs)    // (5,0), distance 2 — inside radius
+        let outside = makeActiveEnemy(hp: 5000, atCell: 7, in: gs)   // (7,0), distance 4 — outside radius
 
-        gs.pendingAbility = .gravityWell
+        gs.pendingAbility = .gravityWave
         XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 3, r: 0)))
-        XCTAssertEqual(gs.gravityWellTimer, CastleAbility.gravityWell.duration, accuracy: 0.001)
+        XCTAssertEqual(gs.gravityWaveTimer, CastleAbility.gravityWave.duration, accuracy: 0.001)
 
-        // Advance within the well's duration.
-        for _ in 0..<25 { _ = gs.update(deltaTime: 0.1) }
+        gs.updateGravityWaveField(deltaTime: 0.01)
 
-        let q = enemy.currentCell?.coord.q ?? -1
-        XCTAssertLessThan(q, 5, "enemy should be pulled back from (5,0) toward the well at (3,0)")
-        XCTAssertGreaterThanOrEqual(q, 3, "enemy should not be pulled past the well tile")
+        XCTAssertTrue(inField.inGravityWave)
+        XCTAssertTrue(onEdge.inGravityWave, "radius \(gs.gravityWaveRadius) should reach 2 cells away")
+        XCTAssertFalse(outside.inGravityWave)
+    }
+
+    func testGravityWave_fieldClearsWhenTimerExpires() {
+        let gs = makeGameState(pathLength: 8)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(hp: 5000, atCell: 3, in: gs)
+
+        gs.pendingAbility = .gravityWave
+        _ = gs.castPendingAbility(atCell: HexCoord(q: 3, r: 0))
+        gs.updateGravityWaveField(deltaTime: 0.01)
+        XCTAssertTrue(enemy.inGravityWave)
+
+        gs.updateGravityWaveField(deltaTime: CastleAbility.gravityWave.duration)
+        XCTAssertFalse(enemy.inGravityWave, "field should clear once the timer runs out")
+    }
+
+    func testGravityWave_restrictsHopperToASingleCellJump() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, atCell: 5, in: gs)
+        hopper.inGravityWave = true
+
+        gs.triggerHopperJump(hopper)
+
+        XCTAssertEqual(hopper.currentCell?.coord.q, 6, "a hopper in the field should only jump one cell")
+    }
+
+    func testGravityWave_hopperJumpsNormallyOutsideField() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, atCell: 5, in: gs)
+        XCTAssertFalse(hopper.inGravityWave)
+
+        gs.triggerHopperJump(hopper)
+
+        XCTAssertGreaterThan(hopper.currentCell?.coord.q ?? 0, 6, "outside the field a hopper should jump its normal 2-5 cell range")
+    }
+
+    func testGravityWave_halvesFlyingUnitHoverHeight() {
+        let gs = makeGameState()
+        let wisp = gs._makeEnemy(type: .wisp, hp: 100, speed: 1.0) // additionalHoverOffset is set here, not in Enemy's raw init
+        let baseOffset = wisp.additionalHoverOffset
+        XCTAssertGreaterThan(baseOffset, 0)
+        XCTAssertEqual(wisp.effectiveHoverOffset, baseOffset, accuracy: 0.001)
+
+        wisp.inGravityWave = true
+        XCTAssertEqual(wisp.effectiveHoverOffset, baseOffset * 0.5, accuracy: 0.001)
+    }
+
+    func testGravityWave_makesFlyingUnitsTargetableByAllTowers() {
+        let wisp = Enemy(type: .wisp, hitPoints: 100, speed: 1.0)
+        XCTAssertTrue(wisp.immuneTowerTypes.contains(.projectile), "wisp is normally immune to ground towers")
+
+        wisp.inGravityWave = true
+        XCTAssertTrue(wisp.immuneTowerTypes.isEmpty, "the field should strip all targeting immunity")
     }
 
     // MARK: Poison
@@ -1085,15 +1140,15 @@ final class CastleAbilityTests: XCTestCase {
         gs.towers.append(tower)
         gs.castleEnergy = 3
         gs.pendingAbility = .freeze
-        gs.gravityWellCoord = HexCoord(q: 1, r: 0)
-        gs.gravityWellTimer = 3
+        gs.gravityWaveCoord = HexCoord(q: 1, r: 0)
+        gs.gravityWaveTimer = 3
 
         gs.resetAbilities()
 
         XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001)
         XCTAssertNil(gs.pendingAbility)
-        XCTAssertNil(gs.gravityWellCoord)
-        XCTAssertEqual(gs.gravityWellTimer, 0, accuracy: 0.001)
+        XCTAssertNil(gs.gravityWaveCoord)
+        XCTAssertEqual(gs.gravityWaveTimer, 0, accuracy: 0.001)
         XCTAssertEqual(tower.overchargeTimer, 0, accuracy: 0.001)
         XCTAssertEqual(tower.overchargeHealTimer, 0, accuracy: 0.001)
     }

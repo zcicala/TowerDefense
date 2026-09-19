@@ -185,7 +185,7 @@ struct ContentView: View {
                     for enemy in gameState.enemies where enemy.active {
                         guard let pos = gameState.enemyWorldPosition(enemy) else { continue }
                         renderer.setFrozenIndicator(for: enemy, at: pos, active: enemy.slowed && enemy.slowFactor <= 0.01)
-                        renderer.setGravityPullIndicator(for: enemy, at: pos, active: gameState.lastGravityWellPulledIDs.contains(enemy.id))
+                        renderer.setGravityWaveIndicator(for: enemy, at: pos, active: enemy.inGravityWave)
                     }
 
                     // Spawn new enemy entities
@@ -214,7 +214,7 @@ struct ContentView: View {
                     for enemy in events.killedEnemies {
                         renderer.removeShieldDome(for: enemy)
                         renderer.removeFrozenIndicator(for: enemy)
-                        renderer.removeGravityPullIndicator(for: enemy)
+                        renderer.removeGravityWaveIndicator(for: enemy)
                         renderer.removeEnemy(enemy)
                         if selectedEnemy?.id == enemy.id { selectedEnemy = nil }
                     }
@@ -855,7 +855,7 @@ struct ContentView: View {
         case .freeze:          return .cyan
         case .poison:          return .green
         case .overchargeHeal:  return .mint
-        case .gravityWell:     return .purple
+        case .gravityWave:     return .purple
         }
     }
 
@@ -865,7 +865,7 @@ struct ContentView: View {
         case .freeze:          return (0.3, 0.85, 1.0)
         case .poison:          return (0.25, 0.9, 0.15)
         case .overchargeHeal:  return (0.3, 0.85, 0.45)
-        case .gravityWell:     return (0.7, 0.3, 1.0)
+        case .gravityWave:     return (0.7, 0.3, 1.0)
         }
     }
 

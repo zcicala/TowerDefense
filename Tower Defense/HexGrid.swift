@@ -741,10 +741,21 @@ class Enemy {
     var hiveDropFromY: Float = 0              // world Y the drop starts from
     var hiveDropLateralOffset: SIMD2<Float> = .zero  // random XZ scatter, fades to zero on land
 
+    /// Whether this enemy is currently standing inside an active Castle "Gravity Wave" field —
+    /// updated every frame for every active enemy by `GameState.updateGravityWaveField`. Read by
+    /// `triggerHopperJump` (restricts jump range to 1), `effectiveHoverOffset` (halves flying
+    /// height), and `immuneTowerTypes` (strips flying units' immunity to ground towers).
+    var inGravityWave: Bool = false
+
+    /// `additionalHoverOffset`, halved while caught in a Gravity Wave field — see `inGravityWave`.
+    var effectiveHoverOffset: Float { inGravityWave ? additionalHoverOffset * 0.5 : additionalHoverOffset }
+
     /// Tower types that cannot *target* this enemy at all — purely positional/targetability rules
     /// (airborne units out of reach of ground-only towers). Damage-type resistance is handled
     /// separately by `resistances`/`resistanceMultiplier(for:)`.
     var immuneTowerTypes: Set<TowerType> {
+        // A Gravity Wave field drags flyers down into range of every tower, ground included.
+        if inGravityWave { return [] }
         var immune: Set<TowerType>
         switch enemyType {
         case .hive:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]

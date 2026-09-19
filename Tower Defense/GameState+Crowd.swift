@@ -121,8 +121,8 @@ extension GameState {
 
     /// Ticks the slow/freeze status timers for one enemy. Extracted from the old `moveEnemy`
     /// (which only ran for enemies taking the "normal walk" branch) and now called
-    /// unconditionally for every active enemy, so a frozen hopper thaws and a Gravity-Well
-    /// -pulled enemy's slow expires — both silently never happened before.
+    /// unconditionally for every active enemy, so e.g. a frozen hopper thaws even though
+    /// hoppers never call `moveEnemy` — that silently never happened before.
     func tickStatusTimers(_ enemy: Enemy, deltaTime: Float) {
         if enemy.slowed {
             enemy.slowTimer -= deltaTime
@@ -152,8 +152,7 @@ extension GameState {
         type == .wisp || type == .hive
     }
 
-    /// Advances every surviving enemy in `movers` for this frame. Enemies pulled by the
-    /// Gravity Well this frame are skipped (it already moved them); hoppers keep their own
+    /// Advances every surviving enemy in `movers` for this frame. Hoppers keep their own
     /// jump/teleport logic (`updateHopper`) untouched; enemies with `speed <= 0` (test props,
     /// or an ability that should hold them in place) are never moved by the solver at all.
     /// Everyone else ("walkers", including flying enemies, which still follow the path — they
@@ -169,11 +168,10 @@ extension GameState {
     /// and it incidentally fixes a latent bug where a very large `deltaTime` could advance
     /// `progress` several cells past 1.0 in one step and evaluate the position spline far
     /// outside its valid range.
-    func solveCrowd(deltaTime: Float, movers: [Enemy], pulledByWell: Set<UUID>) {
+    func solveCrowd(deltaTime: Float, movers: [Enemy]) {
         var walkers: [Enemy] = []
         walkers.reserveCapacity(movers.count)
         for enemy in movers {
-            if pulledByWell.contains(enemy.id) { continue }
             if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
                 updateHopper(enemy, deltaTime: deltaTime)
                 continue
@@ -184,8 +182,8 @@ extension GameState {
 
         if !walkers.isEmpty {
             // Front-to-back: smaller distanceToEnd (further along) always sorts first.
-            // Tiebreak on `seq` — needed because e.g. the Gravity Well can pin several
-            // enemies at exactly the same (cell, progress).
+            // Tiebreak on `seq` — needed because e.g. two enemies can be spawned at exactly
+            // the same (cell, progress).
             let keyed = walkers.map { ($0, distanceToEnd($0)) }
                 .sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.seq < $1.0.seq }
             walkers = keyed.map { $0.0 }
@@ -204,8 +202,8 @@ extension GameState {
         }
 
         // Once per frame (not per substep), independent of whether any "walker" moved this
-        // frame at all — a Gravity Well pinning enemies with no ordinary walkers present
-        // must still get its clump fanned out. See relaxSeparation's doc comment.
+        // frame at all — e.g. a batch of hive-dropped hoppers landing with no ordinary
+        // walkers present must still get fanned apart. See relaxSeparation's doc comment.
         relaxSeparation(movers)
 
         commitFrameMotion(movers, deltaTime: deltaTime)
@@ -700,24 +698,21 @@ extension GameState {
     }
 
     /// Nudges apart any overlapping ground enemies that the corridor solver above didn't
-    /// create or resolve — a Gravity Well pinning several enemies at the exact same point, two
-    /// enemies spawned on top of each other, a hive drop landing near others, or a hopper
-    /// landing on an already-occupied cell. Runs once per frame (not per substep, unlike
-    /// `advanceWalkers`), over every active ground enemy including well-pulled enemies and
-    /// grounded hoppers — neither of which `solveCrowd`'s substep loop above touches at all.
+    /// create or resolve — two enemies spawned on top of each other, a hive drop landing near
+    /// others, or a hopper landing on an already-occupied cell. Runs once per frame (not per
+    /// substep, unlike `advanceWalkers`), over every active ground enemy including grounded
+    /// hoppers, which `solveCrowd`'s substep loop above doesn't touch at all.
     ///
     /// Unlike the corridor solver, this uses purely geometric neighbors (a cell's 6 hex
     /// neighbors) rather than walking `.next`/`.previous` — deliberately, since it needs to
-    /// work even where path topology is lossy (a branch junction's `.previous`) or doesn't
-    /// exist in the useful direction at all (two enemies pinned on the same Gravity Well tile
-    /// have nothing to do with `.next` chains).
+    /// work even where path topology is lossy (a branch junction's `.previous`).
     ///
     /// Two invariants make this safe to run unconditionally every frame: only the
     /// lower-priority ("rear") enemy of any overlapping pair ever moves, and if lateral
     /// correction alone can't fully separate them, the remainder is applied as *backward*
-    /// progress only (`retreat`, below) — the one place outside the Gravity Well itself where
-    /// `progress` can decrease. Together these guarantee separation can never advance anyone,
-    /// let alone shove them toward the base.
+    /// progress only (`retreat`, below) — the only place `progress` can decrease at all.
+    /// Together these guarantee separation can never advance anyone, let alone shove them
+    /// toward the base.
     func relaxSeparation(_ movers: [Enemy]) {
         var agents: [SeparationAgent] = []
         agents.reserveCapacity(movers.count)

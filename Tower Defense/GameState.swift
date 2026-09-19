@@ -23,7 +23,8 @@ enum CastleAbility: Int, CaseIterable {
     case poison = 3          // green cloud in a radius; enemies that walk through it get poisoned
     case overchargeHeal = 4  // boost a healer tower's radius and make its heals free, for a
                              // duration scaled to that tower's own level
-    case gravityWell = 5     // pull nearby enemies toward a tile and hold them
+    case gravityWave = 5     // area of increased gravity: hoppers can only jump one cell, and
+                             // flying units fly half as high and lose their flight immunity
 
     /// Castle level required to have unlocked this ability.
     var requiredLevel: Int { rawValue }
@@ -37,7 +38,7 @@ enum CastleAbility: Int, CaseIterable {
         case .freeze:          return "Freeze"
         case .poison:          return "Poison"
         case .overchargeHeal:  return "Overcharge Heal"
-        case .gravityWell:     return "Gravity Well"
+        case .gravityWave:     return "Gravity Wave"
         }
     }
 
@@ -48,7 +49,7 @@ enum CastleAbility: Int, CaseIterable {
         case .freeze:          return 10
         case .poison:          return 6
         case .overchargeHeal:  return 15
-        case .gravityWell:     return 18
+        case .gravityWave:     return 18
         }
     }
 
@@ -64,7 +65,7 @@ enum CastleAbility: Int, CaseIterable {
         case .freeze:          return 2
         case .poison:          return 5
         case .overchargeHeal:  return 5
-        case .gravityWell:     return 3
+        case .gravityWave:     return 3
         }
     }
 
@@ -441,15 +442,12 @@ class GameState {
     /// Current castle energy, spent on ability casts and regenerated over time. Refilled to
     /// `castleMaxEnergy` at the start of each round.
     var castleEnergy: Float = 20
-    /// Center of the active Gravity Well, or nil when inactive.
-    var gravityWellCoord: HexCoord? = nil
-    /// Remaining seconds the Gravity Well pulls enemies.
-    var gravityWellTimer: Float = 0
-    /// Radius (in hex steps) of the Gravity Well's pull.
-    let gravityWellRadius = 2
-    /// Ids of enemies currently held by the Gravity Well, as of the last `update(deltaTime:)` call.
-    /// Exposed so the renderer can show a per-enemy pull indicator.
-    var lastGravityWellPulledIDs: Set<UUID> = []
+    /// Center of the active Gravity Wave field, or nil when inactive.
+    var gravityWaveCoord: HexCoord? = nil
+    /// Remaining seconds the Gravity Wave field stays up.
+    var gravityWaveTimer: Float = 0
+    /// Radius (in hex steps) of the Gravity Wave field.
+    let gravityWaveRadius = 2
     /// Center of the active Poison cloud, or nil when inactive.
     var poisonCloudCoord: HexCoord? = nil
     /// Remaining seconds the Poison cloud keeps infecting enemies that walk through it.

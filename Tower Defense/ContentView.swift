@@ -384,12 +384,20 @@ struct ContentView: View {
                 gameState.togglePause()
                 return .handled
             }
-            .onKeyPress(keys: [.init("1"), .init("2"), .init("3"), .init("4")], phases: .down) { press in
+            .onKeyPress(keys: [.init("1"), .init("2"), .init("3"), .init("4"), .init("5"), .init("6")], phases: .down) { press in
                 // Number keys cast/cancel the matching castle ability during combat.
                 guard gameState.phase == .combat,
                       let ability = CastleAbility.allCases.first(where: { String($0.hotkey) == press.characters })
                 else { return .ignored }
-                if gameState.pendingAbility == ability {
+                if ability == .moveTower {
+                    // Move Tower drives its own select-tower/select-destination flow rather
+                    // than the generic pendingAbility mechanism — see beginMoveTowerAbility().
+                    if gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil {
+                        gameState.cancelPendingMoveTower()
+                    } else {
+                        gameState.beginMoveTowerAbility()
+                    }
+                } else if gameState.pendingAbility == ability {
                     gameState.cancelPendingAbility()
                 } else {
                     gameState.beginAbility(ability)
@@ -856,6 +864,7 @@ struct ContentView: View {
         case .poison:          return .green
         case .overchargeHeal:  return .mint
         case .gravityWave:     return .purple
+        case .moveTower:       return .yellow
         }
     }
 
@@ -866,6 +875,7 @@ struct ContentView: View {
         case .poison:          return (0.25, 0.9, 0.15)
         case .overchargeHeal:  return (0.3, 0.85, 0.45)
         case .gravityWave:     return (0.7, 0.3, 1.0)
+        case .moveTower:       return (1.0, 0.85, 0.1)
         }
     }
 
@@ -906,10 +916,23 @@ struct ContentView: View {
                 .foregroundColor(.cyan)
             HStack(spacing: 6) {
                 ForEach(unlocked, id: \.rawValue) { ability in
-                    let isPending = gameState.pendingAbility == ability
+                    // Move Tower drives its own select-tower/select-destination flow (shared
+                    // with the Move Tower inventory item) instead of the generic pendingAbility
+                    // mechanism every other ability uses — see beginMoveTowerAbility().
+                    let isMoveTowerInProgress = ability == .moveTower
+                        && (gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil)
+                    let isPending = gameState.pendingAbility == ability || isMoveTowerInProgress
                     let affordable = gameState.castleEnergy >= ability.energyCost
+                    let anyOtherPending = gameState.pendingAbility != nil
+                        || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
                     Button {
-                        if isPending {
+                        if ability == .moveTower {
+                            if isMoveTowerInProgress {
+                                gameState.cancelPendingMoveTower()
+                            } else {
+                                gameState.beginMoveTowerAbility()
+                            }
+                        } else if isPending {
                             gameState.cancelPendingAbility()
                         } else {
                             gameState.beginAbility(ability)
@@ -925,7 +948,7 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(isPending ? .white : abilityTint(ability))
                     .foregroundColor(isPending ? .black : .white)
-                    .disabled(!affordable || (gameState.pendingAbility != nil && !isPending))
+                    .disabled(!affordable || (anyOtherPending && !isPending))
                 }
             }
         }

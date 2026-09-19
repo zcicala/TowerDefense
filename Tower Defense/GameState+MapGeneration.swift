@@ -480,12 +480,35 @@ extension GameState {
         isSelectingTowerToMove = true
     }
 
+    /// Castle-ability entry point into the same select-tower/select-destination flow
+    /// `activateMoveTower()` starts, spending castle energy instead of an inventory item —
+    /// this is what lets a tower be relocated mid-round instead of only during placing (the
+    /// Move Tower item's own UI only appears while `phase == .placing`). Returns true if the
+    /// selection flow actually started.
+    @discardableResult
+    func beginMoveTowerAbility() -> Bool {
+        guard phase == .combat,
+              pendingAbility == nil,
+              !isSelectingTowerToMove, pendingMoveTower == nil,
+              abilityUnlocked(.moveTower),
+              abilityReady(.moveTower) else { return false }
+        castleEnergy -= CastleAbility.moveTower.energyCost
+        moveTowerViaAbility = true
+        isSelectingTowerToMove = true
+        return true
+    }
+
     func cancelPendingMoveTower() {
         if isSelectingTowerToMove || pendingMoveTower != nil {
-            moveTowerItemCount += 1
+            if moveTowerViaAbility {
+                castleEnergy = min(castleMaxEnergy, castleEnergy + CastleAbility.moveTower.energyCost)
+            } else {
+                moveTowerItemCount += 1
+            }
         }
         isSelectingTowerToMove = false
         pendingMoveTower = nil
+        moveTowerViaAbility = false
     }
 
     func selectTowerToMove(_ tower: Tower) {
@@ -552,6 +575,7 @@ extension GameState {
         }
 
         pendingMoveTower = nil
+        moveTowerViaAbility = false
         return true
     }
 
@@ -865,6 +889,7 @@ extension GameState {
         isPendingTowerHeal = false
         isSelectingTowerToMove = false
         pendingMoveTower = nil
+        moveTowerViaAbility = false
         isPaused = false
         return (towerIDs, terrainCoords + branchCoords, [])
     }

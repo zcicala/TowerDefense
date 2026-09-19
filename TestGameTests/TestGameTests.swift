@@ -815,6 +815,13 @@ final class CastleAbilityTests: XCTestCase {
         gs.purchasedTechNodes.insert(.baseTowerLevel(4))
         XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        XCTAssertTrue(gs.abilityUnlocked(.gravityWave))
+        XCTAssertFalse(gs.abilityUnlocked(.moveTower))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        XCTAssertTrue(gs.abilityUnlocked(.moveTower))
     }
 
     func testBeginAbility_requiresCombatUnlockedAndReady() {
@@ -1032,6 +1039,104 @@ final class CastleAbilityTests: XCTestCase {
 
         wisp.inGravityWave = true
         XCTAssertTrue(wisp.immuneTowerTypes.isEmpty, "the field should strip all targeting immunity")
+    }
+
+    // MARK: Move Tower (ability)
+
+    func testBeginMoveTowerAbility_requiresCombatUnlockedAndReady() {
+        let gs = makeGameState()
+        gs.phase = .placing
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "cannot begin outside combat")
+
+        gs.phase = .combat
+        gs.castleEnergy = 0
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "not enough energy")
+
+        gs.castleEnergy = 100
+        gs.purchasedTechNodes.remove(.baseTowerLevel(6))
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "locked below castle level 6")
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        let energyBefore = gs.castleEnergy
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        XCTAssertTrue(gs.isSelectingTowerToMove)
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.moveTower.energyCost, accuracy: 0.001)
+    }
+
+    func testBeginMoveTowerAbility_blockedWhileAnotherAbilityPending() {
+        let gs = makeGameState()
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+        gs.pendingAbility = .freeze
+        XCTAssertFalse(gs.beginMoveTowerAbility())
+        XCTAssertFalse(gs.isSelectingTowerToMove)
+    }
+
+    func testMoveTowerAbility_relocatesTowerDuringCombat() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+
+        let originCoord = HexCoord(q: 10, r: 0)
+        let destCoord = HexCoord(q: 11, r: 0)
+        let originCell = HexCell(coord: originCoord, height: 1.0, type: .terrain)
+        originCell.hasTower = true
+        gs.hexGrid.addCell(originCell)
+        let destCell = HexCell(coord: destCoord, height: 1.0, type: .terrain)
+        gs.hexGrid.addCell(destCell)
+
+        let tower = Tower(coord: originCoord)
+        gs.towers.append(tower)
+
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        gs.selectTowerToMove(tower)
+        XCTAssertEqual(gs.pendingMoveTower?.id, tower.id)
+        let energyAfterBegin = gs.castleEnergy
+
+        XCTAssertTrue(gs.applyMoveTower(to: destCoord))
+
+        XCTAssertEqual(tower.coord, destCoord)
+        XCTAssertFalse(originCell.hasTower, "origin cell should be freed")
+        XCTAssertTrue(destCell.hasTower)
+        XCTAssertNil(gs.pendingMoveTower)
+        XCTAssertEqual(gs.castleEnergy, energyAfterBegin, accuracy: 0.001, "a completed move should not refund energy")
+    }
+
+    func testCancelPendingMoveTower_refundsEnergyWhenStartedByAbility() {
+        let gs = makeGameState()
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        // Set well above the real cap purely to isolate the spend/refund delta from
+        // `abilityReady`'s affordability gate — the refund itself is still expected to clamp
+        // to the real castleMaxEnergy (20 by default), the same way energy regen does.
+        gs.castleEnergy = 100
+
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        XCTAssertEqual(gs.castleEnergy, 100 - CastleAbility.moveTower.energyCost, accuracy: 0.001)
+
+        gs.cancelPendingMoveTower()
+
+        XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001,
+                       "cancelling an ability-started move should refund energy, clamped to the max")
+        XCTAssertEqual(gs.moveTowerItemCount, 0, "must not also refund a Move Tower item")
+        XCTAssertFalse(gs.isSelectingTowerToMove)
+    }
+
+    func testCancelPendingMoveTower_refundsItemWhenStartedByItem() {
+        let gs = makeGameState()
+        gs.moveTowerItemCount = 1
+        gs.activateMoveTower()
+        XCTAssertEqual(gs.moveTowerItemCount, 0)
+        let energyBefore = gs.castleEnergy
+
+        gs.cancelPendingMoveTower()
+
+        XCTAssertEqual(gs.moveTowerItemCount, 1, "cancelling an item-started move should refund the item")
+        XCTAssertEqual(gs.castleEnergy, energyBefore, accuracy: 0.001, "must not also refund energy")
     }
 
     // MARK: Poison

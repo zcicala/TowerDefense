@@ -38,7 +38,7 @@ extension GameState {
         case .freeze:      applyFreeze(at: coord)
         case .poison:      applyPoisonCloud(at: coord)
         case .gravityWave: applyGravityWave(at: coord)
-        case .overchargeHeal: return false
+        case .overchargeHeal, .moveTower: return false
         }
         finishCast(ability)
         return true

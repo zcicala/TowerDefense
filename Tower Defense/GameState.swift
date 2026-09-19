@@ -25,6 +25,10 @@ enum CastleAbility: Int, CaseIterable {
                              // duration scaled to that tower's own level
     case gravityWave = 5     // area of increased gravity: hoppers can only jump one cell, and
                              // flying units fly half as high and lose their flight immunity
+    case moveTower = 6       // relocate a placed tower to an empty cell, mid-round — reuses the
+                             // Move Tower inventory item's own select-tower/select-destination
+                             // flow (see GameState.beginMoveTowerAbility), so it never actually
+                             // goes through `pendingAbility`/`castPendingAbility` below.
 
     /// Castle level required to have unlocked this ability.
     var requiredLevel: Int { rawValue }
@@ -39,6 +43,7 @@ enum CastleAbility: Int, CaseIterable {
         case .poison:          return "Poison"
         case .overchargeHeal:  return "Overcharge Heal"
         case .gravityWave:     return "Gravity Wave"
+        case .moveTower:       return "Move Tower"
         }
     }
 
@@ -50,6 +55,7 @@ enum CastleAbility: Int, CaseIterable {
         case .poison:          return 6
         case .overchargeHeal:  return 15
         case .gravityWave:     return 18
+        case .moveTower:       return 22
         }
     }
 
@@ -66,10 +72,14 @@ enum CastleAbility: Int, CaseIterable {
         case .poison:          return 5
         case .overchargeHeal:  return 5
         case .gravityWave:     return 10
+        case .moveTower:       return 0 // instant relocation, no ongoing timed effect
         }
     }
 
     /// True when the ability targets a tower (Overcharge Heal); false when it targets a cell.
+    /// Move Tower also starts by targeting a tower, but it drives its own two-step
+    /// select-tower/select-destination flow (see `GameState.beginMoveTowerAbility`) rather than
+    /// going through `pendingAbility`/`castPendingAbility` at all, so this is moot for it.
     var targetsTower: Bool { self == .overchargeHeal }
 
     /// Short instruction shown while selecting a target.
@@ -518,6 +528,10 @@ class GameState {
     var isSelectingTowerToMove: Bool = false
     /// Non-nil when a tower has been selected for moving and the player is choosing a destination.
     var pendingMoveTower: Tower? = nil
+    /// True when the in-progress move (`isSelectingTowerToMove`/`pendingMoveTower`) was started by
+    /// the Castle "Move Tower" ability (spending energy) rather than a Move Tower inventory item —
+    /// determines what `cancelPendingMoveTower()` refunds.
+    var moveTowerViaAbility: Bool = false
     /// True while the game is paused (only possible if hasPauseControl).
     var isPaused: Bool = false
     /// Number of visual blocks remaining (= ceil(maxHP/2), loses one every 2 HP lost)

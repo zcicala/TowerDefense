@@ -510,7 +510,7 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 157.8125 * 1.1)
+        t.cone = ConeState(duration: 3.5, dps: 157.8125 * 1.1 * 1.15)
         return t
     }
 
@@ -534,7 +534,7 @@ class Tower {
     static func makeSword(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .sword,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5 * 0.85, cooldown: 0.84)
+                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5 * 0.85 * 0.9, cooldown: 0.84)
         t.sword = SwordState(swingDuration: 0.28)
         return t
     }

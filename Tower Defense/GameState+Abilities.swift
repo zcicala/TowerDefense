@@ -123,6 +123,24 @@ extension GameState {
         return result
     }
 
+    /// Existing cells within the Gravity Wave field's radius of `center`, with their heights —
+    /// for placing the persistent ground-field visual. Mirrors `poisonCloudCells`; gameplay
+    /// itself (`updateGravityWaveField`) compares hex distance directly and doesn't need this.
+    func gravityWaveCells(around center: HexCoord) -> [(coord: HexCoord, height: Float)] {
+        var result: [(coord: HexCoord, height: Float)] = []
+        let radius = gravityWaveRadius
+        for dq in -radius...radius {
+            let rLow = max(-radius, -dq - radius)
+            let rHigh = min(radius, -dq + radius)
+            for dr in rLow...rHigh {
+                let coord = HexCoord(q: center.q + dq, r: center.r + dr)
+                guard let cell = hexGrid.cell(at: coord) else { continue }
+                result.append((coord, cell.height))
+            }
+        }
+        return result
+    }
+
     // MARK: - Per-frame update (called from update(deltaTime:))
 
     /// Regenerates castle energy toward its current max.

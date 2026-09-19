@@ -887,6 +887,14 @@ struct ContentView: View {
                                  duration: TimeInterval(CastleAbility.poison.duration))
     }
 
+    private func spawnGravityWaveField(at coord: HexCoord) {
+        guard let renderer else { return }
+        let cells = gameState.gravityWaveCells(around: coord)
+        guard !cells.isEmpty else { return }
+        renderer.showGravityWaveField(cells: cells, spacing: gameState.spacing,
+                                      duration: TimeInterval(CastleAbility.gravityWave.duration))
+    }
+
     /// Combat-phase HUD row of castle ability buttons (only those unlocked by castle level),
     /// gated by the shared castle energy pool rather than individual cooldowns.
     @ViewBuilder
@@ -1897,6 +1905,8 @@ struct ContentView: View {
                 spawnAbilityCastRings(ability: ability, at: coord)
                 if ability == .poison {
                     spawnPoisonCloud(at: coord)
+                } else if ability == .gravityWave {
+                    spawnGravityWaveField(at: coord)
                 }
             }
             return

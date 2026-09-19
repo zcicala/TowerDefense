@@ -1707,6 +1707,44 @@ class SceneRenderer {
         }
     }
 
+    /// Persistent violet particle field over every cell in the active Gravity Wave, for its
+    /// full (now much longer, 10s) duration — mirrors `showPoisonCloud`'s cast-and-forget,
+    /// self-cleaning pattern so the field visibly occupies its area the whole time it's active,
+    /// the same way the poison cloud does.
+    func showGravityWaveField(cells: [(coord: HexCoord, height: Float)], spacing: Float, duration: TimeInterval) {
+        guard let content else { return }
+        var entities: [Entity] = []
+        for (coord, height) in cells {
+            let pos = coord.worldPosition(spacing: spacing)
+            var emitter = ParticleEmitterComponent()
+            emitter.emitterShape = .torus
+            emitter.emitterShapeSize = [0.3, 0.06, 0.3]
+            emitter.speed = 0.12
+            emitter.speedVariation = 0.05
+            emitter.mainEmitter.birthRate = 45
+            emitter.mainEmitter.lifeSpan = 1.6
+            emitter.mainEmitter.size = 0.09
+            emitter.mainEmitter.sizeVariation = 0.03
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 0.75, green: 0.35, blue: 1.0, alpha: 0.8)),
+                end:   .single(.init(red: 0.35, green: 0.1, blue: 0.6, alpha: 0.0))
+            )
+            emitter.mainEmitter.blendMode = .additive
+            emitter.timing = .repeating(warmUp: 0, emit: .init(duration: duration), idle: .init(duration: 0))
+
+            let entity = Entity()
+            entity.components.set(emitter)
+            entity.position = SIMD3(pos.x, height + 0.1, pos.y)
+            content.add(entity)
+            entities.append(entity)
+        }
+        guard !entities.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(duration))
+            for entity in entities { entity.removeFromParent() }
+        }
+    }
+
     // MARK: - Ability Status Indicators
     //
     // Persistent per-entity indicators that stay visible for as long as a tower or enemy

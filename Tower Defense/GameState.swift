@@ -65,7 +65,7 @@ enum CastleAbility: Int, CaseIterable {
         case .freeze:          return 2
         case .poison:          return 5
         case .overchargeHeal:  return 5
-        case .gravityWave:     return 3
+        case .gravityWave:     return 10
         }
     }
 

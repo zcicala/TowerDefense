@@ -801,7 +801,7 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertTrue(gs.abilityUnlocked(.overcharge))
         XCTAssertFalse(gs.abilityUnlocked(.freeze))
         XCTAssertFalse(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(2))
@@ -810,10 +810,10 @@ final class CastleAbilityTests: XCTestCase {
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(3))
         XCTAssertTrue(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(4))
-        XCTAssertTrue(gs.abilityUnlocked(.invulnerability))
+        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
     }
 
@@ -897,64 +897,66 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertFalse(far.slowed)
     }
 
-    // MARK: Invulnerability
+    // MARK: Overcharge Heal
 
-    func testInvulnerability_protectsTowerFromExploder() {
-        let gs = makeGameState(pathLength: 6)
-        gs.phase = .combat
-        let tower = Tower(coord: HexCoord(q: 1, r: 0))
-        tower.hitPoints = 5
+    func testOverchargeHeal_rejectsNonHealerTower() {
+        let gs = makeGameState()
+        let tower = Tower(coord: HexCoord(q: 0, r: 0)) // default .projectile
         gs.towers.append(tower)
 
-        gs.pendingAbility = .invulnerability
-        XCTAssertTrue(gs.castPendingAbility(onTower: tower))
-        XCTAssertEqual(tower.abilityInvulnTimer, CastleAbility.invulnerability.duration, accuracy: 0.001)
-
-        killExploderAdjacent(to: tower, at: 2, in: gs)
-        XCTAssertEqual(tower.hitPoints, 5, "invulnerable tower takes no exploder damage")
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertFalse(gs.castPendingAbility(onTower: tower), "only a healer tower can be targeted")
+        XCTAssertEqual(gs.pendingAbility, .overchargeHeal, "ability stays pending so a different tower can be picked")
+        XCTAssertEqual(tower.overchargeHealTimer, 0)
     }
 
-    func testInvulnerability_expiresAndTowerBecomesVulnerable() {
-        let gs = makeGameState(pathLength: 6)
+    func testOverchargeHeal_durationScalesWithLevel_andRadiusBoostsThenReverts() {
+        let gs = makeGameState()
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        healer.applyUpgrade() // level 2
+        healer.applyUpgrade() // level 3
+        gs.towers.append(healer)
+        XCTAssertEqual(healer.effectiveHealRadius, 1, "normal (un-overcharged) radius before casting")
+
+        let energyBefore = gs.castleEnergy
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertTrue(gs.castPendingAbility(onTower: healer))
+        XCTAssertNil(gs.pendingAbility)
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.overchargeHeal.energyCost, accuracy: 0.001)
+
+        XCTAssertEqual(healer.overchargeHealTimer, 15, accuracy: 0.001, "5s per level, level 3 -> 15s")
+        XCTAssertEqual(healer.effectiveHealRadius, 3, "boosted radius while overcharged (not yet max level)")
+
+        healer.overchargeHealTimer = 0 // simulate expiry
+        XCTAssertEqual(healer.effectiveHealRadius, healer.healer!.radius, "radius reverts once overcharge ends")
+    }
+
+    func testOverchargeHeal_maxLevelTower_getsRadius4() {
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        for _ in 0..<(Tower.maxLevel - 1) { healer.applyUpgrade() }
+        XCTAssertEqual(healer.level, Tower.maxLevel)
+        healer.overchargeHealTimer = 1
+        XCTAssertEqual(healer.effectiveHealRadius, 4, "max-level healer gets radius 4, not 3, while overcharged")
+    }
+
+    func testOverchargeHeal_healsForFree_evenWithZeroChargesAndBeyondNormalRadius() {
+        let gs = makeGameState(pathLength: 3)
         gs.phase = .combat
-        let tower = Tower(coord: HexCoord(q: 1, r: 0))
-        tower.hitPoints = 5
-        gs.towers.append(tower)
-        // Keep a stationary out-of-range enemy so the round doesn't end while we advance time.
-        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 3, in: gs)
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        healer.healer!.charges = 0
+        let damaged = Tower(coord: HexCoord(q: 2, r: 0)) // hex distance 2: outside radius 1, inside boosted radius 3
+        damaged.hitPoints = 2
+        damaged.maxHitPoints = 5
+        gs.towers.append(contentsOf: [healer, damaged])
+        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 1, in: gs) // keep the round alive
 
-        gs.pendingAbility = .invulnerability
-        _ = gs.castPendingAbility(onTower: tower)
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertTrue(gs.castPendingAbility(onTower: healer))
 
-        // Advance beyond the 5s duration.
-        for _ in 0..<60 { _ = gs.update(deltaTime: 0.1) }
-        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+        _ = gs.update(deltaTime: 0.1)
 
-        killExploderAdjacent(to: tower, at: 2, in: gs)
-        XCTAssertLessThan(tower.hitPoints, 5, "once invuln expires the tower takes exploder damage")
-    }
-
-    /// Spawns an exploder adjacent to `tower` and kills it via a completed projectile so the
-    /// exploder-death damage pass runs inside `update`.
-    private func killExploderAdjacent(to tower: Tower, at cellIndex: Int, in gs: GameState) {
-        let exploder = Enemy(type: .exploder, hitPoints: 1, speed: 0,
-                             explosionRadius: 1, explosionDamage: 1)
-        exploder.currentCell = pathCell(at: cellIndex, in: gs)
-        exploder.active = true
-        gs.enemies.append(exploder)
-
-        let projectile = Projectile(
-            origin: SIMD3<Float>(0, 0, 0),
-            target: SIMD3<Float>(0, 0, 0),
-            totalFlightTime: 0.01,
-            damage: 100,
-            targetEnemyID: exploder.id
-        )
-        projectile.elapsed = projectile.totalFlightTime
-        gs.projectiles.append(projectile)
-
-        _ = gs.update(deltaTime: 0.05)
-        XCTAssertFalse(exploder.active, "exploder should have died from the projectile")
+        XCTAssertEqual(damaged.hitPoints, 3, "should heal despite zero charges and being outside the normal radius")
+        XCTAssertEqual(healer.healer!.charges, 0, "overcharged heals must not consume a charge")
     }
 
     // MARK: Gravity Well
@@ -1079,7 +1081,7 @@ final class CastleAbilityTests: XCTestCase {
         let gs = makeGameState()
         let tower = Tower(coord: HexCoord(q: 0, r: 0))
         tower.overchargeTimer = 2
-        tower.abilityInvulnTimer = 4
+        tower.overchargeHealTimer = 4
         gs.towers.append(tower)
         gs.castleEnergy = 3
         gs.pendingAbility = .freeze
@@ -1093,7 +1095,7 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertNil(gs.gravityWellCoord)
         XCTAssertEqual(gs.gravityWellTimer, 0, accuracy: 0.001)
         XCTAssertEqual(tower.overchargeTimer, 0, accuracy: 0.001)
-        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+        XCTAssertEqual(tower.overchargeHealTimer, 0, accuracy: 0.001)
     }
 
     func testStartRound_refillsCastleEnergy() {

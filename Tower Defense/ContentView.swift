@@ -180,7 +180,7 @@ struct ContentView: View {
                     for tower in gameState.towers {
                         guard let pos = gameState.towerWorldPosition(tower) else { continue }
                         renderer.setOverchargeIndicator(for: tower, at: pos, active: tower.overchargeTimer > 0)
-                        renderer.setInvulnerabilityIndicator(for: tower, at: pos, active: tower.abilityInvulnTimer > 0)
+                        renderer.setOverchargeHealIndicator(for: tower, at: pos, active: tower.overchargeHealTimer > 0)
                     }
                     for enemy in gameState.enemies where enemy.active {
                         guard let pos = gameState.enemyWorldPosition(enemy) else { continue }
@@ -854,7 +854,7 @@ struct ContentView: View {
         case .overcharge:      return .orange
         case .freeze:          return .cyan
         case .poison:          return .green
-        case .invulnerability: return .blue
+        case .overchargeHeal:  return .mint
         case .gravityWell:     return .purple
         }
     }
@@ -864,7 +864,7 @@ struct ContentView: View {
         case .overcharge:      return (1.0, 0.6, 0.1)
         case .freeze:          return (0.3, 0.85, 1.0)
         case .poison:          return (0.25, 0.9, 0.15)
-        case .invulnerability: return (0.3, 0.55, 1.0)
+        case .overchargeHeal:  return (0.3, 0.85, 0.45)
         case .gravityWell:     return (0.7, 0.3, 1.0)
         }
     }
@@ -1193,11 +1193,15 @@ struct ContentView: View {
             case .healer:
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        statRow("Charges", "\(tower.healer?.charges ?? 0)/\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                        statRow("Heal Radius", "\(tower.healer?.radius ?? 0)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Charges", tower.overchargeHealTimer > 0 ? "∞" : "\(tower.healer?.charges ?? 0)/\(tower.level)",
+                                label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Heal Radius", "\(tower.effectiveHealRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        if tower.overchargeHealTimer > 0 {
+                            statRow("Overcharged", "\(String(format: "%.1f", tower.overchargeHealTimer))s", label: statFont, labelColor: labelColor, valueColor: .mint)
+                        }
                     }
                 }
             case .fireball:
@@ -1701,10 +1705,15 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundColor(i < tower.hitPoints ? .red : .gray)
             }
-            if tower.isInvulnerable || tower.abilityInvulnTimer > 0 {
+            if tower.isInvulnerable {
                 Image(systemName: "shield.fill")
                     .font(.caption2)
                     .foregroundColor(.cyan)
+            }
+            if tower.overchargeHealTimer > 0 {
+                Image(systemName: "bolt.heart.fill")
+                    .font(.caption2)
+                    .foregroundColor(.mint)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -1876,7 +1885,7 @@ struct ContentView: View {
     private func handleTap(entity: Entity) {
         guard let renderer else { return }
 
-        // Castle ability — resolve on the tapped target (a tower for Invuln, else a cell).
+        // Castle ability — resolve on the tapped target (a tower for Overcharge Heal, else a cell).
         if let ability = gameState.pendingAbility {
             if ability.targetsTower {
                 if let coord = renderer.coord(for: entity), let tower = gameState.tower(at: coord),

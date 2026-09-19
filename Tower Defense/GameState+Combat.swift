@@ -193,7 +193,7 @@ extension GameState {
         for tower in towers {
             // Tick castle-ability timers on every tower (targeting towers included).
             if tower.overchargeTimer > 0 { tower.overchargeTimer = max(0, tower.overchargeTimer - deltaTime) }
-            if tower.abilityInvulnTimer > 0 { tower.abilityInvulnTimer = max(0, tower.abilityInvulnTimer - deltaTime) }
+            if tower.overchargeHealTimer > 0 { tower.overchargeHealTimer = max(0, tower.overchargeHealTimer - deltaTime) }
 
             if tower.type == .targeting { continue }
 
@@ -311,17 +311,21 @@ extension GameState {
                 continue
             }
 
-            // Healer: automatically heals a nearby damaged tower each cooldown
+            // Healer: automatically heals a nearby damaged tower each cooldown. While
+            // Overcharge Heal is active, the search uses the boosted radius and the heal
+            // doesn't spend a charge (nor require one to be available) — see
+            // `Tower.effectiveHealRadius` and `CastleAbility.overchargeHeal`.
             if tower.type == .healer {
-                if tower.cooldownRemaining <= 0 && tower.healer!.charges > 0 {
+                let overcharged = tower.overchargeHealTimer > 0
+                if tower.cooldownRemaining <= 0 && (overcharged || tower.healer!.charges > 0) {
                     let target = towers.first {
                         $0.id != tower.id &&
                         $0.hitPoints < $0.maxHitPoints &&
-                        $0.coord.distance(to: tower.coord) <= tower.healer!.radius
+                        $0.coord.distance(to: tower.coord) <= tower.effectiveHealRadius
                     }
                     if let target {
                         target.hitPoints = min(target.hitPoints + 1, target.maxHitPoints)
-                        tower.healer!.charges -= 1
+                        if !overcharged { tower.healer!.charges -= 1 }
                         tower.cooldownRemaining = tower.cooldown
                         events.healedTowers.append(target)
                     }
@@ -744,7 +748,7 @@ extension GameState {
             }
             for tower in towers {
                 if tower.coord.distance(to: coord) <= enemy.explosionRadius
-                    && !(tower.isInvulnerable || tower.abilityInvulnTimer > 0) {
+                    && !tower.isInvulnerable {
                     tower.hitPoints -= enemy.explosionDamage
                     if tower.hitPoints <= 0 {
                         events.destroyedTowers.append(tower)

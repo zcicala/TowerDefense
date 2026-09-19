@@ -452,9 +452,18 @@ class Tower {
     var isInvulnerable: Bool = false
     /// While > 0, this tower's firing cooldown recovers at 2× (Castle "Overcharge" ability).
     var overchargeTimer: Float = 0
-    /// While > 0, this tower is treated as invulnerable via the Castle "Invulnerability" ability,
-    /// independently of the permanent `isInvulnerable` flag owned by the invulnerable bonus tile.
-    var abilityInvulnTimer: Float = 0
+    /// While > 0, this (healer) tower's heal radius is boosted and its heals cost no charge —
+    /// the Castle "Overcharge Heal" ability. Set to `5 * level` seconds when cast; see
+    /// `effectiveHealRadius` for the radius bump and `GameState+Abilities.applyOverchargeHeal`.
+    var overchargeHealTimer: Float = 0
+    /// The heal radius this tower is currently using: boosted to 3 (4 at max level) while
+    /// `overchargeHealTimer` is active, otherwise its normal upgrade-driven `healer.radius`.
+    /// Only meaningful for `.healer` towers (returns 0 for everyone else).
+    var effectiveHealRadius: Int {
+        guard let healer else { return 0 }
+        guard overchargeHealTimer > 0 else { return healer.radius }
+        return level == Tower.maxLevel ? 4 : 3
+    }
     var hasSlowAura: Bool = false
     var slowedCoords: Set<HexCoord> = []
     var hasDamageAura: Bool = false

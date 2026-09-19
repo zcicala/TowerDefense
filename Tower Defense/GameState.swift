@@ -21,7 +21,8 @@ enum CastleAbility: Int, CaseIterable {
     case overcharge = 1      // towers on/adjacent to a cell fire 2× as fast
     case freeze = 2          // freeze enemies in a cell and its neighbors
     case poison = 3          // green cloud in a radius; enemies that walk through it get poisoned
-    case invulnerability = 4 // make a tower invulnerable
+    case overchargeHeal = 4  // boost a healer tower's radius and make its heals free, for a
+                             // duration scaled to that tower's own level
     case gravityWell = 5     // pull nearby enemies toward a tile and hold them
 
     /// Castle level required to have unlocked this ability.
@@ -35,7 +36,7 @@ enum CastleAbility: Int, CaseIterable {
         case .overcharge:      return "Overcharge"
         case .freeze:          return "Freeze"
         case .poison:          return "Poison"
-        case .invulnerability: return "Invuln"
+        case .overchargeHeal:  return "Overcharge Heal"
         case .gravityWell:     return "Gravity Well"
         }
     }
@@ -46,7 +47,7 @@ enum CastleAbility: Int, CaseIterable {
         case .overcharge:      return 8
         case .freeze:          return 10
         case .poison:          return 6
-        case .invulnerability: return 15
+        case .overchargeHeal:  return 15
         case .gravityWell:     return 18
         }
     }
@@ -54,22 +55,25 @@ enum CastleAbility: Int, CaseIterable {
     /// How long the ability's effect lasts once cast. For Poison this is the cloud's own
     /// lifetime — how long it keeps infecting enemies that walk through it — not how long the
     /// poison DOT lingers on an enemy afterward (see `GameState.poisonDOTDuration`).
+    /// Overcharge Heal's *actual* duration depends on the targeted healer's level
+    /// (`5 * tower.level`, see `applyOverchargeHeal`) — the value here is just what a
+    /// level-1 healer would get, since nothing currently needs a level-independent constant.
     var duration: Float {
         switch self {
         case .overcharge:      return 3
         case .freeze:          return 2
         case .poison:          return 5
-        case .invulnerability: return 5
+        case .overchargeHeal:  return 5
         case .gravityWell:     return 3
         }
     }
 
-    /// True when the ability targets a tower (Invulnerability); false when it targets a cell.
-    var targetsTower: Bool { self == .invulnerability }
+    /// True when the ability targets a tower (Overcharge Heal); false when it targets a cell.
+    var targetsTower: Bool { self == .overchargeHeal }
 
     /// Short instruction shown while selecting a target.
     var targetPrompt: String {
-        if targetsTower { return "Click a tower to protect it." }
+        if self == .overchargeHeal { return "Click a heal tower to overcharge it." }
         if self == .poison { return "Click a cell to release poison gas." }
         return "Click a cell to cast."
     }

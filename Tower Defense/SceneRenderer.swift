@@ -1714,7 +1714,7 @@ class SceneRenderer {
     // toggle driven every frame from live `Tower`/`Enemy` state, mirroring the shield-dome pattern.
 
     private var overchargeIndicatorEntities: [UUID: Entity] = [:]
-    private var invulnerabilityIndicatorEntities: [UUID: Entity] = [:]
+    private var overchargeHealIndicatorEntities: [UUID: Entity] = [:]
     private var frozenIndicatorEntities: [UUID: Entity] = [:]
     private var gravityPullIndicatorEntities: [UUID: Entity] = [:]
 
@@ -1756,9 +1756,10 @@ class SceneRenderer {
         }
     }
 
-    private func makeInvulnerabilityShell(at position: SIMD3<Float>) -> Entity {
+    private func makeOverchargeHealShell(at position: SIMD3<Float>) -> Entity {
         let mesh = MeshResource.generateSphere(radius: 0.32)
-        var material = UnlitMaterial(color: .init(red: 0.3, green: 0.55, blue: 1.0, alpha: 0.28))
+        // Soft green, matching the healer tower's own tint (SceneRenderer's healer case).
+        var material = UnlitMaterial(color: .init(red: 0.3, green: 0.85, blue: 0.45, alpha: 0.28))
         material.blending = .transparent(opacity: .init(floatLiteral: 0.28))
 
         let entity = Entity()
@@ -1767,19 +1768,19 @@ class SceneRenderer {
         return entity
     }
 
-    /// Shows or hides the translucent blue shield shell while a tower is ability-invulnerable.
-    func setInvulnerabilityIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
+    /// Shows or hides the translucent green shell while a healer tower's Overcharge Heal is active.
+    func setOverchargeHealIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
         if active {
-            if let entity = invulnerabilityIndicatorEntities[tower.id] {
+            if let entity = overchargeHealIndicatorEntities[tower.id] {
                 entity.position = SIMD3(position.x, position.y + 0.2, position.z)
             } else if let content {
-                let entity = makeInvulnerabilityShell(at: position)
+                let entity = makeOverchargeHealShell(at: position)
                 content.add(entity)
-                invulnerabilityIndicatorEntities[tower.id] = entity
+                overchargeHealIndicatorEntities[tower.id] = entity
             }
         } else {
-            invulnerabilityIndicatorEntities[tower.id]?.removeFromParent()
-            invulnerabilityIndicatorEntities.removeValue(forKey: tower.id)
+            overchargeHealIndicatorEntities[tower.id]?.removeFromParent()
+            overchargeHealIndicatorEntities.removeValue(forKey: tower.id)
         }
     }
 
@@ -1873,16 +1874,16 @@ class SceneRenderer {
     func removeAbilityIndicators(forTower id: UUID) {
         overchargeIndicatorEntities[id]?.removeFromParent()
         overchargeIndicatorEntities.removeValue(forKey: id)
-        invulnerabilityIndicatorEntities[id]?.removeFromParent()
-        invulnerabilityIndicatorEntities.removeValue(forKey: id)
+        overchargeHealIndicatorEntities[id]?.removeFromParent()
+        overchargeHealIndicatorEntities.removeValue(forKey: id)
     }
 
     /// Removes all per-enemy and per-tower ability indicators (called on round-over cleanup).
     func removeAllAbilityIndicators() {
         for (_, entity) in overchargeIndicatorEntities { entity.removeFromParent() }
         overchargeIndicatorEntities.removeAll()
-        for (_, entity) in invulnerabilityIndicatorEntities { entity.removeFromParent() }
-        invulnerabilityIndicatorEntities.removeAll()
+        for (_, entity) in overchargeHealIndicatorEntities { entity.removeFromParent() }
+        overchargeHealIndicatorEntities.removeAll()
         for (_, entity) in frozenIndicatorEntities { entity.removeFromParent() }
         frozenIndicatorEntities.removeAll()
         for (_, entity) in gravityPullIndicatorEntities { entity.removeFromParent() }

@@ -431,8 +431,6 @@ class Tower {
     var coord: HexCoord
     let type: TowerType
     var targetingMode: TargetingMode = .closest
-    /// Set by the player via manual attack mode (level 4+ targeting tower in range).
-    var manualTargetEnemyID: UUID? = nil
     /// Non-nil for max-level projectile towers — an independently rotating second turret.
     var secondTurret: SecondTurretState? = nil
     var level: Int = 1
@@ -475,8 +473,6 @@ class Tower {
     var targetTypeRestrictions: Set<EnemyType> = []
     /// Set via a level-2+ Targeting Tower: this tower prioritises this enemy type when selecting targets.
     var priorityEnemyType: EnemyType? = nil
-    /// When set, tower only fires at enemies whose nearest coord matches this cell.
-    var lockedTargetCoord: HexCoord? = nil
 
     // Type-specific state — only the relevant one is non-nil for a given tower
     var laser: LaserState? = nil
@@ -578,7 +574,7 @@ class Tower {
     static func makeLightning(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .lightning,
                       detectionRadius: 3, fireRadius: 3,
-                      projectileSpeed: 0, damage: 198 * 1.2, cooldown: 2.5)
+                      projectileSpeed: 0, damage: 198 * 1.2 * 1.2, cooldown: 2.5)
         t.lightning = LightningState(duration: 0.5, range: 3)
         return t
     }

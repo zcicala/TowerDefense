@@ -51,9 +51,9 @@ extension GameState {
             e.resistances[.physical] = 0.5
             return e
         case .hopper:
-            return Enemy(type: .hopper, hitPoints: debutHP(for: .hopper, multiplier: 0.7), speed: speed)
+            return Enemy(type: .hopper, hitPoints: debutHP(for: .hopper, multiplier: 0.35), speed: speed)
         case .superHopper:
-            return Enemy(type: .superHopper, hitPoints: debutHP(for: .superHopper, multiplier: 3.0), speed: speed * 1.2)
+            return Enemy(type: .superHopper, hitPoints: debutHP(for: .superHopper, multiplier: 1.5), speed: speed * 1.2)
         case .boss:
             // Mr Grump is the one enemy that still gets proportionally harder every time he
             // shows up — both HP (unchanged formula) and now baseDamage scale with round.

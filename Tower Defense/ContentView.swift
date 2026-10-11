@@ -36,9 +36,6 @@ struct ContentView: View {
     @State private var dialogRefresh: Int = 0
     @State private var viewSize: CGSize = CGSize(width: 800, height: 600)
     @State private var hoveredPlacementCoord: HexCoord? = nil
-    /// True while waiting for the player to click an enemy for manual attack lock.
-    @State private var isPendingManualTarget: Bool = false
-    @State private var isPendingTargetLock: Bool = false
 
     var body: some View {
         gameScreen
@@ -363,15 +360,7 @@ struct ContentView: View {
                 }
             }
             .focusable()
-            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d"), .init("x")], phases: [.down, .repeat]) { press in
-                // 'x' triggers/cancels manual attack lock when a qualifying tower is selected
-                if press.characters == "x",
-                   gameState.phase == .combat,
-                   let tower = selectedTower,
-                   gameState.globalTargetingLevel >= 4 {
-                    isPendingManualTarget.toggle()
-                    return .handled
-                }
+            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d")], phases: [.down, .repeat]) { press in
                 guard cameraEntity != nil else { return .ignored }
                 keysPressed.insert(press.characters)
                 return .handled
@@ -753,28 +742,6 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
-            // Manual attack lock — pick an enemy to focus
-            if isPendingManualTarget {
-                VStack(spacing: 6) {
-                    Text("Attack — Select an Enemy")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Text("Click an enemy to lock this tower onto it.")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                    Button("Cancel") { isPendingManualTarget = false }
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
-            }
-
             // Castle ability — pick a target to cast on
             if let ability = gameState.pendingAbility {
                 VStack(spacing: 6) {
@@ -786,28 +753,6 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
                     Button("Cancel") { gameState.cancelPendingAbility() }
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
-            }
-
-            // Target lock — pick a path cell to restrict firing to
-            if isPendingTargetLock {
-                VStack(spacing: 6) {
-                    Text("Target Lock — Select a Cell")
-                        .font(.headline)
-                        .foregroundColor(.cyan)
-                    Text("Click a path cell. The tower will only fire at enemies on that cell.")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                    Button("Cancel") { isPendingTargetLock = false }
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
                 }
@@ -837,15 +782,11 @@ struct ContentView: View {
 
         }
         .onChange(of: gameState.selectedTowerType) { _, _ in
-            isPendingManualTarget = false
-            isPendingTargetLock = false
             renderer?.removeGhostTower()
             renderer?.removeRangeHighlights()
             hoveredPlacementCoord = nil
         }
         .onChange(of: gameState.phase) { _, _ in
-            isPendingManualTarget = false
-            isPendingTargetLock = false
             renderer?.removeGhostTower()
             renderer?.removeRangeHighlights()
             hoveredPlacementCoord = nil
@@ -1297,7 +1238,7 @@ struct ContentView: View {
             if tower.type != .targeting {
                 let tLevel = gameState.globalTargetingLevel
                 let detectBonus = tLevel >= 1
-                let fireBonus   = tLevel >= 5
+                let fireBonus   = tLevel >= 3
                 Divider().background(.white.opacity(0.2))
                 HStack(spacing: 12) {
                     statRow("Fire Range",
@@ -1819,35 +1760,8 @@ struct ContentView: View {
                 .tint(tower.targetingMode == mode ? .blue : .gray)
             }
 
-            // Level 2+: target lock (restrict firing to a specific path cell)
+            // Level 2+: priority enemy type
             if tLevel >= 2 {
-                Divider().background(.white.opacity(0.3))
-                if let lockCoord = tower.lockedTargetCoord {
-                    Text("Cell Lock: (\(lockCoord.q), \(lockCoord.r))")
-                        .font(.caption.bold())
-                        .foregroundColor(.cyan)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    Button("Remove Lock") {
-                        tower.lockedTargetCoord = nil
-                        isPendingTargetLock = false
-                        dialogRefresh += 1
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.gray)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    Button(isPendingTargetLock && selectedTower?.id == tower.id ? "Click a Path Cell…" : "Target Lock") {
-                        isPendingTargetLock.toggle()
-                        isPendingManualTarget = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isPendingTargetLock && selectedTower?.id == tower.id ? .orange : .cyan)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-            }
-
-            // Level 3+: priority enemy type
-            if tLevel >= 3 {
                 Divider().background(.white.opacity(0.3))
                 Text("Priority Target")
                     .font(.caption)
@@ -1864,33 +1778,6 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, alignment: .center)
-            }
-
-            // Level 4+: manual attack lock
-            if tLevel >= 4 && gameState.phase == .combat {
-                Divider().background(.white.opacity(0.3))
-                if let manualID = tower.manualTargetEnemyID,
-                   let locked = gameState.enemies.first(where: { $0.id == manualID && $0.active }) {
-                    Text("Locked: \(locked.enemyType.displayName)")
-                        .font(.caption.bold())
-                        .foregroundColor(.red)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    Button("Clear Lock") {
-                        tower.manualTargetEnemyID = nil
-                        dialogRefresh += 1
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.gray)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    Button(isPendingManualTarget && selectedTower?.id == tower.id ? "Click an Enemy…" : "Attack (X)") {
-                        isPendingManualTarget.toggle()
-                        isPendingTargetLock = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isPendingManualTarget && selectedTower?.id == tower.id ? .orange : .red)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
             }
 
             Divider().background(.white.opacity(0.3))
@@ -1932,28 +1819,6 @@ struct ContentView: View {
                     spawnGravityWaveField(at: coord)
                 }
             }
-            return
-        }
-
-        // Manual attack lock — clicking an enemy sets it as the focused target
-        if isPendingManualTarget {
-            if let id = renderer.enemyID(for: entity),
-               let enemy = gameState.enemies.first(where: { $0.id == id && $0.active }) {
-                selectedTower?.manualTargetEnemyID = enemy.id
-                dialogRefresh += 1
-            }
-            isPendingManualTarget = false
-            return
-        }
-
-        if isPendingTargetLock {
-            if let coord = renderer.coord(for: entity),
-               let cell = gameState.hexGrid.cell(at: coord),
-               cell.type == .path || cell.type == .start || cell.type == .end {
-                selectedTower?.lockedTargetCoord = coord
-                dialogRefresh += 1
-            }
-            isPendingTargetLock = false
             return
         }
 

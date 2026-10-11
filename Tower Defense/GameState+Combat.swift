@@ -420,13 +420,7 @@ extension GameState {
             let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID ?? tower.lightning?.chainTargetIDs.first
             if isFiring, let lockedID,
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
-                // Respect cell lock even while firing — don't track enemy that left the locked cell
-                if let lockCoord = tower.lockedTargetCoord,
-                   enemyNearestCoord(locked) != lockCoord {
-                    closestEnemy = nil
-                } else {
-                    closestEnemy = locked
-                }
+                closestEnemy = locked
             } else {
                 closestEnemy = selectTarget(for: tower, targetingLevel: tLevel)
             }
@@ -476,12 +470,7 @@ extension GameState {
                 let tooClose = lockedTarget.flatMap { enemyNearestCoord($0) }
                     .map { tower.coord.distance(to: $0) <= 1 } ?? false
 
-                // Stop if locked enemy has left the tower's cell lock zone
-                let leftCellLock = tower.lockedTargetCoord.map { lockCoord in
-                    lockedTarget.flatMap { enemyNearestCoord($0) } != lockCoord
-                } ?? false
-
-                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose || leftCellLock {
+                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose {
                     tower.laser!.isFiring = false
                     tower.laser!.timeRemaining = 0
                     tower.laser!.lockedTargetID = nil
@@ -1074,32 +1063,20 @@ extension GameState {
 
     /// Effective fire radius for a tower given the highest targeting tower level covering it.
     func effectiveFireRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
-        tLevel >= 5 ? tower.fireRadius + 1 : tower.fireRadius
+        tLevel >= 3 ? tower.fireRadius + 1 : tower.fireRadius
     }
 
     /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
     func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
-        // Level 4+: manual attack lock takes highest priority
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
-            if let locked = enemies.first(where: { $0.id == manualID && $0.active }),
-               let coord = enemyNearestCoord(locked),
-               tower.coord.distance(to: coord) <= effectiveDetectionRadius(for: tower, targetingLevel: tLevel) {
-                return locked
-            }
-            tower.manualTargetEnemyID = nil  // enemy dead or out of range
-        }
-
         // Level 1+: detection +1
         let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
 
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
-            // Level 3+: skip enemies this tower type cannot damage
-            if tLevel >= 3 && enemy.immuneTowerTypes.contains(tower.type) { continue }
+            // Level 2+: skip enemies this tower type cannot damage
+            if tLevel >= 2 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            // Level 2+: target lock — only consider enemies in the locked cell
-            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
             if dist <= effectiveDetection { candidates.append((enemy, dist)) }
@@ -1109,8 +1086,8 @@ extension GameState {
         // Level 1+: use tower's chosen targeting mode
         let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
 
-        // Level 3+: prioritise a chosen enemy type before applying targeting mode
-        if tLevel >= 3, let priorityType = tower.priorityEnemyType {
+        // Level 2+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 2, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
             if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
@@ -1285,15 +1262,12 @@ extension GameState {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
             if skipImmuneTargets && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if dist <= effectiveDetection {
                 candidates.append((enemy, dist))
             }
         }
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
-            candidates.sort { a, _ in a.enemy.id == manualID }
-        } else if preferFurthest {
+        if preferFurthest {
             candidates.sort { enemyPathProgress($0.enemy) > enemyPathProgress($1.enemy) }
         } else {
             candidates.sort { $0.distance < $1.distance }

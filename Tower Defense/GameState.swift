@@ -21,10 +21,10 @@ enum CastleAbility: Int, CaseIterable {
     case overcharge = 1      // towers on/adjacent to a cell fire 2× as fast
     case freeze = 2          // freeze enemies in a cell and its neighbors
     case poison = 3          // green cloud in a radius; enemies that walk through it get poisoned
-    case overchargeHeal = 4  // boost a healer tower's radius and make its heals free, for a
-                             // duration scaled to that tower's own level
-    case gravityWave = 5     // area of increased gravity: hoppers can only jump one cell, and
+    case gravityWave = 4     // area of increased gravity: hoppers can only jump one cell, and
                              // flying units fly half as high and lose their flight immunity
+    case overchargeHeal = 5  // boost a healer tower's radius and make its heals free, for a
+                             // duration scaled to that tower's own level
     case moveTower = 6       // relocate a placed tower to an empty cell, mid-round — reuses the
                              // Move Tower inventory item's own select-tower/select-destination
                              // flow (see GameState.beginMoveTowerAbility), so it never actually
@@ -54,7 +54,7 @@ enum CastleAbility: Int, CaseIterable {
         case .freeze:          return 10
         case .poison:          return 6
         case .overchargeHeal:  return 15
-        case .gravityWave:     return 18
+        case .gravityWave:     return 16
         case .moveTower:       return 22
         }
     }
@@ -97,7 +97,7 @@ enum TechNodeID: Hashable {
     case farmUnlock
     case towerLevel(TowerType, Int)  // target starting level (2 – Tower.maxLevel)
     case baseTowerLevel(Int)         // base/center tower upgrade level (2 – 6)
-    case targetingFeature(Int)       // global targeting upgrade (1 – 5)
+    case targetingFeature(Int)       // global targeting upgrade (1 – 3)
     case startingGold(Int)           // starting gold upgrade (1 – 5), +50 gold each
 }
 
@@ -141,11 +141,11 @@ class GameState {
             (.projectile, 2, []),
             (.bowler,     2, [.towerUnlock(.projectile)]),
             (.laser,      3, [.towerUnlock(.projectile)]),
-            (.fire,       3, [.towerUnlock(.projectile)]),
+            (.fire,       2, [.towerUnlock(.projectile)]),
             (.fireball,   5, [.towerUnlock(.laser), .towerUnlock(.fire)]),
-            (.ice,        3, [.farmUnlock]),
+            (.ice,        2, [.farmUnlock]),
             (.antiAir,    3, [.farmUnlock]),
-            (.healer,     4, [.targetingFeature(1)]),
+            (.healer,     2, [.targetingFeature(1)]),
             (.lightning,  6, [.towerUnlock(.projectile)]),
         ]
 
@@ -231,10 +231,8 @@ class GameState {
         // Global targeting upgrades — apply to all towers once purchased
         let targetingDefs: [(Int, String, String, Int, [TechNodeID])] = [
             (1, "Advanced Targeting",  "All towers: choose priority target type, +1 detect range, +50% turret turn speed", 3, []),
-            (2, "Target Lock",         "All towers: lock fire to a specific path cell",     2, [.targetingFeature(1)]),
-            (3, "Priority Type",       "All towers: set a preferred enemy type, skip immune enemies", 2, [.targetingFeature(2)]),
-            (4, "Manual Lock",         "All towers: manually lock attack target (X)",        3, [.targetingFeature(3)]),
-            (5, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(4)]),
+            (2, "Priority Type",       "All towers: set a preferred enemy type, skip immune enemies", 2, [.targetingFeature(1)]),
+            (3, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(2)]),
         ]
         for (feat, title, desc, cost, prereqs) in targetingDefs {
             nodes.append(.init(id: .targetingFeature(feat), title: title, description: desc,
@@ -407,7 +405,7 @@ class GameState {
 
     /// Highest purchased global targeting feature level (0 = none purchased).
     var globalTargetingLevel: Int {
-        for feat in stride(from: 5, through: 1, by: -1) {
+        for feat in stride(from: 3, through: 1, by: -1) {
             if purchasedTechNodes.contains(.targetingFeature(feat)) { return feat }
         }
         return 0

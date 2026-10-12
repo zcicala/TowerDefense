@@ -443,11 +443,11 @@ final class CombatTests: XCTestCase {
 
     // MARK: Spawn cap and bruisers
 
-    func testEnemyCount_scalesThenCapsAtFifty() {
+    func testEnemyCount_scalesThenCapsAtForty() {
         XCTAssertEqual(GameState.enemyCount(forRound: 1), 6)
-        XCTAssertEqual(GameState.enemyCount(forRound: 15), 48)
-        XCTAssertEqual(GameState.enemyCount(forRound: 16), 50)
-        XCTAssertEqual(GameState.enemyCount(forRound: 60), 50)
+        XCTAssertEqual(GameState.enemyCount(forRound: 12), 39)
+        XCTAssertEqual(GameState.enemyCount(forRound: 13), 40)
+        XCTAssertEqual(GameState.enemyCount(forRound: 60), 40)
     }
 
     func testStartRound_lateRound_spawnsCappedCountPlusBoss() {

@@ -98,14 +98,14 @@ extension GameState {
             // buff while alive (see `applyWardenAura` in GameState+Combat.swift).
             return Enemy(type: .warden, hitPoints: debutHP(for: .warden, multiplier: 3.6), speed: speed * 0.8, baseDamage: 2)
         case .brute:
-            // Late-game bruiser (~49k HP): no resistances, just a lot of health.
-            return Enemy(type: .brute, hitPoints: debutHP(for: .brute, multiplier: 7.7), speed: speed * 0.8, baseDamage: 3)
+            // Late-game bruiser (~77k HP): no resistances, just a lot of health.
+            return Enemy(type: .brute, hitPoints: debutHP(for: .brute, multiplier: 12.0), speed: speed * 0.8, baseDamage: 3)
         case .colossus:
-            // ~91k HP.
-            return Enemy(type: .colossus, hitPoints: debutHP(for: .colossus, multiplier: 11.0), speed: speed * 0.7, baseDamage: 4)
+            // ~124k HP.
+            return Enemy(type: .colossus, hitPoints: debutHP(for: .colossus, multiplier: 15.0), speed: speed * 0.7, baseDamage: 4)
         case .titan:
-            // ~179k HP.
-            return Enemy(type: .titan, hitPoints: debutHP(for: .titan, multiplier: 20.0), speed: speed * 0.6, baseDamage: 5)
+            // ~214k HP.
+            return Enemy(type: .titan, hitPoints: debutHP(for: .titan, multiplier: 24.0), speed: speed * 0.6, baseDamage: 5)
         }
     }
 

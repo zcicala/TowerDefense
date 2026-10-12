@@ -675,7 +675,7 @@ class GameState {
 
     /// Hard cap on regular (non-boss) enemies per round. Past this, waves stay the same size
     /// and total HP keeps growing through heavier enemy types instead of more bodies.
-    static let maxEnemiesPerRound = 50
+    static let maxEnemiesPerRound = 40
 
     /// Number of regular enemies spawned in `round`: `3 + 3·round`, capped at `maxEnemiesPerRound`.
     static func enemyCount(forRound round: Int) -> Int {

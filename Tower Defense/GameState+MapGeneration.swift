@@ -281,7 +281,7 @@ extension GameState {
             case .bank:
                 break  // banks don't benefit towers directly
             case .quarry:
-                tower.maxHitPoints += farm.accumulatedHP
+                tower.maxHitPoints += farm.accumulatedHP * Tower.hpPerHeart
                 tower.hitPoints = tower.maxHitPoints
             case .crystalStructure:
                 break  // no tower bonus — building here simply gives up its energy bonus
@@ -392,7 +392,7 @@ extension GameState {
     func useTowerHealItem(on tower: Tower) -> Bool {
         guard towerHealItemCount > 0, tower.hitPoints < tower.maxHitPoints else { return false }
         towerHealItemCount -= 1
-        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2 * Tower.hpPerHeart)
         return true
     }
 
@@ -400,7 +400,7 @@ extension GameState {
     func repairTower(_ tower: Tower) -> Bool {
         guard tower.hitPoints < tower.maxHitPoints, money >= repairCost else { return false }
         money -= repairCost
-        tower.hitPoints += 1
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + Tower.hpPerHeart)
         return true
     }
 
@@ -469,7 +469,7 @@ extension GameState {
     func applyPendingTowerHeal(on tower: Tower) -> Bool {
         guard isPendingTowerHeal, tower.hitPoints < tower.maxHitPoints else { return false }
         towerHealItemCount -= 1
-        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2 * Tower.hpPerHeart)
         isPendingTowerHeal = false
         return true
     }
@@ -544,8 +544,9 @@ extension GameState {
             case .bank:
                 break
             case .quarry:
-                tower.maxHitPoints += farm.accumulatedHP
-                tower.hitPoints = min(tower.hitPoints + farm.accumulatedHP, tower.maxHitPoints)
+                let bonusHP = farm.accumulatedHP * Tower.hpPerHeart
+                tower.maxHitPoints += bonusHP
+                tower.hitPoints = min(tower.hitPoints + bonusHP, tower.maxHitPoints)
             case .crystalStructure:
                 break  // no tower bonus — building here simply gives up its energy bonus
             }

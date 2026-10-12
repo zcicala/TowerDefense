@@ -445,8 +445,13 @@ class Tower {
     var targetYaw: Float = 0
     var hasTarget: Bool = false
     let turretRotationSpeed: Float = 3.0
-    var hitPoints: Int = 5
-    var maxHitPoints: Int = 5
+    /// Hit points of one displayed heart. Tower HP is an integer number of points;
+    /// heals and damage that used to be expressed in hearts are multiples of this.
+    static let hpPerHeart = 100
+    var hitPoints: Int = 5 * Tower.hpPerHeart
+    var maxHitPoints: Int = 5 * Tower.hpPerHeart
+    /// Number of hearts to draw for a given HP value (partial hearts round up).
+    static func hearts(for hp: Int) -> Int { (max(0, hp) + hpPerHeart - 1) / hpPerHeart }
     var isInvulnerable: Bool = false
     /// While > 0, this tower's firing cooldown recovers at 2× (Castle "Overcharge" ability).
     var overchargeTimer: Float = 0
@@ -631,8 +636,8 @@ class Tower {
             // another — this fires exactly once, on the level 3 -> 4 transition, whether
             // purchased one level at a time or applied retroactively via a tech node).
             if level == 4 {
-                hitPoints += 1
-                maxHitPoints += 1
+                hitPoints += Tower.hpPerHeart
+                maxHitPoints += Tower.hpPerHeart
             }
         case .healer:
             healer!.charges = level

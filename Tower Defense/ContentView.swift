@@ -1606,12 +1606,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
         case .quarry:
-            Text(farm.accumulatedHP > 0 ? "Stored HP: +\(farm.accumulatedHP)" : "No HP stored yet")
+            Text(farm.accumulatedHP > 0 ? "Stored HP: +\(farm.accumulatedHP * Tower.hpPerHeart)" : "No HP stored yet")
                 .font(.caption)
                 .foregroundColor(farm.accumulatedHP > 0 ? .cyan : .white.opacity(0.5))
                 .frame(maxWidth: .infinity, alignment: .center)
             let roundsToNext = 4 - (farm.roundsGrown % 4)
-            Text("+1 HP in \(roundsToNext) round\(roundsToNext == 1 ? "" : "s")")
+            Text("+\(Tower.hpPerHeart) HP in \(roundsToNext) round\(roundsToNext == 1 ? "" : "s")")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.4))
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1672,11 +1672,15 @@ struct ContentView: View {
             Text("HP:")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.white.opacity(0.6))
-            ForEach(0..<tower.maxHitPoints, id: \.self) { i in
-                Image(systemName: i < tower.hitPoints ? "heart.fill" : "heart")
+            let filledHearts = Tower.hearts(for: tower.hitPoints)
+            ForEach(0..<Tower.hearts(for: tower.maxHitPoints), id: \.self) { i in
+                Image(systemName: i < filledHearts ? "heart.fill" : "heart")
                     .font(.caption2)
-                    .foregroundColor(i < tower.hitPoints ? .red : .gray)
+                    .foregroundColor(i < filledHearts ? .red : .gray)
             }
+            Text("\(tower.hitPoints)/\(tower.maxHitPoints)")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.white.opacity(0.6))
             if tower.isInvulnerable {
                 Image(systemName: "shield.fill")
                     .font(.caption2)
@@ -1730,7 +1734,7 @@ struct ContentView: View {
             .disabled(gameState.money < 75)
             .frame(maxWidth: .infinity, alignment: .center)
 
-            Button("Heal +2 HP ×\(gameState.towerHealItemCount)") {
+            Button("Heal +\(2 * Tower.hpPerHeart) HP ×\(gameState.towerHealItemCount)") {
                 if gameState.useTowerHealItem(on: tower) { dialogRefresh += 1 }
             }
             .buttonStyle(.bordered)

@@ -293,6 +293,11 @@ enum EnemyType: CaseIterable {
     // Act III "Apex" archetypes
     case nullifier
     case warden
+    // Late-game "bruisers": plain high-HP bodies that let the capped spawn count keep total
+    // wave HP climbing (see `GameState.maxEnemiesPerRound`).
+    case brute
+    case colossus
+    case titan
 
     var displayName: String {
         switch self {
@@ -313,6 +318,9 @@ enum EnemyType: CaseIterable {
         case .cinder:       return "Cinder"
         case .nullifier:    return "Nullifier"
         case .warden:       return "Warden"
+        case .brute:        return "Brute"
+        case .colossus:     return "Colossus"
+        case .titan:        return "Titan"
         }
     }
 
@@ -341,6 +349,9 @@ enum EnemyType: CaseIterable {
         case .cinder:        return 1.6
         case .nullifier:     return 2.2
         case .warden:        return 1.9
+        case .brute:         return 2.3
+        case .colossus:      return 2.6
+        case .titan:         return 3.0
         }
     }
 }

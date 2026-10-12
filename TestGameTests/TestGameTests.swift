@@ -441,6 +441,41 @@ final class CombatTests: XCTestCase {
         XCTAssertTrue(actIII.contains(.warden))
     }
 
+    // MARK: Spawn cap and bruisers
+
+    func testEnemyCount_scalesThenCapsAtFifty() {
+        XCTAssertEqual(GameState.enemyCount(forRound: 1), 6)
+        XCTAssertEqual(GameState.enemyCount(forRound: 15), 48)
+        XCTAssertEqual(GameState.enemyCount(forRound: 16), 50)
+        XCTAssertEqual(GameState.enemyCount(forRound: 60), 50)
+    }
+
+    func testStartRound_lateRound_spawnsCappedCountPlusBoss() {
+        let gs = makeGameState()
+        gs.round = 39  // startRound() advances to 40
+        gs.startRound()
+        XCTAssertEqual(gs.enemies.count, GameState.maxEnemiesPerRound + 1)  // + boss
+    }
+
+    func testBruisers_haveFixedHPFromDebutRound() {
+        let gs = makeGameState()
+        let brute = gs._makeEnemy(type: .brute, hp: 1, speed: 1.0)
+        let titan = gs._makeEnemy(type: .titan, hp: 1, speed: 1.0)
+        gs.round = 20
+        XCTAssertEqual(gs._makeEnemy(type: .brute, hp: 1, speed: 1.0).hitPoints, brute.hitPoints)
+        gs.round = 60
+        XCTAssertEqual(gs._makeEnemy(type: .titan, hp: 1, speed: 1.0).hitPoints, titan.hitPoints)
+        XCTAssertGreaterThan(titan.hitPoints, brute.hitPoints)
+    }
+
+    func testBruiserRoster_debutRounds() {
+        let gs = makeGameState()
+        XCTAssertTrue(gs.tier(for: 20).roster.contains { $0.type == .brute })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .titan && $0.minRound <= 40 })
+        XCTAssertTrue(gs.tier(for: 46).roster.contains { $0.type == .titan && $0.minRound <= 46 })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .hopper && $0.maxRound >= 40 })
+    }
+
     // MARK: resistanceMultiplier
 
     func testResistanceMultiplier_noEntry_returnsOne() {

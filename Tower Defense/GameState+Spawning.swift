@@ -97,6 +97,15 @@ extension GameState {
             // Act III "Apex": support unit — grants nearby enemies a temporary resistance
             // buff while alive (see `applyWardenAura` in GameState+Combat.swift).
             return Enemy(type: .warden, hitPoints: debutHP(for: .warden, multiplier: 3.6), speed: speed * 0.8, baseDamage: 2)
+        case .brute:
+            // Late-game bruiser (~49k HP): no resistances, just a lot of health.
+            return Enemy(type: .brute, hitPoints: debutHP(for: .brute, multiplier: 7.7), speed: speed * 0.8, baseDamage: 3)
+        case .colossus:
+            // ~91k HP.
+            return Enemy(type: .colossus, hitPoints: debutHP(for: .colossus, multiplier: 11.0), speed: speed * 0.7, baseDamage: 4)
+        case .titan:
+            // ~179k HP.
+            return Enemy(type: .titan, hitPoints: debutHP(for: .titan, multiplier: 20.0), speed: speed * 0.6, baseDamage: 5)
         }
     }
 
@@ -147,7 +156,7 @@ extension GameState {
         currentWaveTheme = (round % 3 == 0) ? upcomingWaveTheme : nil
         upcomingWaveTheme = nil
 
-        let enemyCount = 3 + round * 3
+        let enemyCount = GameState.enemyCount(forRound: round)
         let activeTier = tier(for: round)
         let hp: Float = activeTier.hp(atRound: round)
         let speed: Float = activeTier.speed(atRound: round)

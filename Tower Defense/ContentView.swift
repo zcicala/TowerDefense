@@ -2108,6 +2108,9 @@ struct StatsView: View {
         case .cinder:       return "Cinder"
         case .nullifier:    return "Nullif."
         case .warden:       return "Warden"
+        case .brute:        return "Brute"
+        case .colossus:     return "Coloss."
+        case .titan:        return "Titan"
         }
     }
 

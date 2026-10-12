@@ -810,14 +810,14 @@ final class CastleAbilityTests: XCTestCase {
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(3))
         XCTAssertTrue(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
-
-        gs.purchasedTechNodes.insert(.baseTowerLevel(4))
-        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
 
-        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        gs.purchasedTechNodes.insert(.baseTowerLevel(4))
         XCTAssertTrue(gs.abilityUnlocked(.gravityWave))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.moveTower))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(6))

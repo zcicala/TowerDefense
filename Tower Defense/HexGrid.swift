@@ -293,6 +293,11 @@ enum EnemyType: CaseIterable {
     // Act III "Apex" archetypes
     case nullifier
     case warden
+    // Late-game "bruisers": plain high-HP bodies that let the capped spawn count keep total
+    // wave HP climbing (see `GameState.maxEnemiesPerRound`).
+    case brute
+    case colossus
+    case titan
 
     var displayName: String {
         switch self {
@@ -313,6 +318,9 @@ enum EnemyType: CaseIterable {
         case .cinder:       return "Cinder"
         case .nullifier:    return "Nullifier"
         case .warden:       return "Warden"
+        case .brute:        return "Brute"
+        case .colossus:     return "Colossus"
+        case .titan:        return "Titan"
         }
     }
 
@@ -341,6 +349,9 @@ enum EnemyType: CaseIterable {
         case .cinder:        return 1.6
         case .nullifier:     return 2.2
         case .warden:        return 1.9
+        case .brute:         return 2.3
+        case .colossus:      return 2.6
+        case .titan:         return 3.0
         }
     }
 }
@@ -445,8 +456,13 @@ class Tower {
     var targetYaw: Float = 0
     var hasTarget: Bool = false
     let turretRotationSpeed: Float = 3.0
-    var hitPoints: Int = 5
-    var maxHitPoints: Int = 5
+    /// Hit points of one displayed heart. Tower HP is an integer number of points;
+    /// heals and damage that used to be expressed in hearts are multiples of this.
+    static let hpPerHeart = 100
+    var hitPoints: Int = 5 * Tower.hpPerHeart
+    var maxHitPoints: Int = 5 * Tower.hpPerHeart
+    /// Number of hearts to draw for a given HP value (partial hearts round up).
+    static func hearts(for hp: Int) -> Int { (max(0, hp) + hpPerHeart - 1) / hpPerHeart }
     var isInvulnerable: Bool = false
     /// While > 0, this tower's firing cooldown recovers at 2× (Castle "Overcharge" ability).
     var overchargeTimer: Float = 0
@@ -631,8 +647,8 @@ class Tower {
             // another — this fires exactly once, on the level 3 -> 4 transition, whether
             // purchased one level at a time or applied retroactively via a tech node).
             if level == 4 {
-                hitPoints += 1
-                maxHitPoints += 1
+                hitPoints += Tower.hpPerHeart
+                maxHitPoints += Tower.hpPerHeart
             }
         case .healer:
             healer!.charges = level

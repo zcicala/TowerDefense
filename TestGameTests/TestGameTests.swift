@@ -136,12 +136,12 @@ final class TowerTests: XCTestCase {
 
         tower.applyUpgrade() // level 4
         XCTAssertEqual(tower.level, 4)
-        XCTAssertEqual(tower.maxHitPoints, hpBefore + 1, "level 4 should grant exactly one extra heart")
-        XCTAssertEqual(tower.hitPoints, hpBefore + 1)
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + Tower.hpPerHeart, "level 4 should grant exactly one extra heart")
+        XCTAssertEqual(tower.hitPoints, hpBefore + Tower.hpPerHeart)
 
         tower.applyUpgrade() // level 5
         tower.applyUpgrade() // level 6 (max)
-        XCTAssertEqual(tower.maxHitPoints, hpBefore + 1, "levels 5/6 should not grant additional hearts")
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + Tower.hpPerHeart, "levels 5/6 should not grant additional hearts")
     }
 
     func testUpgradeCost_scalesWithLevel() {
@@ -439,6 +439,41 @@ final class CombatTests: XCTestCase {
         let actIII = gs.tier(for: 35).roster.map { $0.type }
         XCTAssertTrue(actIII.contains(.nullifier))
         XCTAssertTrue(actIII.contains(.warden))
+    }
+
+    // MARK: Spawn cap and bruisers
+
+    func testEnemyCount_scalesThenCapsAtForty() {
+        XCTAssertEqual(GameState.enemyCount(forRound: 1), 6)
+        XCTAssertEqual(GameState.enemyCount(forRound: 12), 39)
+        XCTAssertEqual(GameState.enemyCount(forRound: 13), 40)
+        XCTAssertEqual(GameState.enemyCount(forRound: 60), 40)
+    }
+
+    func testStartRound_lateRound_spawnsCappedCountPlusBoss() {
+        let gs = makeGameState()
+        gs.round = 39  // startRound() advances to 40
+        gs.startRound()
+        XCTAssertEqual(gs.enemies.count, GameState.maxEnemiesPerRound + 1)  // + boss
+    }
+
+    func testBruisers_haveFixedHPFromDebutRound() {
+        let gs = makeGameState()
+        let brute = gs._makeEnemy(type: .brute, hp: 1, speed: 1.0)
+        let titan = gs._makeEnemy(type: .titan, hp: 1, speed: 1.0)
+        gs.round = 20
+        XCTAssertEqual(gs._makeEnemy(type: .brute, hp: 1, speed: 1.0).hitPoints, brute.hitPoints)
+        gs.round = 60
+        XCTAssertEqual(gs._makeEnemy(type: .titan, hp: 1, speed: 1.0).hitPoints, titan.hitPoints)
+        XCTAssertGreaterThan(titan.hitPoints, brute.hitPoints)
+    }
+
+    func testBruiserRoster_debutRounds() {
+        let gs = makeGameState()
+        XCTAssertTrue(gs.tier(for: 20).roster.contains { $0.type == .brute })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .titan && $0.minRound <= 40 })
+        XCTAssertTrue(gs.tier(for: 46).roster.contains { $0.type == .titan && $0.minRound <= 46 })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .hopper && $0.maxRound >= 40 })
     }
 
     // MARK: resistanceMultiplier
@@ -810,14 +845,14 @@ final class CastleAbilityTests: XCTestCase {
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(3))
         XCTAssertTrue(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
-
-        gs.purchasedTechNodes.insert(.baseTowerLevel(4))
-        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
 
-        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        gs.purchasedTechNodes.insert(.baseTowerLevel(4))
         XCTAssertTrue(gs.abilityUnlocked(.gravityWave))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
         XCTAssertFalse(gs.abilityUnlocked(.moveTower))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(6))
@@ -952,8 +987,8 @@ final class CastleAbilityTests: XCTestCase {
         let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
         healer.healer!.charges = 0
         let damaged = Tower(coord: HexCoord(q: 2, r: 0)) // hex distance 2: outside radius 1, inside boosted radius 3
-        damaged.hitPoints = 2
-        damaged.maxHitPoints = 5
+        damaged.hitPoints = 200
+        damaged.maxHitPoints = 500
         gs.towers.append(contentsOf: [healer, damaged])
         _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 1, in: gs) // keep the round alive
 
@@ -962,7 +997,7 @@ final class CastleAbilityTests: XCTestCase {
 
         _ = gs.update(deltaTime: 0.1)
 
-        XCTAssertEqual(damaged.hitPoints, 3, "should heal despite zero charges and being outside the normal radius")
+        XCTAssertEqual(damaged.hitPoints, 300, "should heal despite zero charges and being outside the normal radius")
         XCTAssertEqual(healer.healer!.charges, 0, "overcharged heals must not consume a charge")
     }
 

@@ -640,6 +640,7 @@ class GameState {
                 .init(type: .plated,      minRound: 16, weight: 4),
                 .init(type: .insulated,   minRound: 18, weight: 4),
                 .init(type: .cinder,      minRound: 20, weight: 4),
+                .init(type: .brute,       minRound: 20, weight: 12),
             ]
         ),
         EnemyTier(
@@ -648,10 +649,12 @@ class GameState {
             speedBase: 1.2, speedSlope: 0.02,
             bossMultiplier: 1.6,
             roster: [
-                .init(type: .tank,          minRound: 31, weight: 3),
-                .init(type: .hopper,        minRound: 31, weight: 3),
-                .init(type: .exploder,      minRound: 31, weight: 2),
-                .init(type: .wisp,          minRound: 31, weight: 2),
+                // Low-HP fodder retires at round 36; the bruisers below take over so the
+                // capped spawn count (`maxEnemiesPerRound`) keeps total wave HP climbing.
+                .init(type: .tank,          minRound: 31, maxRound: 36, weight: 3),
+                .init(type: .hopper,        minRound: 31, maxRound: 36, weight: 3),
+                .init(type: .exploder,      minRound: 31, maxRound: 36, weight: 2),
+                .init(type: .wisp,          minRound: 31, maxRound: 36, weight: 2),
                 .init(type: .mirroid,       minRound: 31, weight: 2),
                 .init(type: .shield,        minRound: 31, weight: 3),
                 .init(type: .fastTank,      minRound: 31, weight: 3),
@@ -663,9 +666,21 @@ class GameState {
                 .init(type: .cinder,        minRound: 31, weight: 3),
                 .init(type: .nullifier,     minRound: 31, weight: 3),
                 .init(type: .warden,        minRound: 33, weight: 2),
+                .init(type: .brute,         minRound: 31, weight: 8),
+                .init(type: .colossus,      minRound: 31, weight: 16),
+                .init(type: .titan,         minRound: 46, weight: 8),
             ]
         ),
     ]
+
+    /// Hard cap on regular (non-boss) enemies per round. Past this, waves stay the same size
+    /// and total HP keeps growing through heavier enemy types instead of more bodies.
+    static let maxEnemiesPerRound = 40
+
+    /// Number of regular enemies spawned in `round`: `3 + 3·round`, capped at `maxEnemiesPerRound`.
+    static func enemyCount(forRound round: Int) -> Int {
+        min(3 + round * 3, maxEnemiesPerRound)
+    }
 
     /// The active difficulty tier for the given round (falls back to Act I for round ≤ 0).
     func tier(for round: Int) -> EnemyTier {

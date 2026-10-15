@@ -1458,6 +1458,18 @@ class SceneRenderer {
             // Gold sphere — reads as "support unit, kill first".
             mesh = MeshResource.generateSphere(radius: radius * 1.9)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.75, green: 0.62, blue: 0.15, alpha: 1))
+        case .brute:
+            // Dark red-brown sphere.
+            mesh = MeshResource.generateSphere(radius: radius * 2.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.45, green: 0.2, blue: 0.15, alpha: 1))
+        case .colossus:
+            // Slate box.
+            mesh = MeshResource.generateBox(width: radius * 2.6, height: radius * 2.6, depth: radius * 2.6, cornerRadius: radius * 0.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.3, green: 0.32, blue: 0.4, alpha: 1))
+        case .titan:
+            // Near-black sphere with a crimson tint.
+            mesh = MeshResource.generateSphere(radius: radius * 3.0)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.25, green: 0.05, blue: 0.08, alpha: 1))
         }
 
         let entity = Entity()

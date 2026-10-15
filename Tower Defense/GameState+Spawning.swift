@@ -53,7 +53,7 @@ extension GameState {
         case .hopper:
             return Enemy(type: .hopper, hitPoints: debutHP(for: .hopper, multiplier: 0.35), speed: speed)
         case .superHopper:
-            return Enemy(type: .superHopper, hitPoints: debutHP(for: .superHopper, multiplier: 1.5), speed: speed * 1.2)
+            return Enemy(type: .superHopper, hitPoints: debutHP(for: .superHopper, multiplier: 0.3114), speed: speed * 1.2)
         case .boss:
             // Mr Grump is the one enemy that still gets proportionally harder every time he
             // shows up — both HP (unchanged formula) and now baseDamage scale with round.
@@ -97,6 +97,15 @@ extension GameState {
             // Act III "Apex": support unit — grants nearby enemies a temporary resistance
             // buff while alive (see `applyWardenAura` in GameState+Combat.swift).
             return Enemy(type: .warden, hitPoints: debutHP(for: .warden, multiplier: 3.6), speed: speed * 0.8, baseDamage: 2)
+        case .brute:
+            // Late-game bruiser (~77k HP): no resistances, just a lot of health.
+            return Enemy(type: .brute, hitPoints: debutHP(for: .brute, multiplier: 12.0), speed: speed * 0.8, baseDamage: 3)
+        case .colossus:
+            // ~124k HP.
+            return Enemy(type: .colossus, hitPoints: debutHP(for: .colossus, multiplier: 15.0), speed: speed * 0.7, baseDamage: 4)
+        case .titan:
+            // ~214k HP.
+            return Enemy(type: .titan, hitPoints: debutHP(for: .titan, multiplier: 24.0), speed: speed * 0.6, baseDamage: 5)
         }
     }
 
@@ -147,7 +156,7 @@ extension GameState {
         currentWaveTheme = (round % 3 == 0) ? upcomingWaveTheme : nil
         upcomingWaveTheme = nil
 
-        let enemyCount = 3 + round * 3
+        let enemyCount = GameState.enemyCount(forRound: round)
         let activeTier = tier(for: round)
         let hp: Float = activeTier.hp(atRound: round)
         let speed: Float = activeTier.speed(atRound: round)

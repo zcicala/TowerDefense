@@ -325,7 +325,7 @@ extension GameState {
                         $0.coord.distance(to: tower.coord) <= tower.effectiveHealRadius
                     }
                     if let target {
-                        target.hitPoints = min(target.hitPoints + 1, target.maxHitPoints)
+                        target.hitPoints = min(target.hitPoints + Tower.hpPerHeart, target.maxHitPoints)
                         if !overcharged { tower.healer!.charges -= 1 }
                         tower.cooldownRemaining = tower.cooldown
                         events.healedTowers.append(target)
@@ -739,7 +739,7 @@ extension GameState {
             for tower in towers {
                 if tower.coord.distance(to: coord) <= enemy.explosionRadius
                     && !tower.isInvulnerable {
-                    tower.hitPoints -= enemy.explosionDamage
+                    tower.hitPoints -= enemy.explosionDamage * Tower.hpPerHeart
                     if tower.hitPoints <= 0 {
                         events.destroyedTowers.append(tower)
                     } else {

@@ -21,8 +21,14 @@ enum CastleAbility: Int, CaseIterable {
     case overcharge = 1      // towers on/adjacent to a cell fire 2× as fast
     case freeze = 2          // freeze enemies in a cell and its neighbors
     case poison = 3          // green cloud in a radius; enemies that walk through it get poisoned
-    case invulnerability = 4 // make a tower invulnerable
-    case gravityWell = 5     // pull nearby enemies toward a tile and hold them
+    case gravityWave = 4     // area of increased gravity: hoppers can only jump one cell, and
+                             // flying units fly half as high and lose their flight immunity
+    case overchargeHeal = 5  // boost a healer tower's radius and make its heals free, for a
+                             // duration scaled to that tower's own level
+    case moveTower = 6       // relocate a placed tower to an empty cell, mid-round — reuses the
+                             // Move Tower inventory item's own select-tower/select-destination
+                             // flow (see GameState.beginMoveTowerAbility), so it never actually
+                             // goes through `pendingAbility`/`castPendingAbility` below.
 
     /// Castle level required to have unlocked this ability.
     var requiredLevel: Int { rawValue }
@@ -35,8 +41,9 @@ enum CastleAbility: Int, CaseIterable {
         case .overcharge:      return "Overcharge"
         case .freeze:          return "Freeze"
         case .poison:          return "Poison"
-        case .invulnerability: return "Invuln"
-        case .gravityWell:     return "Gravity Well"
+        case .overchargeHeal:  return "Overcharge Heal"
+        case .gravityWave:     return "Gravity Wave"
+        case .moveTower:       return "Move Tower"
         }
     }
 
@@ -46,30 +53,38 @@ enum CastleAbility: Int, CaseIterable {
         case .overcharge:      return 8
         case .freeze:          return 10
         case .poison:          return 6
-        case .invulnerability: return 15
-        case .gravityWell:     return 18
+        case .overchargeHeal:  return 15
+        case .gravityWave:     return 16
+        case .moveTower:       return 22
         }
     }
 
     /// How long the ability's effect lasts once cast. For Poison this is the cloud's own
     /// lifetime — how long it keeps infecting enemies that walk through it — not how long the
     /// poison DOT lingers on an enemy afterward (see `GameState.poisonDOTDuration`).
+    /// Overcharge Heal's *actual* duration depends on the targeted healer's level
+    /// (`5 * tower.level`, see `applyOverchargeHeal`) — the value here is just what a
+    /// level-1 healer would get, since nothing currently needs a level-independent constant.
     var duration: Float {
         switch self {
         case .overcharge:      return 3
         case .freeze:          return 2
         case .poison:          return 5
-        case .invulnerability: return 5
-        case .gravityWell:     return 3
+        case .overchargeHeal:  return 5
+        case .gravityWave:     return 10
+        case .moveTower:       return 0 // instant relocation, no ongoing timed effect
         }
     }
 
-    /// True when the ability targets a tower (Invulnerability); false when it targets a cell.
-    var targetsTower: Bool { self == .invulnerability }
+    /// True when the ability targets a tower (Overcharge Heal); false when it targets a cell.
+    /// Move Tower also starts by targeting a tower, but it drives its own two-step
+    /// select-tower/select-destination flow (see `GameState.beginMoveTowerAbility`) rather than
+    /// going through `pendingAbility`/`castPendingAbility` at all, so this is moot for it.
+    var targetsTower: Bool { self == .overchargeHeal }
 
     /// Short instruction shown while selecting a target.
     var targetPrompt: String {
-        if targetsTower { return "Click a tower to protect it." }
+        if self == .overchargeHeal { return "Click a heal tower to overcharge it." }
         if self == .poison { return "Click a cell to release poison gas." }
         return "Click a cell to cast."
     }
@@ -82,7 +97,7 @@ enum TechNodeID: Hashable {
     case farmUnlock
     case towerLevel(TowerType, Int)  // target starting level (2 – Tower.maxLevel)
     case baseTowerLevel(Int)         // base/center tower upgrade level (2 – 6)
-    case targetingFeature(Int)       // global targeting upgrade (1 – 5)
+    case targetingFeature(Int)       // global targeting upgrade (1 – 3)
     case startingGold(Int)           // starting gold upgrade (1 – 5), +50 gold each
 }
 
@@ -126,11 +141,11 @@ class GameState {
             (.projectile, 2, []),
             (.bowler,     2, [.towerUnlock(.projectile)]),
             (.laser,      3, [.towerUnlock(.projectile)]),
-            (.fire,       3, [.towerUnlock(.projectile)]),
+            (.fire,       2, [.towerUnlock(.projectile)]),
             (.fireball,   5, [.towerUnlock(.laser), .towerUnlock(.fire)]),
-            (.ice,        3, [.farmUnlock]),
+            (.ice,        2, [.farmUnlock]),
             (.antiAir,    3, [.farmUnlock]),
-            (.healer,     4, [.targetingFeature(1)]),
+            (.healer,     2, [.targetingFeature(1)]),
             (.lightning,  6, [.towerUnlock(.projectile)]),
         ]
 
@@ -216,10 +231,8 @@ class GameState {
         // Global targeting upgrades — apply to all towers once purchased
         let targetingDefs: [(Int, String, String, Int, [TechNodeID])] = [
             (1, "Advanced Targeting",  "All towers: choose priority target type, +1 detect range, +50% turret turn speed", 3, []),
-            (2, "Target Lock",         "All towers: lock fire to a specific path cell",     2, [.targetingFeature(1)]),
-            (3, "Priority Type",       "All towers: set a preferred enemy type, skip immune enemies", 2, [.targetingFeature(2)]),
-            (4, "Manual Lock",         "All towers: manually lock attack target (X)",        3, [.targetingFeature(3)]),
-            (5, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(4)]),
+            (2, "Priority Type",       "All towers: set a preferred enemy type, skip immune enemies", 2, [.targetingFeature(1)]),
+            (3, "Fire Range Boost",    "All towers: +1 fire range",                         3, [.targetingFeature(2)]),
         ]
         for (feat, title, desc, cost, prereqs) in targetingDefs {
             nodes.append(.init(id: .targetingFeature(feat), title: title, description: desc,
@@ -392,7 +405,7 @@ class GameState {
 
     /// Highest purchased global targeting feature level (0 = none purchased).
     var globalTargetingLevel: Int {
-        for feat in stride(from: 5, through: 1, by: -1) {
+        for feat in stride(from: 3, through: 1, by: -1) {
             if purchasedTechNodes.contains(.targetingFeature(feat)) { return feat }
         }
         return 0
@@ -410,6 +423,14 @@ class GameState {
     /// so more open paths directly means more total enemies spawned per second.
     var spawnTimers: [HexCoord: Float] = [:]
     var spawnIntervals: [HexCoord: Float] = [:]
+    /// How long each start cell has been continuously too congested to spawn into — see
+    /// `isStartCellCongested` (GameState+Crowd.swift) and `CorridorTuning.spawnBlockTimeout`.
+    var spawnBlockedFor: [HexCoord: Float] = [:]
+
+    /// Cache for `cachedStepsToEnd(_:)` (GameState+Crowd.swift), invalidated by comparing
+    /// `cachedPathVersion` against `hexGrid.pathVersion` — see that type for why.
+    var stepsToEndCache: [HexCoord: Int] = [:]
+    var cachedPathVersion: Int = -1
 
     // MARK: - Base Tower
 
@@ -429,15 +450,12 @@ class GameState {
     /// Current castle energy, spent on ability casts and regenerated over time. Refilled to
     /// `castleMaxEnergy` at the start of each round.
     var castleEnergy: Float = 20
-    /// Center of the active Gravity Well, or nil when inactive.
-    var gravityWellCoord: HexCoord? = nil
-    /// Remaining seconds the Gravity Well pulls enemies.
-    var gravityWellTimer: Float = 0
-    /// Radius (in hex steps) of the Gravity Well's pull.
-    let gravityWellRadius = 2
-    /// Ids of enemies currently held by the Gravity Well, as of the last `update(deltaTime:)` call.
-    /// Exposed so the renderer can show a per-enemy pull indicator.
-    var lastGravityWellPulledIDs: Set<UUID> = []
+    /// Center of the active Gravity Wave field, or nil when inactive.
+    var gravityWaveCoord: HexCoord? = nil
+    /// Remaining seconds the Gravity Wave field stays up.
+    var gravityWaveTimer: Float = 0
+    /// Radius (in hex steps) of the Gravity Wave field.
+    let gravityWaveRadius = 2
     /// Center of the active Poison cloud, or nil when inactive.
     var poisonCloudCoord: HexCoord? = nil
     /// Remaining seconds the Poison cloud keeps infecting enemies that walk through it.
@@ -508,6 +526,10 @@ class GameState {
     var isSelectingTowerToMove: Bool = false
     /// Non-nil when a tower has been selected for moving and the player is choosing a destination.
     var pendingMoveTower: Tower? = nil
+    /// True when the in-progress move (`isSelectingTowerToMove`/`pendingMoveTower`) was started by
+    /// the Castle "Move Tower" ability (spending energy) rather than a Move Tower inventory item —
+    /// determines what `cancelPendingMoveTower()` refunds.
+    var moveTowerViaAbility: Bool = false
     /// True while the game is paused (only possible if hasPauseControl).
     var isPaused: Bool = false
     /// Number of visual blocks remaining (= ceil(maxHP/2), loses one every 2 HP lost)
@@ -618,6 +640,7 @@ class GameState {
                 .init(type: .plated,      minRound: 16, weight: 4),
                 .init(type: .insulated,   minRound: 18, weight: 4),
                 .init(type: .cinder,      minRound: 20, weight: 4),
+                .init(type: .brute,       minRound: 20, weight: 12),
             ]
         ),
         EnemyTier(
@@ -626,10 +649,12 @@ class GameState {
             speedBase: 1.2, speedSlope: 0.02,
             bossMultiplier: 1.6,
             roster: [
-                .init(type: .tank,          minRound: 31, weight: 3),
-                .init(type: .hopper,        minRound: 31, weight: 3),
-                .init(type: .exploder,      minRound: 31, weight: 2),
-                .init(type: .wisp,          minRound: 31, weight: 2),
+                // Low-HP fodder retires at round 36; the bruisers below take over so the
+                // capped spawn count (`maxEnemiesPerRound`) keeps total wave HP climbing.
+                .init(type: .tank,          minRound: 31, maxRound: 36, weight: 3),
+                .init(type: .hopper,        minRound: 31, maxRound: 36, weight: 3),
+                .init(type: .exploder,      minRound: 31, maxRound: 36, weight: 2),
+                .init(type: .wisp,          minRound: 31, maxRound: 36, weight: 2),
                 .init(type: .mirroid,       minRound: 31, weight: 2),
                 .init(type: .shield,        minRound: 31, weight: 3),
                 .init(type: .fastTank,      minRound: 31, weight: 3),
@@ -641,13 +666,35 @@ class GameState {
                 .init(type: .cinder,        minRound: 31, weight: 3),
                 .init(type: .nullifier,     minRound: 31, weight: 3),
                 .init(type: .warden,        minRound: 33, weight: 2),
+                .init(type: .brute,         minRound: 31, weight: 8),
+                .init(type: .colossus,      minRound: 31, weight: 16),
+                .init(type: .titan,         minRound: 46, weight: 8),
             ]
         ),
     ]
 
+    /// Hard cap on regular (non-boss) enemies per round. Past this, waves stay the same size
+    /// and total HP keeps growing through heavier enemy types instead of more bodies.
+    static let maxEnemiesPerRound = 40
+
+    /// Number of regular enemies spawned in `round`: `3 + 3·round`, capped at `maxEnemiesPerRound`.
+    static func enemyCount(forRound round: Int) -> Int {
+        min(3 + round * 3, maxEnemiesPerRound)
+    }
+
     /// The active difficulty tier for the given round (falls back to Act I for round ≤ 0).
     func tier(for round: Int) -> EnemyTier {
         GameState.tiers.first(where: { $0.rounds.contains(round) }) ?? GameState.tiers[0]
+    }
+
+    /// The earliest round `type` can spawn, across every tier's roster (a type can be listed
+    /// in more than one tier — e.g. tank debuts in Act I but is re-listed in Act II/III too —
+    /// so this takes the minimum). Used to pin a regular enemy's HP to what it would have been
+    /// the moment it first became eligible, rather than letting it keep scaling with the
+    /// current round — see `GameState.debutHP(for:multiplier:)`.
+    static func debutRound(for type: EnemyType) -> Int {
+        let minRounds = tiers.flatMap { $0.roster }.filter { $0.type == type }.map { $0.minRound }
+        return max(1, minRounds.min() ?? 1)
     }
 }
 

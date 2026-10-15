@@ -1,4 +1,5 @@
 import XCTest
+import simd
 @testable import Zac_s_Tower_Defense
 
 // MARK: - Test Helpers
@@ -31,10 +32,14 @@ func makeActiveEnemy(
     hp: Float = 100,
     speed: Float = 1.0,
     atCell cellIndex: Int,
+    progress: Float = 0,
+    offset: Float = 0,
     in gs: GameState
 ) -> Enemy {
     let enemy = Enemy(type: type, hitPoints: hp, speed: speed)
     enemy.currentCell = pathCell(at: cellIndex, in: gs)
+    enemy.progress = progress
+    enemy.lateralOffset = offset
     enemy.active = true
     gs.enemies.append(enemy)
     return enemy
@@ -120,6 +125,23 @@ final class TowerTests: XCTestCase {
         tower.applyUpgrade()
         XCTAssertEqual(tower.level, Tower.maxLevel)
         XCTAssertEqual(tower.damage, damageBefore, accuracy: 0.001)
+    }
+
+    func testSwordUpgrade_gainsExtraHeartAtLevel4Only() {
+        let tower = Tower.makeSword(coord: HexCoord(q: 0, r: 0))
+        let hpBefore = tower.maxHitPoints
+        tower.applyUpgrade() // level 2
+        tower.applyUpgrade() // level 3
+        XCTAssertEqual(tower.maxHitPoints, hpBefore, "no bonus heart before level 4")
+
+        tower.applyUpgrade() // level 4
+        XCTAssertEqual(tower.level, 4)
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + Tower.hpPerHeart, "level 4 should grant exactly one extra heart")
+        XCTAssertEqual(tower.hitPoints, hpBefore + Tower.hpPerHeart)
+
+        tower.applyUpgrade() // level 5
+        tower.applyUpgrade() // level 6 (max)
+        XCTAssertEqual(tower.maxHitPoints, hpBefore + Tower.hpPerHeart, "levels 5/6 should not grant additional hearts")
     }
 
     func testUpgradeCost_scalesWithLevel() {
@@ -269,6 +291,52 @@ final class CombatTests: XCTestCase {
         XCTAssertEqual(enemy.shieldMaxHP, 0, "the universal round-25 personal shield wall should be removed")
     }
 
+    // MARK: Regular enemies no longer scale HP/damage with round (except the boss)
+
+    /// A regular enemy's HP is pinned to 120% of what the old always-scaling formula would
+    /// have produced at its debut round — spawning the same type much later should give the
+    /// exact same HP, not a bigger one.
+    func testMakeEnemy_regularEnemyHP_isFrozenAtDebutRoundPlus20Percent() {
+        let gs = makeGameState()
+        let debutRound = GameState.debutRound(for: .tank)
+        XCTAssertEqual(debutRound, 6, "tank debuts in Act I's roster at round 6")
+
+        gs.round = debutRound
+        let atDebut = gs._makeEnemy(type: .tank, hp: gs.tier(for: debutRound).hp(atRound: debutRound), speed: 1.0)
+
+        gs.round = 30
+        let muchLater = gs._makeEnemy(type: .tank, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+
+        let expectedHP = gs.tier(for: debutRound).hp(atRound: debutRound) * 4.0 * 1.2
+        XCTAssertEqual(atDebut.hitPoints, expectedHP, accuracy: 0.01)
+        XCTAssertEqual(muchLater.hitPoints, expectedHP, accuracy: 0.01,
+                       "HP must not keep growing with round for a regular enemy")
+    }
+
+    /// A regular enemy's baseDamage was already round-independent; lock that in explicitly now
+    /// that HP scaling has been removed too, so a future change can't silently reintroduce it.
+    func testMakeEnemy_regularEnemyDamage_neverScalesWithRound() {
+        let gs = makeGameState()
+        gs.round = 6
+        let early = gs._makeEnemy(type: .tank, hp: gs.tier(for: 6).hp(atRound: 6), speed: 1.0)
+        gs.round = 30
+        let later = gs._makeEnemy(type: .tank, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+        XCTAssertEqual(early.baseDamage, later.baseDamage, "regular enemy damage must stay flat across rounds")
+    }
+
+    /// The boss is the one enemy that should still get proportionally harder over time —
+    /// both its HP (unchanged formula) and now its damage-to-base.
+    func testMakeEnemy_boss_hpAndDamageStillScaleWithRound() {
+        let gs = makeGameState()
+        gs.round = 5
+        let early = gs._makeEnemy(type: .boss, hp: gs.tier(for: 5).hp(atRound: 5), speed: 1.0)
+        gs.round = 30
+        let later = gs._makeEnemy(type: .boss, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+
+        XCTAssertGreaterThan(later.hitPoints, early.hitPoints, "boss HP should keep growing with round")
+        XCTAssertGreaterThan(later.baseDamage, early.baseDamage, "boss damage should keep growing with round")
+    }
+
     func testShield_debutsAtRound16_notInActITier() {
         let gs = makeGameState()
         XCTAssertFalse(gs.tier(for: 15).roster.contains { $0.type == .shield },
@@ -371,6 +439,41 @@ final class CombatTests: XCTestCase {
         let actIII = gs.tier(for: 35).roster.map { $0.type }
         XCTAssertTrue(actIII.contains(.nullifier))
         XCTAssertTrue(actIII.contains(.warden))
+    }
+
+    // MARK: Spawn cap and bruisers
+
+    func testEnemyCount_scalesThenCapsAtForty() {
+        XCTAssertEqual(GameState.enemyCount(forRound: 1), 6)
+        XCTAssertEqual(GameState.enemyCount(forRound: 12), 39)
+        XCTAssertEqual(GameState.enemyCount(forRound: 13), 40)
+        XCTAssertEqual(GameState.enemyCount(forRound: 60), 40)
+    }
+
+    func testStartRound_lateRound_spawnsCappedCountPlusBoss() {
+        let gs = makeGameState()
+        gs.round = 39  // startRound() advances to 40
+        gs.startRound()
+        XCTAssertEqual(gs.enemies.count, GameState.maxEnemiesPerRound + 1)  // + boss
+    }
+
+    func testBruisers_haveFixedHPFromDebutRound() {
+        let gs = makeGameState()
+        let brute = gs._makeEnemy(type: .brute, hp: 1, speed: 1.0)
+        let titan = gs._makeEnemy(type: .titan, hp: 1, speed: 1.0)
+        gs.round = 20
+        XCTAssertEqual(gs._makeEnemy(type: .brute, hp: 1, speed: 1.0).hitPoints, brute.hitPoints)
+        gs.round = 60
+        XCTAssertEqual(gs._makeEnemy(type: .titan, hp: 1, speed: 1.0).hitPoints, titan.hitPoints)
+        XCTAssertGreaterThan(titan.hitPoints, brute.hitPoints)
+    }
+
+    func testBruiserRoster_debutRounds() {
+        let gs = makeGameState()
+        XCTAssertTrue(gs.tier(for: 20).roster.contains { $0.type == .brute })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .titan && $0.minRound <= 40 })
+        XCTAssertTrue(gs.tier(for: 46).roster.contains { $0.type == .titan && $0.minRound <= 46 })
+        XCTAssertFalse(gs.tier(for: 40).roster.contains { $0.type == .hopper && $0.maxRound >= 40 })
     }
 
     // MARK: resistanceMultiplier
@@ -733,8 +836,8 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertTrue(gs.abilityUnlocked(.overcharge))
         XCTAssertFalse(gs.abilityUnlocked(.freeze))
         XCTAssertFalse(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
-        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(2))
         XCTAssertTrue(gs.abilityUnlocked(.freeze))
@@ -742,11 +845,18 @@ final class CastleAbilityTests: XCTestCase {
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(3))
         XCTAssertTrue(gs.abilityUnlocked(.poison))
-        XCTAssertFalse(gs.abilityUnlocked(.invulnerability))
+        XCTAssertFalse(gs.abilityUnlocked(.gravityWave))
 
         gs.purchasedTechNodes.insert(.baseTowerLevel(4))
-        XCTAssertTrue(gs.abilityUnlocked(.invulnerability))
-        XCTAssertFalse(gs.abilityUnlocked(.gravityWell))
+        XCTAssertTrue(gs.abilityUnlocked(.gravityWave))
+        XCTAssertFalse(gs.abilityUnlocked(.overchargeHeal))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(5))
+        XCTAssertTrue(gs.abilityUnlocked(.overchargeHeal))
+        XCTAssertFalse(gs.abilityUnlocked(.moveTower))
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        XCTAssertTrue(gs.abilityUnlocked(.moveTower))
     }
 
     func testBeginAbility_requiresCombatUnlockedAndReady() {
@@ -829,84 +939,239 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertFalse(far.slowed)
     }
 
-    // MARK: Invulnerability
+    // MARK: Overcharge Heal
 
-    func testInvulnerability_protectsTowerFromExploder() {
-        let gs = makeGameState(pathLength: 6)
-        gs.phase = .combat
-        let tower = Tower(coord: HexCoord(q: 1, r: 0))
-        tower.hitPoints = 5
+    func testOverchargeHeal_rejectsNonHealerTower() {
+        let gs = makeGameState()
+        let tower = Tower(coord: HexCoord(q: 0, r: 0)) // default .projectile
         gs.towers.append(tower)
 
-        gs.pendingAbility = .invulnerability
-        XCTAssertTrue(gs.castPendingAbility(onTower: tower))
-        XCTAssertEqual(tower.abilityInvulnTimer, CastleAbility.invulnerability.duration, accuracy: 0.001)
-
-        killExploderAdjacent(to: tower, at: 2, in: gs)
-        XCTAssertEqual(tower.hitPoints, 5, "invulnerable tower takes no exploder damage")
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertFalse(gs.castPendingAbility(onTower: tower), "only a healer tower can be targeted")
+        XCTAssertEqual(gs.pendingAbility, .overchargeHeal, "ability stays pending so a different tower can be picked")
+        XCTAssertEqual(tower.overchargeHealTimer, 0)
     }
 
-    func testInvulnerability_expiresAndTowerBecomesVulnerable() {
-        let gs = makeGameState(pathLength: 6)
+    func testOverchargeHeal_durationScalesWithLevel_andRadiusBoostsThenReverts() {
+        let gs = makeGameState()
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        healer.applyUpgrade() // level 2
+        healer.applyUpgrade() // level 3
+        gs.towers.append(healer)
+        XCTAssertEqual(healer.effectiveHealRadius, 1, "normal (un-overcharged) radius before casting")
+
+        let energyBefore = gs.castleEnergy
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertTrue(gs.castPendingAbility(onTower: healer))
+        XCTAssertNil(gs.pendingAbility)
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.overchargeHeal.energyCost, accuracy: 0.001)
+
+        XCTAssertEqual(healer.overchargeHealTimer, 15, accuracy: 0.001, "5s per level, level 3 -> 15s")
+        XCTAssertEqual(healer.effectiveHealRadius, 3, "boosted radius while overcharged (not yet max level)")
+
+        healer.overchargeHealTimer = 0 // simulate expiry
+        XCTAssertEqual(healer.effectiveHealRadius, healer.healer!.radius, "radius reverts once overcharge ends")
+    }
+
+    func testOverchargeHeal_maxLevelTower_getsRadius4() {
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        for _ in 0..<(Tower.maxLevel - 1) { healer.applyUpgrade() }
+        XCTAssertEqual(healer.level, Tower.maxLevel)
+        healer.overchargeHealTimer = 1
+        XCTAssertEqual(healer.effectiveHealRadius, 4, "max-level healer gets radius 4, not 3, while overcharged")
+    }
+
+    func testOverchargeHeal_healsForFree_evenWithZeroChargesAndBeyondNormalRadius() {
+        let gs = makeGameState(pathLength: 3)
         gs.phase = .combat
-        let tower = Tower(coord: HexCoord(q: 1, r: 0))
-        tower.hitPoints = 5
-        gs.towers.append(tower)
-        // Keep a stationary out-of-range enemy so the round doesn't end while we advance time.
-        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 3, in: gs)
+        let healer = Tower.makeHealer(coord: HexCoord(q: 0, r: 0))
+        healer.healer!.charges = 0
+        let damaged = Tower(coord: HexCoord(q: 2, r: 0)) // hex distance 2: outside radius 1, inside boosted radius 3
+        damaged.hitPoints = 200
+        damaged.maxHitPoints = 500
+        gs.towers.append(contentsOf: [healer, damaged])
+        _ = makeActiveEnemy(hp: 100000, speed: 0, atCell: 1, in: gs) // keep the round alive
 
-        gs.pendingAbility = .invulnerability
-        _ = gs.castPendingAbility(onTower: tower)
+        gs.pendingAbility = .overchargeHeal
+        XCTAssertTrue(gs.castPendingAbility(onTower: healer))
 
-        // Advance beyond the 5s duration.
-        for _ in 0..<60 { _ = gs.update(deltaTime: 0.1) }
-        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+        _ = gs.update(deltaTime: 0.1)
 
-        killExploderAdjacent(to: tower, at: 2, in: gs)
-        XCTAssertLessThan(tower.hitPoints, 5, "once invuln expires the tower takes exploder damage")
+        XCTAssertEqual(damaged.hitPoints, 300, "should heal despite zero charges and being outside the normal radius")
+        XCTAssertEqual(healer.healer!.charges, 0, "overcharged heals must not consume a charge")
     }
 
-    /// Spawns an exploder adjacent to `tower` and kills it via a completed projectile so the
-    /// exploder-death damage pass runs inside `update`.
-    private func killExploderAdjacent(to tower: Tower, at cellIndex: Int, in gs: GameState) {
-        let exploder = Enemy(type: .exploder, hitPoints: 1, speed: 0,
-                             explosionRadius: 1, explosionDamage: 1)
-        exploder.currentCell = pathCell(at: cellIndex, in: gs)
-        exploder.active = true
-        gs.enemies.append(exploder)
+    // MARK: Gravity Wave
 
-        let projectile = Projectile(
-            origin: SIMD3<Float>(0, 0, 0),
-            target: SIMD3<Float>(0, 0, 0),
-            totalFlightTime: 0.01,
-            damage: 100,
-            targetEnemyID: exploder.id
-        )
-        projectile.elapsed = projectile.totalFlightTime
-        gs.projectiles.append(projectile)
-
-        _ = gs.update(deltaTime: 0.05)
-        XCTAssertFalse(exploder.active, "exploder should have died from the projectile")
-    }
-
-    // MARK: Gravity Well
-
-    func testGravityWell_pullsEnemyTowardTile() {
+    func testGravityWave_marksEnemiesInsideFieldOnly() {
         let gs = makeGameState(pathLength: 8)
         gs.phase = .combat
-        // High HP so the base sentinel doesn't kill it mid-pull.
-        let enemy = makeActiveEnemy(hp: 5000, atCell: 5, in: gs)   // (5,0)
+        let inField = makeActiveEnemy(hp: 5000, atCell: 3, in: gs)   // (3,0), distance 0 from well
+        let onEdge = makeActiveEnemy(hp: 5000, atCell: 5, in: gs)    // (5,0), distance 2 — inside radius
+        let outside = makeActiveEnemy(hp: 5000, atCell: 7, in: gs)   // (7,0), distance 4 — outside radius
 
-        gs.pendingAbility = .gravityWell
+        gs.pendingAbility = .gravityWave
         XCTAssertTrue(gs.castPendingAbility(atCell: HexCoord(q: 3, r: 0)))
-        XCTAssertEqual(gs.gravityWellTimer, CastleAbility.gravityWell.duration, accuracy: 0.001)
+        XCTAssertEqual(gs.gravityWaveTimer, CastleAbility.gravityWave.duration, accuracy: 0.001)
 
-        // Advance within the well's duration.
-        for _ in 0..<25 { _ = gs.update(deltaTime: 0.1) }
+        gs.updateGravityWaveField(deltaTime: 0.01)
 
-        let q = enemy.currentCell?.coord.q ?? -1
-        XCTAssertLessThan(q, 5, "enemy should be pulled back from (5,0) toward the well at (3,0)")
-        XCTAssertGreaterThanOrEqual(q, 3, "enemy should not be pulled past the well tile")
+        XCTAssertTrue(inField.inGravityWave)
+        XCTAssertTrue(onEdge.inGravityWave, "radius \(gs.gravityWaveRadius) should reach 2 cells away")
+        XCTAssertFalse(outside.inGravityWave)
+    }
+
+    func testGravityWave_fieldClearsWhenTimerExpires() {
+        let gs = makeGameState(pathLength: 8)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(hp: 5000, atCell: 3, in: gs)
+
+        gs.pendingAbility = .gravityWave
+        _ = gs.castPendingAbility(atCell: HexCoord(q: 3, r: 0))
+        gs.updateGravityWaveField(deltaTime: 0.01)
+        XCTAssertTrue(enemy.inGravityWave)
+
+        gs.updateGravityWaveField(deltaTime: CastleAbility.gravityWave.duration)
+        XCTAssertFalse(enemy.inGravityWave, "field should clear once the timer runs out")
+    }
+
+    func testGravityWave_restrictsHopperToASingleCellJump() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, atCell: 5, in: gs)
+        hopper.inGravityWave = true
+
+        gs.triggerHopperJump(hopper)
+
+        XCTAssertEqual(hopper.currentCell?.coord.q, 6, "a hopper in the field should only jump one cell")
+    }
+
+    func testGravityWave_hopperJumpsNormallyOutsideField() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, atCell: 5, in: gs)
+        XCTAssertFalse(hopper.inGravityWave)
+
+        gs.triggerHopperJump(hopper)
+
+        XCTAssertGreaterThan(hopper.currentCell?.coord.q ?? 0, 6, "outside the field a hopper should jump its normal 2-5 cell range")
+    }
+
+    func testGravityWave_halvesFlyingUnitHoverHeight() {
+        let gs = makeGameState()
+        let wisp = gs._makeEnemy(type: .wisp, hp: 100, speed: 1.0) // additionalHoverOffset is set here, not in Enemy's raw init
+        let baseOffset = wisp.additionalHoverOffset
+        XCTAssertGreaterThan(baseOffset, 0)
+        XCTAssertEqual(wisp.effectiveHoverOffset, baseOffset, accuracy: 0.001)
+
+        wisp.inGravityWave = true
+        XCTAssertEqual(wisp.effectiveHoverOffset, baseOffset * 0.5, accuracy: 0.001)
+    }
+
+    func testGravityWave_makesFlyingUnitsTargetableByAllTowers() {
+        let wisp = Enemy(type: .wisp, hitPoints: 100, speed: 1.0)
+        XCTAssertTrue(wisp.immuneTowerTypes.contains(.projectile), "wisp is normally immune to ground towers")
+
+        wisp.inGravityWave = true
+        XCTAssertTrue(wisp.immuneTowerTypes.isEmpty, "the field should strip all targeting immunity")
+    }
+
+    // MARK: Move Tower (ability)
+
+    func testBeginMoveTowerAbility_requiresCombatUnlockedAndReady() {
+        let gs = makeGameState()
+        gs.phase = .placing
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "cannot begin outside combat")
+
+        gs.phase = .combat
+        gs.castleEnergy = 0
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "not enough energy")
+
+        gs.castleEnergy = 100
+        gs.purchasedTechNodes.remove(.baseTowerLevel(6))
+        XCTAssertFalse(gs.beginMoveTowerAbility(), "locked below castle level 6")
+
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        let energyBefore = gs.castleEnergy
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        XCTAssertTrue(gs.isSelectingTowerToMove)
+        XCTAssertEqual(gs.castleEnergy, energyBefore - CastleAbility.moveTower.energyCost, accuracy: 0.001)
+    }
+
+    func testBeginMoveTowerAbility_blockedWhileAnotherAbilityPending() {
+        let gs = makeGameState()
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+        gs.pendingAbility = .freeze
+        XCTAssertFalse(gs.beginMoveTowerAbility())
+        XCTAssertFalse(gs.isSelectingTowerToMove)
+    }
+
+    func testMoveTowerAbility_relocatesTowerDuringCombat() {
+        let gs = makeGameState(pathLength: 6)
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        gs.castleEnergy = 100
+
+        let originCoord = HexCoord(q: 10, r: 0)
+        let destCoord = HexCoord(q: 11, r: 0)
+        let originCell = HexCell(coord: originCoord, height: 1.0, type: .terrain)
+        originCell.hasTower = true
+        gs.hexGrid.addCell(originCell)
+        let destCell = HexCell(coord: destCoord, height: 1.0, type: .terrain)
+        gs.hexGrid.addCell(destCell)
+
+        let tower = Tower(coord: originCoord)
+        gs.towers.append(tower)
+
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        gs.selectTowerToMove(tower)
+        XCTAssertEqual(gs.pendingMoveTower?.id, tower.id)
+        let energyAfterBegin = gs.castleEnergy
+
+        XCTAssertTrue(gs.applyMoveTower(to: destCoord))
+
+        XCTAssertEqual(tower.coord, destCoord)
+        XCTAssertFalse(originCell.hasTower, "origin cell should be freed")
+        XCTAssertTrue(destCell.hasTower)
+        XCTAssertNil(gs.pendingMoveTower)
+        XCTAssertEqual(gs.castleEnergy, energyAfterBegin, accuracy: 0.001, "a completed move should not refund energy")
+    }
+
+    func testCancelPendingMoveTower_refundsEnergyWhenStartedByAbility() {
+        let gs = makeGameState()
+        gs.phase = .combat
+        gs.purchasedTechNodes.insert(.baseTowerLevel(6))
+        // Set well above the real cap purely to isolate the spend/refund delta from
+        // `abilityReady`'s affordability gate — the refund itself is still expected to clamp
+        // to the real castleMaxEnergy (20 by default), the same way energy regen does.
+        gs.castleEnergy = 100
+
+        XCTAssertTrue(gs.beginMoveTowerAbility())
+        XCTAssertEqual(gs.castleEnergy, 100 - CastleAbility.moveTower.energyCost, accuracy: 0.001)
+
+        gs.cancelPendingMoveTower()
+
+        XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001,
+                       "cancelling an ability-started move should refund energy, clamped to the max")
+        XCTAssertEqual(gs.moveTowerItemCount, 0, "must not also refund a Move Tower item")
+        XCTAssertFalse(gs.isSelectingTowerToMove)
+    }
+
+    func testCancelPendingMoveTower_refundsItemWhenStartedByItem() {
+        let gs = makeGameState()
+        gs.moveTowerItemCount = 1
+        gs.activateMoveTower()
+        XCTAssertEqual(gs.moveTowerItemCount, 0)
+        let energyBefore = gs.castleEnergy
+
+        gs.cancelPendingMoveTower()
+
+        XCTAssertEqual(gs.moveTowerItemCount, 1, "cancelling an item-started move should refund the item")
+        XCTAssertEqual(gs.castleEnergy, energyBefore, accuracy: 0.001, "must not also refund energy")
     }
 
     // MARK: Poison
@@ -1011,21 +1276,21 @@ final class CastleAbilityTests: XCTestCase {
         let gs = makeGameState()
         let tower = Tower(coord: HexCoord(q: 0, r: 0))
         tower.overchargeTimer = 2
-        tower.abilityInvulnTimer = 4
+        tower.overchargeHealTimer = 4
         gs.towers.append(tower)
         gs.castleEnergy = 3
         gs.pendingAbility = .freeze
-        gs.gravityWellCoord = HexCoord(q: 1, r: 0)
-        gs.gravityWellTimer = 3
+        gs.gravityWaveCoord = HexCoord(q: 1, r: 0)
+        gs.gravityWaveTimer = 3
 
         gs.resetAbilities()
 
         XCTAssertEqual(gs.castleEnergy, gs.castleMaxEnergy, accuracy: 0.001)
         XCTAssertNil(gs.pendingAbility)
-        XCTAssertNil(gs.gravityWellCoord)
-        XCTAssertEqual(gs.gravityWellTimer, 0, accuracy: 0.001)
+        XCTAssertNil(gs.gravityWaveCoord)
+        XCTAssertEqual(gs.gravityWaveTimer, 0, accuracy: 0.001)
         XCTAssertEqual(tower.overchargeTimer, 0, accuracy: 0.001)
-        XCTAssertEqual(tower.abilityInvulnTimer, 0, accuracy: 0.001)
+        XCTAssertEqual(tower.overchargeHealTimer, 0, accuracy: 0.001)
     }
 
     func testStartRound_refillsCastleEnergy() {
@@ -1117,5 +1382,501 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertEqual(gs.crystalStructureCount, 0, "placing a tower consumes the crystal structure")
         XCTAssertNil(gs.farm(at: coord))
         XCTAssertEqual(gs.castleMaxEnergy, 20, accuracy: 0.001, "energy bonus is lost with the crystal")
+    }
+}
+
+// MARK: - Corridor Collision Tests
+
+/// Tests for the enemy collision / intra-tile spread ("corridor") system.
+/// See /Users/zac/.claude/plans/okay-i-want-to-hidden-cocoa.md for the design.
+final class CorridorTests: XCTestCase {
+
+    // MARK: Stage 0 — radius unification
+
+    /// `enemyVisualRadius(for:)` (gameplay physics) must equal `enemyRadius * bodyRadiusScale`
+    /// for every enemy type. This is the single source of truth that the renderer's mesh
+    /// sizing and tap-collision sphere both derive from — this test locks the three tables
+    /// together so a future radius tweak can't silently desync them again.
+    func testBodyRadiusScale_isSingleSourceOfTruthForVisualRadius() {
+        let gs = makeGameState(pathLength: 3)
+        for type in EnemyType.allCases {
+            XCTAssertEqual(
+                gs.enemyVisualRadius(for: type),
+                gs.enemyRadius * type.bodyRadiusScale,
+                accuracy: 0.0001,
+                "\(type) visual radius must derive from bodyRadiusScale"
+            )
+        }
+    }
+
+    // MARK: Stage 1 — path frame + caches
+
+    func testPathFrame_straightPath_isOrthonormal() {
+        let gs = makeGameState(pathLength: 6)
+        let cell = pathCell(at: 2, in: gs)!
+        for t: Float in [0, 0.25, 0.5, 0.75] {
+            let frame = gs.pathFrame(cell: cell, progress: t)
+            XCTAssertEqual(simd_length(frame.tangent), 1, accuracy: 0.0001)
+            XCTAssertEqual(simd_length(frame.lateral), 1, accuracy: 0.0001)
+            XCTAssertEqual(simd_dot(frame.tangent, frame.lateral), 0, accuracy: 0.0001)
+            // On the q-axis path every hop is direction 0: (spacing*1.5, spacing*sqrt(3)/2),
+            // which normalizes to (0.866, 0.5).
+            XCTAssertEqual(frame.tangent.x, 0.866, accuracy: 0.001)
+            XCTAssertEqual(frame.tangent.y, 0.5, accuracy: 0.001)
+            XCTAssertEqual(frame.lateral.x, -0.5, accuracy: 0.001)
+            XCTAssertEqual(frame.lateral.y, 0.866, accuracy: 0.001)
+        }
+    }
+
+    func testPathFrame_startCell_pointsAtNext() {
+        let gs = makeGameState(pathLength: 5)
+        let start = pathCell(at: 0, in: gs)!
+        let next = pathCell(at: 1, in: gs)!
+        let expected = simd_normalize(next.coord.worldPosition(spacing: gs.spacing) - start.coord.worldPosition(spacing: gs.spacing))
+        let frame = gs.pathFrame(cell: start, progress: 0)
+        XCTAssertEqual(frame.tangent.x, expected.x, accuracy: 0.0001)
+        XCTAssertEqual(frame.tangent.y, expected.y, accuracy: 0.0001)
+    }
+
+    func testPathFrame_endCell_fallsBackToPreviousDirection() {
+        let gs = makeGameState(pathLength: 5)
+        let end = pathCell(at: 4, in: gs)!
+        let prev = pathCell(at: 3, in: gs)!
+        XCTAssertNil(end.next, "test assumes the last cell is terminal")
+        let expected = simd_normalize(end.coord.worldPosition(spacing: gs.spacing) - prev.coord.worldPosition(spacing: gs.spacing))
+        let frame = gs.pathFrame(cell: end, progress: 0)
+        XCTAssertEqual(frame.tangent.x, expected.x, accuracy: 0.0001)
+        XCTAssertEqual(frame.tangent.y, expected.y, accuracy: 0.0001)
+    }
+
+    func testEnemyWorldPosition_lateralOffsetIsPurelyPerpendicular() {
+        let gs = makeGameState(pathLength: 6)
+        let enemy = makeActiveEnemy(atCell: 2, progress: 0.4, in: gs)
+        let centeredPos = gs.enemyWorldPosition(enemy)!
+        enemy.lateralOffset = 0.1
+        let offsetPos = gs.enemyWorldPosition(enemy)!
+        let delta = SIMD2<Float>(offsetPos.x - centeredPos.x, offsetPos.z - centeredPos.z)
+        let frame = gs.pathFrame(cell: enemy.currentCell!, progress: enemy.progress)
+        XCTAssertEqual(simd_length(delta), 0.1, accuracy: 0.0001)
+        XCTAssertEqual(simd_dot(delta, frame.tangent), 0, accuracy: 0.0001, "offset must be purely perpendicular to travel")
+        XCTAssertEqual(offsetPos.y, centeredPos.y, accuracy: 0.0001, "offset must not affect height")
+    }
+
+    func testStepsToEndCache_matchesUncachedWalk() {
+        let gs = makeGameState(pathLength: 8)
+        for i in 0..<8 {
+            let cell = pathCell(at: i, in: gs)!
+            XCTAssertEqual(gs.cachedStepsToEnd(cell.coord), gs.stepsToEnd(of: cell), "cell \(i)")
+        }
+    }
+
+    func testStepsToEndCache_invalidatesWhenTopologyChanges() {
+        let gs = makeGameState(pathLength: 5)
+        XCTAssertEqual(gs.cachedStepsToEnd(HexCoord(q: 0, r: 0)), 4)
+
+        // Extend the path by one more cell past the old end.
+        let oldEnd = pathCell(at: 4, in: gs)!
+        let newCell = HexCell(coord: HexCoord(q: 5, r: 0), height: 1.0, type: .end)
+        newCell.previous = oldEnd
+        oldEnd.next = newCell
+        gs.hexGrid.addCell(newCell)
+
+        XCTAssertEqual(gs.cachedStepsToEnd(HexCoord(q: 0, r: 0)), 5, "cache must reflect the new topology, not the stale one")
+    }
+
+    func testDistanceToEnd_isContinuousAcrossCellTransition() {
+        let gs = makeGameState(pathLength: 6)
+        let enemyBefore = makeActiveEnemy(atCell: 2, progress: 0.999, in: gs)
+        let enemyAfter = makeActiveEnemy(atCell: 3, progress: 0.0, in: gs)
+        XCTAssertEqual(gs.distanceToEnd(enemyBefore), gs.distanceToEnd(enemyAfter), accuracy: 0.002)
+    }
+
+    // MARK: Stage 3 — solver skeleton (forward probe + eased deceleration, no lateral steering)
+
+    /// A faster tank stuck behind a slower one must queue up, never overlapping its body.
+    func testFollower_neverOverlapsLeader() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.5, atCell: 5, in: gs)
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+        let minDist = 2 * gs.enemyVisualRadius(for: .tank)
+
+        for _ in 0..<200 {
+            _ = gs.update(deltaTime: 0.05)
+            guard let lp = gs.enemyWorldPosition(leader), let fp = gs.enemyWorldPosition(follower) else { continue }
+            XCTAssertGreaterThanOrEqual(simd_distance(lp, fp), minDist - 0.01, "follower must never overlap the leader")
+        }
+    }
+
+    /// Being followed by a faster enemy must have zero effect on the leader's own progress.
+    func testFollower_neverPushesLeaderForward() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.5, atCell: 5, in: gs)
+        _ = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+        let chord = gs.hexChordDistance
+        let before = gs.distanceToEnd(leader)
+
+        var elapsed: Float = 0
+        while elapsed < 10 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+        }
+        let actualDelta = before - gs.distanceToEnd(leader)
+        let expectedDelta = leader.speed / chord * elapsed
+        XCTAssertEqual(actualDelta, expectedDelta, accuracy: expectedDelta * 0.02 + 0.01)
+    }
+
+    /// A follower behind a frozen leader must decelerate to a stop at contact distance, then
+    /// resume advancing once the leader thaws.
+    func testBlockedByFrozenLeader_decelerates_thenResumes() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 100
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 3, in: gs)
+        let r = gs.enemyVisualRadius(for: .tank)
+
+        for _ in 0..<60 { _ = gs.update(deltaTime: 0.05) } // 3s — plenty of time to catch up and settle
+        let distBlocked = simd_distance(gs.enemyWorldPosition(leader)!, gs.enemyWorldPosition(follower)!)
+        XCTAssertEqual(distBlocked, 2 * r, accuracy: 0.05, "follower should be sitting at contact with the frozen leader")
+
+        let beforeThaw = gs.distanceToEnd(follower)
+        leader.frozen = false
+        leader.frozenTimer = 0
+        for _ in 0..<4 { _ = gs.update(deltaTime: 0.05) } // 0.2s
+        XCTAssertLessThan(gs.distanceToEnd(follower), beforeThaw, "follower should resume shortly after the leader thaws")
+    }
+
+    /// speed == 0 is a test-only "immobile prop" convention (no real ability sets `speed`,
+    /// which is a `let`, at runtime) — the solver must never touch such an enemy, even with
+    /// a fast mover right behind it. This is the guard behind every existing prop-based test
+    /// that runs the real update loop with a stationary enemy.
+    func testSpeedZeroEnemy_isCompletelyImmovable() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let prop = makeActiveEnemy(type: .basic, hp: 5000, speed: 0, atCell: 3, in: gs)
+        let cellBefore = prop.currentCell
+        let progressBefore = prop.progress
+        let offsetBefore = prop.lateralOffset
+        _ = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 0, in: gs)
+
+        for _ in 0..<100 { _ = gs.update(deltaTime: 0.05) }
+
+        XCTAssertTrue(prop.currentCell === cellBefore)
+        XCTAssertEqual(prop.progress, progressBefore)
+        XCTAssertEqual(prop.lateralOffset, offsetBefore)
+    }
+
+    /// A single very large deltaTime (tests elsewhere use 1.0 and 5.0) must not let a fast
+    /// follower tunnel through a frozen leader — the free-distance clamp, not substepping
+    /// granularity, is what prevents this.
+    func testLargeDeltaTime_noTunneling() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 0, in: gs)
+
+        _ = gs.update(deltaTime: 5.0)
+
+        let r = gs.enemyVisualRadius(for: .tank)
+        let dist = simd_distance(gs.enemyWorldPosition(leader)!, gs.enemyWorldPosition(follower)!)
+        XCTAssertGreaterThanOrEqual(dist, 2 * r - 0.01, "a single large-deltaTime update must not tunnel the follower through the leader")
+        XCTAssertGreaterThan(gs.distanceToEnd(follower), gs.distanceToEnd(leader), "follower must still be behind, not past, the leader")
+    }
+
+    /// Regression: slow/freeze timers used to tick only inside the old moveEnemy, which
+    /// hoppers never called, so a frozen hopper never thawed.
+    func testFrozenHopperThaws() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 3, in: gs)
+        hopper.frozen = true
+        hopper.frozenTimer = 0.15
+
+        _ = gs.update(deltaTime: 0.1)
+        XCTAssertTrue(hopper.frozen, "should still be frozen after 0.1s of a 0.15s freeze")
+        _ = gs.update(deltaTime: 0.1)
+        XCTAssertFalse(hopper.frozen, "hopper freeze timers must tick even though hoppers never call moveEnemy")
+    }
+
+    // MARK: Stage 4 — lateral steering, recentring, hysteresis
+
+    /// Encodes the corridor-width design decision as an executable record: small enemies can
+    /// slip past big ones, but two enemies both wide enough to matter cannot pass each other.
+    /// If a future radius/width tweak flips one of these, it should be a deliberate choice.
+    func testPassMatrix_encodesDesignDecision() {
+        let gs = makeGameState(pathLength: 3)
+        func canPass(_ a: EnemyType, _ b: EnemyType) -> Bool {
+            let required = gs.enemyVisualRadius(for: a) + gs.enemyVisualRadius(for: b) + CorridorTuning.separationGap
+            return gs.maxLateralOffset(for: a) + gs.maxLateralOffset(for: b) >= required
+        }
+        XCTAssertTrue(canPass(.basic, .tank), "a small enemy must be able to slip past a tank")
+        XCTAssertFalse(canPass(.tank, .tank), "two tanks must not be able to pass each other")
+        XCTAssertFalse(canPass(.shield, .tank), "shield and tank are both too wide to pass each other")
+    }
+
+    /// A fast small enemy stuck behind a slow tank should steer around it and end up ahead,
+    /// then drift back toward the path centerline once clear.
+    func testSmallEnemyOvertakesTank() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 5, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 3.0, atCell: 3, in: gs)
+
+        var maxAbsOffset: Float = 0
+        var elapsed: Float = 0
+        while elapsed < 8 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+            maxAbsOffset = max(maxAbsOffset, abs(basic.lateralOffset))
+        }
+        XCTAssertLessThan(gs.distanceToEnd(basic), gs.distanceToEnd(tank), "the faster, smaller enemy should have overtaken the tank")
+        XCTAssertGreaterThan(maxAbsOffset, 0.10, "basic should have steered out noticeably to pass")
+
+        var elapsed2: Float = 0
+        while elapsed2 < 1.0 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed2 += 0.05
+        }
+        XCTAssertLessThan(abs(basic.lateralOffset), 0.02, "basic should recenter once clear of the tank")
+    }
+
+    /// Two tanks are both too wide to pass each other (see the pass matrix) — the one behind
+    /// must never overtake, only queue.
+    func testTwoTanksNeverOvertake() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let leadTank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 5, in: gs)
+        let chaseTank = makeActiveEnemy(type: .tank, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+
+        var elapsed: Float = 0
+        while elapsed < 10 {
+            _ = gs.update(deltaTime: 0.05)
+            elapsed += 0.05
+            XCTAssertLessThanOrEqual(gs.distanceToEnd(leadTank), gs.distanceToEnd(chaseTank), "the lead tank must never be overtaken")
+        }
+    }
+
+    /// A small enemy passing a tank should commit to one side, not flip back and forth.
+    func testNoLateralOscillation() {
+        let gs = makeGameState(pathLength: 25)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 0.3, atCell: 8, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 3.0, atCell: 2, in: gs)
+
+        var lastNonZeroSide: Int8 = 0
+        var sideChanges = 0
+        for _ in 0..<400 {
+            _ = gs.update(deltaTime: 0.016)
+            if basic.avoidSide != 0 {
+                if lastNonZeroSide != 0 && basic.avoidSide != lastNonZeroSide {
+                    sideChanges += 1
+                }
+                lastNonZeroSide = basic.avoidSide
+            }
+        }
+        XCTAssertLessThanOrEqual(sideChanges, 2, "avoidance side should not flip back and forth while passing")
+    }
+
+    /// Regression: lateral courtesy used to inherit the same generous lookahead range used for
+    /// smooth forward braking (~1.6 world units, nearly two tiles), and `side = 0` for two
+    /// still-centered enemies always yields a nonzero "need" — so virtually any two enemies
+    /// loosely sharing a lane sat visibly off-center. One hex cell apart (~0.91 units) is well
+    /// inside that old range but well outside the actual contact-courtesy range, and moving at
+    /// the same speed keeps the gap constant, so this stays a pure "sharing a lane, no real
+    /// need to avoid" case for the whole run.
+    func testLateralSteering_doesNotEngageForLooselyQueuedEnemies() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 5, in: gs)
+        let b = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 4, in: gs)
+
+        for _ in 0..<40 { _ = gs.update(deltaTime: 0.05) } // 2s; same speed, gap never closes
+
+        XCTAssertEqual(a.lateralOffset, 0, accuracy: 0.001, "loosely queued same-lane enemies shouldn't wiggle")
+        XCTAssertEqual(b.lateralOffset, 0, accuracy: 0.001, "loosely queued same-lane enemies shouldn't wiggle")
+    }
+
+    // MARK: Stage 5 — separation relaxation (overlaps the corridor solver above didn't create)
+
+    /// Two enemies placed at an exact head-on overlap should be pushed apart purely laterally
+    /// — the `dist < 1e-4` branch's direction is perpendicular to travel by construction, so
+    /// there's no tangential component to (mis)apply as forward or backward motion.
+    func testSeparation_resolvesExactOverlap_lateralOnly() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, progress: 0.3, in: gs)
+        let b = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, progress: 0.3, in: gs)
+        let r = gs.enemyVisualRadius(for: .basic)
+
+        for _ in 0..<10 { gs.relaxSeparation([a, b]) }
+
+        let dist = simd_distance(gs.enemyWorldPosition(a)!, gs.enemyWorldPosition(b)!)
+        XCTAssertGreaterThanOrEqual(dist, 2 * r - 0.01, "an exact overlap should be resolved laterally")
+        XCTAssertEqual(a.progress, 0.3, accuracy: 0.0001, "separation alone must not change progress for a head-on overlap")
+        XCTAssertEqual(b.progress, 0.3, accuracy: 0.0001)
+    }
+
+    /// Separation may retreat the rear enemy of an overlapping pair, but must never advance
+    /// anyone — tested in isolation (direct `relaxSeparation` calls) so ordinary forward
+    /// walking can't be confused with the pass under test.
+    func testSeparation_neverPushesAnyoneForward() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let a = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let b = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let c = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 5, progress: 0.5, in: gs)
+        let before = [a, b, c].map { gs.distanceToEnd($0) }
+
+        for _ in 0..<10 { gs.relaxSeparation([a, b, c]) }
+
+        let after = [a, b, c].map { gs.distanceToEnd($0) }
+        for (b0, a0) in zip(before, after) {
+            // distanceToEnd only ever grows (retreat) or holds steady — it must never shrink,
+            // since shrinking would mean separation advanced someone toward the end.
+            XCTAssertGreaterThanOrEqual(a0, b0 - 0.0001, "separation must never advance an enemy toward the end")
+        }
+    }
+
+    /// Flying enemies never participate in separation, matching their exemption from the
+    /// corridor solver above.
+    func testSeparation_ignoresFlyingEnemies() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let wisp = makeActiveEnemy(type: .wisp, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let offsetBefore = wisp.lateralOffset
+
+        gs.relaxSeparation([wisp, tank])
+
+        XCTAssertEqual(wisp.lateralOffset, offsetBefore, "flying enemies never participate in separation")
+    }
+
+    /// A hopper mid-jump is exempt (its position is overridden by the jump arc entirely), but
+    /// a grounded hopper between jumps must still participate.
+    func testSeparation_ignoresMidJumpHopper() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        hopper.isJumping = true
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let offsetBefore = hopper.lateralOffset
+        let progressBefore = hopper.progress
+
+        gs.relaxSeparation([hopper, tank])
+
+        XCTAssertEqual(hopper.lateralOffset, offsetBefore)
+        XCTAssertEqual(hopper.progress, progressBefore)
+    }
+
+    func testSeparation_includesGroundedHopper() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let hopper = makeActiveEnemy(type: .hopper, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let basic = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        let required = gs.enemyVisualRadius(for: .hopper) + gs.enemyVisualRadius(for: .basic) + CorridorTuning.separationGap
+
+        for _ in 0..<10 { gs.relaxSeparation([hopper, basic]) }
+
+        let dist = simd_distance(gs.enemyWorldPosition(hopper)!, gs.enemyWorldPosition(basic)!)
+        XCTAssertGreaterThanOrEqual(dist, required - 0.01, "a grounded (non-jumping) hopper must participate in separation")
+    }
+
+    /// Flying enemies (wisp, hive) pass straight through ground traffic — never blocked.
+    func testFlyingUnitsIgnoreCollision() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let tank = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, progress: 0.5, in: gs)
+        tank.frozen = true
+        tank.frozenTimer = 999
+        let wisp = makeActiveEnemy(type: .wisp, hp: 5000, speed: 1.0, atCell: 4, progress: 0.48, in: gs)
+        let chord = gs.hexChordDistance
+        let expectedProgress = wisp.progress + wisp.speed * 0.05 / chord
+
+        _ = gs.update(deltaTime: 0.05)
+
+        XCTAssertEqual(wisp.progress, expectedProgress, accuracy: 0.0005, "flying enemies must not be blocked by ground traffic")
+        XCTAssertEqual(wisp.lateralOffset, 0)
+    }
+
+    // MARK: Stage 6 — consumers (roll, projectile lead, spawning)
+
+    /// Roll should reflect actual frame-to-frame displacement: rate matches distance moved
+    /// divided by body radius, and the rotation axis is perpendicular to the direction moved.
+    func testRoll_derivedFromDisplacement() {
+        let gs = makeGameState(pathLength: 10)
+        gs.phase = .combat
+        let enemy = makeActiveEnemy(type: .basic, hp: 5000, speed: 1.0, atCell: 3, in: gs)
+        _ = gs.update(deltaTime: 0.05) // establish a lastWorldPos baseline
+        let before = gs.enemyWorldPosition(enemy)!
+        _ = gs.update(deltaTime: 0.05)
+        let after = gs.enemyWorldPosition(enemy)!
+        let dx = after.x - before.x
+        let dz = after.z - before.z
+        let d = sqrt(dx * dx + dz * dz)
+
+        XCTAssertGreaterThan(d, 0, "enemy should have actually moved")
+        XCTAssertEqual(enemy.rollDeltaAngle, d / gs.enemyVisualRadius(for: .basic), accuracy: 0.0005)
+        XCTAssertEqual(simd_dot(SIMD2(enemy.rollAxis.x, enemy.rollAxis.z), SIMD2(dx, dz)), 0, accuracy: 0.0005,
+                       "roll axis must be perpendicular to the actual displacement")
+    }
+
+    /// A fully-blocked enemy shouldn't visibly keep rolling in place.
+    func testRoll_isZeroWhenFullyBlocked() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 4, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 0, in: gs)
+
+        for _ in 0..<60 { _ = gs.update(deltaTime: 0.05) } // reach contact and settle
+
+        XCTAssertEqual(follower.rollDeltaAngle, 0, accuracy: 0.001, "a fully blocked enemy should not visibly keep rolling")
+    }
+
+    /// A follower stuck in traffic should have its observed speed decay toward zero, and
+    /// `predictEnemyPosition` should follow suit rather than over-leading it as if free-running.
+    func testObservedSpeed_dropsWhenBlocked_andPredictionFollows() {
+        let gs = makeGameState(pathLength: 20)
+        gs.phase = .combat
+        let leader = makeActiveEnemy(type: .tank, hp: 5000, speed: 1.0, atCell: 6, in: gs)
+        leader.frozen = true
+        leader.frozenTimer = 999
+        let follower = makeActiveEnemy(type: .tank, hp: 5000, speed: 2.0, atCell: 3, in: gs)
+
+        for _ in 0..<80 { _ = gs.update(deltaTime: 0.05) } // 4s — reach contact and let the EMA settle
+
+        XCTAssertLessThan(follower.observedSpeed, 0.1, "observed speed should have decayed toward zero while fully blocked")
+
+        let current = gs.enemyWorldPosition(follower)!
+        let predicted = gs.predictEnemyPosition(follower, afterTime: 0.5)!.position
+        XCTAssertLessThan(simd_distance(current, predicted), 0.05, "prediction for a blocked enemy should stay near its current position")
+    }
+
+    /// Two enemies spawned at the same start cell in quick succession should not begin
+    /// perfectly co-located.
+    func testSpawn_secondEnemyAtSameStart_isNotExactlyCoLocatedWithTheFirst() {
+        let gs = makeGameState(pathLength: 15)
+        gs.startRound()
+
+        var spawned: [Enemy] = []
+        var elapsed: Float = 0
+        while spawned.count < 2 && elapsed < 5 {
+            let events = gs.update(deltaTime: 0.05)
+            spawned.append(contentsOf: events.spawnedEnemies)
+            elapsed += 0.05
+        }
+
+        guard spawned.count >= 2 else {
+            XCTFail("expected at least two enemies to spawn within 5s")
+            return
+        }
+        XCTAssertNotEqual(spawned[0].lateralOffset, spawned[1].lateralOffset,
+                           "consecutive spawns at the same start cell should be jittered apart")
     }
 }

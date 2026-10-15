@@ -40,14 +40,28 @@ extension GameState {
             spawnIntervals[startCell.coord] = interval
 
             let spawnedCount = enemies.filter { $0.currentCell != nil }.count
-            if spawnedCount < enemies.count && timer >= interval {
-                timer = 0
-                spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
-                if let enemy = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
-                    enemy.currentCell = startCell
-                    enemy.progress = 0
-                    enemy.active = true
-                    events.spawnedEnemies.append(enemy)
+            if spawnedCount < enemies.count && timer >= interval,
+               let candidate = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
+                let blockedSoFar = spawnBlockedFor[startCell.coord, default: 0]
+                if isStartCellCongested(startCell, for: candidate) && blockedSoFar < CorridorTuning.spawnBlockTimeout {
+                    // Leave `timer` at/above `interval` so spawning is retried next frame —
+                    // a delayed spawn only lengthens the round, never ends it early (see
+                    // the round-over check, which requires every enemy to have spawned).
+                    spawnBlockedFor[startCell.coord] = blockedSoFar + deltaTime
+                } else {
+                    spawnBlockedFor[startCell.coord] = 0
+                    timer = 0
+                    spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
+                    candidate.currentCell = startCell
+                    candidate.progress = 0
+                    // Alternate by creation order (not RNG, to keep the seeded draw sequence
+                    // untouched) so two enemies queued at the same start cell don't begin
+                    // perfectly co-located; the corridor solver's separation pass would fan
+                    // them out anyway, but this avoids a one-frame exact overlap.
+                    candidate.lateralOffset = (candidate.seq % 2 == 0 ? 1 : -1) * CorridorTuning.spawnLateralJitter
+                    candidate.lastWorldPos = nil
+                    candidate.active = true
+                    events.spawnedEnemies.append(candidate)
                 }
             }
             spawnTimers[startCell.coord] = timer
@@ -69,14 +83,20 @@ extension GameState {
         // Warden aura: buffs nearby enemies' resistances while a warden is alive and in range
         applyWardenAura()
 
-        // Gravity Well: pull affected enemies toward the well tile; their normal movement is skipped.
-        let pulledByWell = updateGravityWell(deltaTime: deltaTime)
-        lastGravityWellPulledIDs = pulledByWell
+        // Gravity Wave: marks which enemies are currently standing in the field (read by hopper
+        // jumps, flyer hover height, and flyer targetability below/elsewhere) — a passive area
+        // effect that never overrides movement, unlike the Gravity Well ability it replaced.
+        updateGravityWaveField(deltaTime: deltaTime)
 
         // Poison Cloud: infects (or refreshes) any enemy currently standing in an active cloud.
         updatePoisonCloud(deltaTime: deltaTime)
 
-        // Move enemies and apply burn/poison DOT
+        // Phase A: burn/poison DOT, status timers, and hive drops for every active enemy;
+        // collect survivors for the corridor solver. Building `movers` here (rather than
+        // re-filtering `enemies` afterward) preserves the existing behavior that a hopper
+        // dropped by a hive this frame doesn't move until the next one.
+        var movers: [Enemy] = []
+        movers.reserveCapacity(enemies.count)
         for enemy in enemies where enemy.active {
             // Burn damage tick
             if enemy.burning {
@@ -104,13 +124,12 @@ extension GameState {
                 }
             }
 
-            if pulledByWell.contains(enemy.id) {
-                // Movement handled by the Gravity Well this frame.
-            } else if enemy.enemyType == .hopper || enemy.enemyType == .superHopper {
-                updateHopper(enemy, deltaTime: deltaTime)
-            } else {
-                moveEnemy(enemy, deltaTime: deltaTime)
-            }
+            // Slow/freeze timers used to tick only inside moveEnemy, so a frozen hopper never
+            // thawed (hoppers never call moveEnemy). Ticking them here, unconditionally, for
+            // every surviving active enemy fixes that.
+            tickStatusTimers(enemy, deltaTime: deltaTime)
+            movers.append(enemy)
+
             // Hive periodically drops a hopper while alive
             if enemy.enemyType == .hive {
                 enemy.hiveSpawnTimer -= deltaTime
@@ -131,7 +150,14 @@ extension GameState {
                     events.spawnedEnemies.append(hopper)
                 }
             }
+        }
 
+        // Phase C: advance every surviving enemy through the corridor solver (ground walkers
+        // collide front-to-back; hoppers/immobile enemies keep their own paths).
+        solveCrowd(deltaTime: deltaTime, movers: movers)
+
+        // Phase D: report results.
+        for enemy in movers {
             if enemy.reachedEnd {
                 print("[BaseDamage] \(enemy.enemyType) dealt \(enemy.baseDamage) damage to base tower (HP: \(baseTowerHP) → \(max(0, baseTowerHP - enemy.baseDamage)))")
                 damageBaseTower(damage: enemy.baseDamage, events: &events)
@@ -168,7 +194,7 @@ extension GameState {
         for tower in towers {
             // Tick castle-ability timers on every tower (targeting towers included).
             if tower.overchargeTimer > 0 { tower.overchargeTimer = max(0, tower.overchargeTimer - deltaTime) }
-            if tower.abilityInvulnTimer > 0 { tower.abilityInvulnTimer = max(0, tower.abilityInvulnTimer - deltaTime) }
+            if tower.overchargeHealTimer > 0 { tower.overchargeHealTimer = max(0, tower.overchargeHealTimer - deltaTime) }
 
             if tower.type == .targeting { continue }
 
@@ -286,17 +312,21 @@ extension GameState {
                 continue
             }
 
-            // Healer: automatically heals a nearby damaged tower each cooldown
+            // Healer: automatically heals a nearby damaged tower each cooldown. While
+            // Overcharge Heal is active, the search uses the boosted radius and the heal
+            // doesn't spend a charge (nor require one to be available) — see
+            // `Tower.effectiveHealRadius` and `CastleAbility.overchargeHeal`.
             if tower.type == .healer {
-                if tower.cooldownRemaining <= 0 && tower.healer!.charges > 0 {
+                let overcharged = tower.overchargeHealTimer > 0
+                if tower.cooldownRemaining <= 0 && (overcharged || tower.healer!.charges > 0) {
                     let target = towers.first {
                         $0.id != tower.id &&
                         $0.hitPoints < $0.maxHitPoints &&
-                        $0.coord.distance(to: tower.coord) <= tower.healer!.radius
+                        $0.coord.distance(to: tower.coord) <= tower.effectiveHealRadius
                     }
                     if let target {
-                        target.hitPoints = min(target.hitPoints + 1, target.maxHitPoints)
-                        tower.healer!.charges -= 1
+                        target.hitPoints = min(target.hitPoints + Tower.hpPerHeart, target.maxHitPoints)
+                        if !overcharged { tower.healer!.charges -= 1 }
                         tower.cooldownRemaining = tower.cooldown
                         events.healedTowers.append(target)
                     }
@@ -390,13 +420,7 @@ extension GameState {
             let lockedID = tower.laser?.lockedTargetID ?? tower.cone?.lockedTargetID ?? tower.lightning?.chainTargetIDs.first
             if isFiring, let lockedID,
                let locked = enemies.first(where: { $0.id == lockedID && $0.active }) {
-                // Respect cell lock even while firing — don't track enemy that left the locked cell
-                if let lockCoord = tower.lockedTargetCoord,
-                   enemyNearestCoord(locked) != lockCoord {
-                    closestEnemy = nil
-                } else {
-                    closestEnemy = locked
-                }
+                closestEnemy = locked
             } else {
                 closestEnemy = selectTarget(for: tower, targetingLevel: tLevel)
             }
@@ -446,12 +470,7 @@ extension GameState {
                 let tooClose = lockedTarget.flatMap { enemyNearestCoord($0) }
                     .map { tower.coord.distance(to: $0) <= 1 } ?? false
 
-                // Stop if locked enemy has left the tower's cell lock zone
-                let leftCellLock = tower.lockedTargetCoord.map { lockCoord in
-                    lockedTarget.flatMap { enemyNearestCoord($0) } != lockCoord
-                } ?? false
-
-                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose || leftCellLock {
+                if tower.laser!.timeRemaining <= 0 || lockedTarget == nil || tooClose {
                     tower.laser!.isFiring = false
                     tower.laser!.timeRemaining = 0
                     tower.laser!.lockedTargetID = nil
@@ -719,8 +738,8 @@ extension GameState {
             }
             for tower in towers {
                 if tower.coord.distance(to: coord) <= enemy.explosionRadius
-                    && !(tower.isInvulnerable || tower.abilityInvulnTimer > 0) {
-                    tower.hitPoints -= enemy.explosionDamage
+                    && !tower.isInvulnerable {
+                    tower.hitPoints -= enemy.explosionDamage * Tower.hpPerHeart
                     if tower.hitPoints <= 0 {
                         events.destroyedTowers.append(tower)
                     } else {
@@ -838,86 +857,11 @@ extension GameState {
         }
     }
 
-    func moveEnemy(_ enemy: Enemy, deltaTime: Float) {
-        guard let current = enemy.currentCell else { return }
-
-        guard let nextCell = current.next else {
-            // Reached the end — enemy hits the base tower
-            enemy.active = false
-            enemy.reachedEnd = true
-            return
-        }
-
-        // Tick down slow timer
-        if enemy.slowed {
-            enemy.slowTimer -= deltaTime
-            if enemy.slowTimer <= 0 {
-                enemy.slowed = false
-                enemy.slowTimer = 0
-                enemy.slowFactor = 0.5
-            }
-        }
-
-        // Tick down freeze timer — frozen enemies don't move at all, overriding any slow
-        if enemy.frozen {
-            enemy.frozenTimer -= deltaTime
-            if enemy.frozenTimer <= 0 {
-                enemy.frozen = false
-                enemy.frozenTimer = 0
-            }
-        }
-
-        let currentPos = current.coord.worldPosition(spacing: spacing)
-        let nextPos = nextCell.coord.worldPosition(spacing: spacing)
-        let distance = simd_distance(currentPos, nextPos)
-
-        let effectiveSpeed = enemy.frozen ? 0 : (enemy.slowed ? enemy.speed * enemy.slowFactor : enemy.speed)
-        let distanceMoved = effectiveSpeed * deltaTime
-        enemy.progress += distanceMoved / distance
-
-        // Rolling: angular velocity = linear speed / visual radius
-        let visualRadius = enemyVisualRadius(for: enemy.enemyType)
-        enemy.rollDeltaAngle = distanceMoved / visualRadius
-        // Roll axis is perpendicular to movement direction in XZ plane
-        let dx = nextPos.x - currentPos.x
-        let dz = nextPos.y - currentPos.y   // worldPosition .y is world Z
-        let dirLen = sqrt(dx * dx + dz * dz)
-        if dirLen > 0.001 {
-            enemy.rollAxis = SIMD3(dz / dirLen, 0, -dx / dirLen)
-        }
-
-        if enemy.progress >= 1.0 {
-            enemy.progress -= 1.0
-            enemy.currentCell = nextCell
-            if let nextNext = nextCell.next {
-                let nextNextPos = nextNext.coord.worldPosition(spacing: spacing)
-                let nextDistance = simd_distance(nextPos, nextNextPos)
-                enemy.progress *= distance / nextDistance
-            }
-        }
-    }
-
     /// Returns the visual sphere/box radius used when rendering this enemy type.
+    /// Derived from `EnemyType.bodyRadiusScale`, the single source of truth shared with
+    /// the renderer's mesh sizing and tap-collision sphere.
     func enemyVisualRadius(for type: EnemyType) -> Float {
-        switch type {
-        case .basic:         return enemyRadius
-        case .hopper:        return enemyRadius * 1.1
-        case .tank:          return enemyRadius * 2.0
-        case .mirroid:       return enemyRadius * 2.0
-        case .wisp:          return enemyRadius * 0.9
-        case .fastTank:      return enemyRadius * 2.0
-        case .shield:        return enemyRadius * 1.5
-        case .superHopper:   return enemyRadius * 1.5
-        case .boss:          return enemyRadius * 1.5   // half of box width (3r)
-        case .exploder:      return enemyRadius * 1.1   // half of box width (2.2r)
-        case .superExploder: return enemyRadius * 1.5   // half of box width (3r)
-        case .hive:          return enemyRadius * 2.5
-        case .plated:        return enemyRadius * 2.0
-        case .insulated:     return enemyRadius * 1.7
-        case .cinder:        return enemyRadius * 1.6
-        case .nullifier:     return enemyRadius * 2.2
-        case .warden:        return enemyRadius * 1.9
-        }
+        enemyRadius * type.bodyRadiusScale
     }
 
     func updateHopper(_ enemy: Enemy, deltaTime: Float) {
@@ -927,6 +871,10 @@ extension GameState {
             if enemy.hiveDropProgress >= 1.0 {
                 enemy.isDroppingFromHive = false
                 enemy.hopperJumpTimer = rng.randomFloat(in: enemy.hopperJumpInterval)
+                // Land centered on the path — the corridor solver's separation pass will
+                // fan it out from whatever it landed on, rather than carrying over the
+                // hive-drop scatter's own (unrelated) lateral offset.
+                enemy.lateralOffset = 0
             }
             return
         }
@@ -968,7 +916,8 @@ extension GameState {
 
     func triggerHopperJump(_ enemy: Enemy) {
         guard let current = enemy.currentCell else { return }
-        let jumpRadius = rng.randomInt(in: enemy.hopperJumpRange)
+        // A Gravity Wave field grounds hoppers to short hops — see CastleAbility.gravityWave.
+        let jumpRadius = enemy.inGravityWave ? 1 : rng.randomInt(in: enemy.hopperJumpRange)
 
         let fromPos = enemyWorldPosition(enemy) ?? {
             let p = current.coord.worldPosition(spacing: spacing)
@@ -983,7 +932,7 @@ extension GameState {
             // Using remaining steps rather than depth-from-start avoids a bug where
             // branch cells have higher depth-from-start than the junction they lead to,
             // causing the hopper to get stuck with no valid forward target.
-            let currentRemaining = stepsToEnd(of: current)
+            let currentRemaining = cachedStepsToEnd(current.coord)
             var best: HexCell? = nil
             var bestRemaining = currentRemaining
 
@@ -991,7 +940,7 @@ extension GameState {
                 guard cell.type == .path || cell.type == .end else { continue }
                 guard cell.coord.distance(to: current.coord) <= jumpRadius else { continue }
                 guard cell.coord != current.coord else { continue }
-                let remaining = stepsToEnd(of: cell)
+                let remaining = cachedStepsToEnd(cell.coord)
                 if remaining < bestRemaining {
                     bestRemaining = remaining
                     best = cell
@@ -1070,37 +1019,20 @@ extension GameState {
         let p1Pos = current.coord.worldPosition(spacing: spacing)
         let p1Y = current.height + enemyRadius + enemyHoverOffset
 
-        if let nextCell = current.next {
-            let p2Pos = nextCell.coord.worldPosition(spacing: spacing)
+        if let cp = splineControlPoints(for: current), let nextCell = current.next {
             let p2Y = nextCell.height + enemyRadius + enemyHoverOffset
+            let p0Y = current.previous.map { $0.height + enemyRadius + enemyHoverOffset } ?? (p1Y * 2 - p2Y)
+            let p3Y = nextCell.next.map { $0.height + enemyRadius + enemyHoverOffset } ?? (p2Y * 2 - p1Y)
 
-            let p0Pos: SIMD2<Float>
-            let p0Y: Float
-            if let prev = current.previous {
-                p0Pos = prev.coord.worldPosition(spacing: spacing)
-                p0Y = prev.height + enemyRadius + enemyHoverOffset
-            } else {
-                p0Pos = p1Pos * 2 - p2Pos
-                p0Y = p1Y * 2 - p2Y
-            }
-
-            let p3Pos: SIMD2<Float>
-            let p3Y: Float
-            if let nextNext = nextCell.next {
-                p3Pos = nextNext.coord.worldPosition(spacing: spacing)
-                p3Y = nextNext.height + enemyRadius + enemyHoverOffset
-            } else {
-                p3Pos = p2Pos * 2 - p1Pos
-                p3Y = p2Y * 2 - p1Y
-            }
-
-            let x = catmullRom(p0Pos.x, p1Pos.x, p2Pos.x, p3Pos.x, t)
-            let z = catmullRom(p0Pos.y, p1Pos.y, p2Pos.y, p3Pos.y, t)
+            let x = catmullRom(cp.p0.x, cp.p1.x, cp.p2.x, cp.p3.x, t)
+            let z = catmullRom(cp.p0.y, cp.p1.y, cp.p2.y, cp.p3.y, t)
             let y = catmullRom(p0Y, p1Y, p2Y, p3Y, t)
 
-            return [x, y + enemy.additionalHoverOffset, z]
+            let (_, lateral, _) = pathFrame(cell: current, progress: t)
+            let off = enemy.lateralOffset
+            return [x + lateral.x * off, y + enemy.effectiveHoverOffset, z + lateral.y * off]
         } else {
-            return [p1Pos.x, p1Y + enemy.additionalHoverOffset, p1Pos.y]
+            return [p1Pos.x, p1Y + enemy.effectiveHoverOffset, p1Pos.y]
         }
     }
 
@@ -1131,32 +1063,20 @@ extension GameState {
 
     /// Effective fire radius for a tower given the highest targeting tower level covering it.
     func effectiveFireRadius(for tower: Tower, targetingLevel tLevel: Int) -> Int {
-        tLevel >= 5 ? tower.fireRadius + 1 : tower.fireRadius
+        tLevel >= 3 ? tower.fireRadius + 1 : tower.fireRadius
     }
 
     /// Selects the best enemy target for a tower, respecting Targeting Tower bonuses in range.
     func selectTarget(for tower: Tower, targetingLevel tLevel: Int) -> Enemy? {
-        // Level 4+: manual attack lock takes highest priority
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
-            if let locked = enemies.first(where: { $0.id == manualID && $0.active }),
-               let coord = enemyNearestCoord(locked),
-               tower.coord.distance(to: coord) <= effectiveDetectionRadius(for: tower, targetingLevel: tLevel) {
-                return locked
-            }
-            tower.manualTargetEnemyID = nil  // enemy dead or out of range
-        }
-
         // Level 1+: detection +1
         let effectiveDetection = effectiveDetectionRadius(for: tower, targetingLevel: tLevel)
 
         var candidates: [(enemy: Enemy, dist: Int)] = []
         for enemy in enemies where enemy.active {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
-            // Level 3+: skip enemies this tower type cannot damage
-            if tLevel >= 3 && enemy.immuneTowerTypes.contains(tower.type) { continue }
+            // Level 2+: skip enemies this tower type cannot damage
+            if tLevel >= 2 && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            // Level 2+: target lock — only consider enemies in the locked cell
-            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if (tower.type == .laser || tower.type == .fireball) && dist <= 1 { continue }
             if dist <= effectiveDetection { candidates.append((enemy, dist)) }
@@ -1166,8 +1086,8 @@ extension GameState {
         // Level 1+: use tower's chosen targeting mode
         let mode: TargetingMode = tLevel >= 1 ? tower.targetingMode : .closest
 
-        // Level 3+: prioritise a chosen enemy type before applying targeting mode
-        if tLevel >= 3, let priorityType = tower.priorityEnemyType {
+        // Level 2+: prioritise a chosen enemy type before applying targeting mode
+        if tLevel >= 2, let priorityType = tower.priorityEnemyType {
             let priorityMatches = candidates.filter { $0.enemy.enemyType == priorityType }
             if !priorityMatches.isEmpty { return applyTargetingMode(mode, to: priorityMatches) }
         }
@@ -1191,18 +1111,44 @@ extension GameState {
         var progress = enemy.progress
         var remaining = time
 
+        // Use the enemy's observed (EMA) speed rather than its nominal top speed: an enemy
+        // stuck in traffic is correctly predicted to stay roughly where it is instead of
+        // projectiles always leading as if it were running free. A near-zero observed speed
+        // also means "essentially stationary" — return the current position immediately
+        // rather than dividing by it below.
+        let speed = max(0, enemy.observedSpeed)
+        guard speed > 0.001 else {
+            // Evaluate at the enemy's actual current progress (linearly interpolated, same as
+            // the non-early-return path below) — snapping to the bare cell center here would
+            // ignore however far through the segment the enemy already is.
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
+            let offset = enemy.lateralOffset
+            guard let nextCell = cell.next else {
+                let pos = cell.coord.worldPosition(spacing: spacing)
+                let y = cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
+                return (SIMD3<Float>(pos.x + lateral.x * offset, y, pos.y + lateral.y * offset), cell.coord)
+            }
+            let cellPos = cell.coord.worldPosition(spacing: spacing)
+            let nextPos = nextCell.coord.worldPosition(spacing: spacing)
+            let x = cellPos.x + (nextPos.x - cellPos.x) * progress
+            let z = cellPos.y + (nextPos.y - cellPos.y) * progress
+            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
+            let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
+            return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
+        }
+
         // Simulate the enemy moving forward in time
         while remaining > 0 {
             guard let nextCell = cell.next else {
                 // Enemy will reach end before projectile arrives
                 let pos = cell.coord.worldPosition(spacing: spacing)
-                return (SIMD3<Float>(pos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, pos.y), cell.coord)
+                return (SIMD3<Float>(pos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset, pos.y), cell.coord)
             }
 
             let cellPos = cell.coord.worldPosition(spacing: spacing)
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let distance = simd_distance(cellPos, nextPos)
-            let progressPerSecond = enemy.speed / distance
+            let progressPerSecond = speed / distance
             let timeToNextCell = (1.0 - progress) / progressPerSecond
 
             if remaining < timeToNextCell {
@@ -1215,17 +1161,23 @@ extension GameState {
             }
         }
 
-        // Compute world position at predicted cell/progress
+        // Compute world position at predicted cell/progress, carrying the enemy's current
+        // lateral offset forward unchanged — holding it constant over a typical projectile
+        // flight (well under a second) is far more accurate than ignoring it and aiming at
+        // the lane centerline.
         let cellPos = cell.coord.worldPosition(spacing: spacing)
+        let offset = enemy.lateralOffset
         if let nextCell = cell.next {
             let nextPos = nextCell.coord.worldPosition(spacing: spacing)
             let x = cellPos.x + (nextPos.x - cellPos.x) * progress
             let z = cellPos.y + (nextPos.y - cellPos.y) * progress
-            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset
+            let y = cell.height + (nextCell.height - cell.height) * progress + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
             let nearestCoord = progress < 0.5 ? cell.coord : nextCell.coord
-            return (SIMD3<Float>(x, y, z), nearestCoord)
+            return (SIMD3<Float>(x + lateral.x * offset, y, z + lateral.y * offset), nearestCoord)
         } else {
-            return (SIMD3<Float>(cellPos.x, cell.height + enemyRadius + enemyHoverOffset + enemy.additionalHoverOffset, cellPos.y), cell.coord)
+            let (_, lateral, _) = pathFrame(cell: cell, progress: progress)
+            return (SIMD3<Float>(cellPos.x + lateral.x * offset, cell.height + enemyRadius + enemyHoverOffset + enemy.effectiveHoverOffset, cellPos.y + lateral.y * offset), cell.coord)
         }
     }
 
@@ -1310,15 +1262,12 @@ extension GameState {
             if !tower.targetTypeRestrictions.isEmpty && !tower.targetTypeRestrictions.contains(enemy.enemyType) { continue }
             if skipImmuneTargets && enemy.immuneTowerTypes.contains(tower.type) { continue }
             guard let enemyCoord = enemyNearestCoord(enemy) else { continue }
-            if tLevel >= 2, let lockCoord = tower.lockedTargetCoord, enemyCoord != lockCoord { continue }
             let dist = tower.coord.distance(to: enemyCoord)
             if dist <= effectiveDetection {
                 candidates.append((enemy, dist))
             }
         }
-        if tLevel >= 4, let manualID = tower.manualTargetEnemyID {
-            candidates.sort { a, _ in a.enemy.id == manualID }
-        } else if preferFurthest {
+        if preferFurthest {
             candidates.sort { enemyPathProgress($0.enemy) > enemyPathProgress($1.enemy) }
         } else {
             candidates.sort { $0.distance < $1.distance }

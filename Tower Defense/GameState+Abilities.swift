@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import simd
 
 extension GameState {
 
@@ -38,18 +37,21 @@ extension GameState {
         case .overcharge:  applyOvercharge(at: coord)
         case .freeze:      applyFreeze(at: coord)
         case .poison:      applyPoisonCloud(at: coord)
-        case .gravityWell: applyGravityWell(at: coord)
-        case .invulnerability: return false
+        case .gravityWave: applyGravityWave(at: coord)
+        case .overchargeHeal, .moveTower: return false
         }
         finishCast(ability)
         return true
     }
 
-    /// Resolves the tower-targeted pending ability (Invulnerability) on the tapped tower.
+    /// Resolves the tower-targeted pending ability (Overcharge Heal) on the tapped tower.
+    /// Only a `.healer` tower is a valid target — tapping anything else leaves the ability
+    /// pending so the player can pick a different tower instead of silently doing nothing.
     @discardableResult
     func castPendingAbility(onTower tower: Tower) -> Bool {
         guard let ability = pendingAbility, ability.targetsTower else { return false }
-        applyInvulnerability(on: tower)
+        guard tower.type == .healer else { return false }
+        applyOverchargeHeal(on: tower)
         finishCast(ability)
         return true
     }
@@ -76,16 +78,24 @@ extension GameState {
         applyAreaSlow(cells: cells, slowFactor: 0)
     }
 
-    /// Invulnerability: protects a single tower for the duration without touching the permanent
-    /// `isInvulnerable` flag owned by the invulnerable bonus tile.
-    private func applyInvulnerability(on tower: Tower) {
-        tower.abilityInvulnTimer = CastleAbility.invulnerability.duration
+    /// Overcharge Heal: temporarily boosts a healer tower's radius (to 3 tiles, 4 at max level
+    /// — see `Tower.effectiveHealRadius`) and lets it heal for free, without spending a charge
+    /// (see the healer branch of `update(deltaTime:)`). Duration scales with the tower's own
+    /// level — a more-upgraded healer gets a longer window — rather than the fixed constant
+    /// every other ability uses.
+    private func applyOverchargeHeal(on tower: Tower) {
+        tower.overchargeHealTimer = 5 * Float(tower.level)
     }
 
     /// Gravity Well: pull nearby enemies toward `coord` and hold them there for the duration.
-    private func applyGravityWell(at coord: HexCoord) {
-        gravityWellCoord = coord
-        gravityWellTimer = CastleAbility.gravityWell.duration
+    /// Gravity Wave: opens a field of increased gravity at `coord` for the duration. The field
+    /// doesn't move or hold enemies — it's a passive area that changes how hoppers jump, how
+    /// high flyers hover, and what can target them while they're standing inside it. See
+    /// `updateGravityWaveField`, `triggerHopperJump`, `Enemy.effectiveHoverOffset`, and
+    /// `Enemy.immuneTowerTypes`.
+    private func applyGravityWave(at coord: HexCoord) {
+        gravityWaveCoord = coord
+        gravityWaveTimer = CastleAbility.gravityWave.duration
     }
 
     /// Poison: opens a cloud at `coord` that lasts `CastleAbility.poison.duration` seconds —
@@ -101,6 +111,24 @@ extension GameState {
     func poisonCloudCells(around center: HexCoord) -> [(coord: HexCoord, height: Float)] {
         var result: [(coord: HexCoord, height: Float)] = []
         let radius = poisonCloudRadius
+        for dq in -radius...radius {
+            let rLow = max(-radius, -dq - radius)
+            let rHigh = min(radius, -dq + radius)
+            for dr in rLow...rHigh {
+                let coord = HexCoord(q: center.q + dq, r: center.r + dr)
+                guard let cell = hexGrid.cell(at: coord) else { continue }
+                result.append((coord, cell.height))
+            }
+        }
+        return result
+    }
+
+    /// Existing cells within the Gravity Wave field's radius of `center`, with their heights —
+    /// for placing the persistent ground-field visual. Mirrors `poisonCloudCells`; gameplay
+    /// itself (`updateGravityWaveField`) compares hex distance directly and doesn't need this.
+    func gravityWaveCells(around center: HexCoord) -> [(coord: HexCoord, height: Float)] {
+        var result: [(coord: HexCoord, height: Float)] = []
+        let radius = gravityWaveRadius
         for dq in -radius...radius {
             let rLow = max(-radius, -dq - radius)
             let rHigh = min(radius, -dq + radius)
@@ -137,73 +165,22 @@ extension GameState {
         }
     }
 
-    /// Pulls enemies within the active Gravity Well toward its center along the path, holding them
-    /// there. Returns the set of enemy ids handled this frame so the caller can skip their normal
-    /// movement. Empty when no well is active.
-    func updateGravityWell(deltaTime: Float) -> Set<UUID> {
-        guard gravityWellTimer > 0, let well = gravityWellCoord else { return [] }
-        gravityWellTimer = max(0, gravityWellTimer - deltaTime)
-
-        var pulled: Set<UUID> = []
+    /// Ticks the Gravity Wave field's timer and marks every enemy currently standing inside it
+    /// (`Enemy.inGravityWave`) — unlike the ability it replaced, the field never moves or holds
+    /// enemies; it's a passive area read by `triggerHopperJump` (restricts jump range to 1),
+    /// `Enemy.effectiveHoverOffset` (halves flying height), and `Enemy.immuneTowerTypes`
+    /// (removes flying units' immunity to ground towers) for as long as an enemy stays in it.
+    func updateGravityWaveField(deltaTime: Float) {
+        if gravityWaveTimer > 0 {
+            gravityWaveTimer = max(0, gravityWaveTimer - deltaTime)
+        }
+        let center = gravityWaveTimer > 0 ? gravityWaveCoord : nil
         for enemy in enemies where enemy.active {
-            guard let current = enemy.currentCell,
-                  let coord = enemyNearestCoord(enemy),
-                  coord.distance(to: well) <= gravityWellRadius else { continue }
-
-            // Already on the well tile: hold in place (clumped).
-            if current.coord == well {
-                enemy.progress = 0
-                pulled.insert(enemy.id)
+            guard let center, let coord = enemyNearestCoord(enemy) else {
+                enemy.inGravityWave = false
                 continue
             }
-
-            // Walk one path step toward the well: forward via `next` if the well is ahead,
-            // otherwise backward via `previous`.
-            let pullSpeed = enemy.speed * 1.5
-            let limit = gravityWellRadius + 1
-            if pathReaches(from: current.next, to: well, forward: true, within: limit) {
-                stepEnemy(enemy, toward: current.next, speed: pullSpeed, deltaTime: deltaTime, forward: true)
-                pulled.insert(enemy.id)
-            } else if pathReaches(from: current.previous, to: well, forward: false, within: limit) {
-                stepEnemy(enemy, toward: current.previous, speed: pullSpeed, deltaTime: deltaTime, forward: false)
-                pulled.insert(enemy.id)
-            }
-        }
-        return pulled
-    }
-
-    /// Whether the well coord is reachable within `limit` path steps from `start`, following the
-    /// `next` chain when `forward` is true or the `previous` chain when false.
-    private func pathReaches(from start: HexCell?, to well: HexCoord, forward: Bool, within limit: Int) -> Bool {
-        var cell = start
-        var steps = 0
-        while let c = cell, steps <= limit {
-            if c.coord == well { return true }
-            cell = forward ? c.next : c.previous
-            steps += 1
-        }
-        return false
-    }
-
-    /// Moves an enemy toward an adjacent path cell, advancing (or reversing) its progress.
-    private func stepEnemy(_ enemy: Enemy, toward target: HexCell?, speed: Float, deltaTime: Float, forward: Bool) {
-        guard let current = enemy.currentCell, let target else { return }
-        let from = current.coord.worldPosition(spacing: spacing)
-        let to = target.coord.worldPosition(spacing: spacing)
-        let distance = max(0.0001, simd_distance(from, to))
-        let step = speed * deltaTime / distance
-        if forward {
-            enemy.progress += step
-            if enemy.progress >= 1.0 {
-                enemy.progress = 0
-                enemy.currentCell = target
-            }
-        } else {
-            enemy.progress -= step
-            if enemy.progress <= 0 {
-                enemy.progress = 0.999
-                enemy.currentCell = target
-            }
+            enemy.inGravityWave = coord.distance(to: center) <= gravityWaveRadius
         }
     }
 
@@ -211,14 +188,16 @@ extension GameState {
     func resetAbilities() {
         castleEnergy = castleMaxEnergy
         pendingAbility = nil
-        gravityWellCoord = nil
-        gravityWellTimer = 0
-        lastGravityWellPulledIDs.removeAll()
+        gravityWaveCoord = nil
+        gravityWaveTimer = 0
+        for enemy in enemies {
+            enemy.inGravityWave = false
+        }
         poisonCloudCoord = nil
         poisonCloudTimer = 0
         for tower in towers {
             tower.overchargeTimer = 0
-            tower.abilityInvulnTimer = 0
+            tower.overchargeHealTimer = 0
         }
     }
 }

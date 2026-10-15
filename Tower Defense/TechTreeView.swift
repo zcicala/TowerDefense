@@ -56,7 +56,7 @@ struct TechTreeView: View {
         for lv in 2...Tower.maxLevel { g[.towerLevel(.ice, lv)] = (lv, 9) }
 
         // Row 10 — Global targeting upgrades (independent category)
-        for feat in 1...5 { g[.targetingFeature(feat)] = (feat - 1, 10) }
+        for feat in 1...3 { g[.targetingFeature(feat)] = (feat - 1, 10) }
 
         // Row 11 — Anti-air (farm child)
         g[.towerUnlock(.antiAir)] = (1, 11)

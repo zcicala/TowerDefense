@@ -293,6 +293,11 @@ enum EnemyType: CaseIterable {
     // Act III "Apex" archetypes
     case nullifier
     case warden
+    // Late-game "bruisers": plain high-HP bodies that let the capped spawn count keep total
+    // wave HP climbing (see `GameState.maxEnemiesPerRound`).
+    case brute
+    case colossus
+    case titan
 
     var displayName: String {
         switch self {
@@ -313,6 +318,40 @@ enum EnemyType: CaseIterable {
         case .cinder:       return "Cinder"
         case .nullifier:    return "Nullifier"
         case .warden:       return "Warden"
+        case .brute:        return "Brute"
+        case .colossus:     return "Colossus"
+        case .titan:        return "Titan"
+        }
+    }
+
+    /// Body half-width as a multiple of `GameState.enemyRadius` (0.1). SINGLE SOURCE OF
+    /// TRUTH for gameplay physics (corridor collision, roll rate), the rendered mesh size,
+    /// and the RealityKit tap-collision sphere — previously three separate, disagreeing
+    /// tables. For a box mesh, this is half its width (the box's horizontal extent is what
+    /// the corridor solver treats as the enemy's footprint; a taller/shallower box like the
+    /// boss is an intentional visual exception the collider does not need to track).
+    var bodyRadiusScale: Float {
+        switch self {
+        case .basic:         return 1.0
+        case .hopper:        return 1.1
+        case .tank:          return 2.0
+        case .mirroid:       return 2.0
+        case .wisp:          return 0.9
+        case .fastTank:      return 2.0
+        case .shield:        return 1.5
+        case .superHopper:   return 1.5
+        case .boss:          return 1.5   // half of box width (3r); box is 4r tall
+        case .exploder:      return 1.1   // half of box width (2.2r)
+        case .superExploder: return 1.5   // half of box width (3r)
+        case .hive:          return 2.5
+        case .plated:        return 2.0
+        case .insulated:     return 1.7
+        case .cinder:        return 1.6
+        case .nullifier:     return 2.2
+        case .warden:        return 1.9
+        case .brute:         return 2.3
+        case .colossus:      return 2.6
+        case .titan:         return 3.0
         }
     }
 }
@@ -403,8 +442,6 @@ class Tower {
     var coord: HexCoord
     let type: TowerType
     var targetingMode: TargetingMode = .closest
-    /// Set by the player via manual attack mode (level 4+ targeting tower in range).
-    var manualTargetEnemyID: UUID? = nil
     /// Non-nil for max-level projectile towers — an independently rotating second turret.
     var secondTurret: SecondTurretState? = nil
     var level: Int = 1
@@ -419,14 +456,28 @@ class Tower {
     var targetYaw: Float = 0
     var hasTarget: Bool = false
     let turretRotationSpeed: Float = 3.0
-    var hitPoints: Int = 5
-    var maxHitPoints: Int = 5
+    /// Hit points of one displayed heart. Tower HP is an integer number of points;
+    /// heals and damage that used to be expressed in hearts are multiples of this.
+    static let hpPerHeart = 100
+    var hitPoints: Int = 5 * Tower.hpPerHeart
+    var maxHitPoints: Int = 5 * Tower.hpPerHeart
+    /// Number of hearts to draw for a given HP value (partial hearts round up).
+    static func hearts(for hp: Int) -> Int { (max(0, hp) + hpPerHeart - 1) / hpPerHeart }
     var isInvulnerable: Bool = false
     /// While > 0, this tower's firing cooldown recovers at 2× (Castle "Overcharge" ability).
     var overchargeTimer: Float = 0
-    /// While > 0, this tower is treated as invulnerable via the Castle "Invulnerability" ability,
-    /// independently of the permanent `isInvulnerable` flag owned by the invulnerable bonus tile.
-    var abilityInvulnTimer: Float = 0
+    /// While > 0, this (healer) tower's heal radius is boosted and its heals cost no charge —
+    /// the Castle "Overcharge Heal" ability. Set to `5 * level` seconds when cast; see
+    /// `effectiveHealRadius` for the radius bump and `GameState+Abilities.applyOverchargeHeal`.
+    var overchargeHealTimer: Float = 0
+    /// The heal radius this tower is currently using: boosted to 3 (4 at max level) while
+    /// `overchargeHealTimer` is active, otherwise its normal upgrade-driven `healer.radius`.
+    /// Only meaningful for `.healer` towers (returns 0 for everyone else).
+    var effectiveHealRadius: Int {
+        guard let healer else { return 0 }
+        guard overchargeHealTimer > 0 else { return healer.radius }
+        return level == Tower.maxLevel ? 4 : 3
+    }
     var hasSlowAura: Bool = false
     var slowedCoords: Set<HexCoord> = []
     var hasDamageAura: Bool = false
@@ -438,8 +489,6 @@ class Tower {
     var targetTypeRestrictions: Set<EnemyType> = []
     /// Set via a level-2+ Targeting Tower: this tower prioritises this enemy type when selecting targets.
     var priorityEnemyType: EnemyType? = nil
-    /// When set, tower only fires at enemies whose nearest coord matches this cell.
-    var lockedTargetCoord: HexCoord? = nil
 
     // Type-specific state — only the relevant one is non-nil for a given tower
     var laser: LaserState? = nil
@@ -464,8 +513,8 @@ class Tower {
     static func makeLaser(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .laser,
                       detectionRadius: 6, fireRadius: 6,
-                      projectileSpeed: 0, damage: 0, cooldown: 6.0)
-        t.laser = LaserState(duration: 3.0, dps: 180, range: 6)
+                      projectileSpeed: 0, damage: 0, cooldown: 6.0 * 1.15)
+        t.laser = LaserState(duration: 3.0, dps: 180 * 1.2, range: 6)
         return t
     }
 
@@ -473,7 +522,7 @@ class Tower {
         let t = Tower(coord: coord, type: .fire,
                       detectionRadius: 2, fireRadius: 2,
                       projectileSpeed: 0, damage: 0, cooldown: 0.5)
-        t.cone = ConeState(duration: 3.5, dps: 157.8125)
+        t.cone = ConeState(duration: 3.5, dps: 157.8125 * 1.1 * 1.15)
         return t
     }
 
@@ -497,7 +546,7 @@ class Tower {
     static func makeSword(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .sword,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 112.5, cooldown: 0.84)
+                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5 * 0.85 * 0.9, cooldown: 0.84)
         t.sword = SwordState(swingDuration: 0.28)
         return t
     }
@@ -541,7 +590,7 @@ class Tower {
     static func makeLightning(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .lightning,
                       detectionRadius: 3, fireRadius: 3,
-                      projectileSpeed: 0, damage: 198, cooldown: 2.5)
+                      projectileSpeed: 0, damage: 198 * 1.2 * 1.2, cooldown: 2.5)
         t.lightning = LightningState(duration: 0.5, range: 3)
         return t
     }
@@ -594,6 +643,13 @@ class Tower {
         case .sword:
             damage *= boost
             cooldown *= 0.88
+            // Reaching level 4 grants a permanent extra heart of life (levels 5/6 don't add
+            // another — this fires exactly once, on the level 3 -> 4 transition, whether
+            // purchased one level at a time or applied retroactively via a tech node).
+            if level == 4 {
+                hitPoints += Tower.hpPerHeart
+                maxHitPoints += Tower.hpPerHeart
+            }
         case .healer:
             healer!.charges = level
             cooldown *= 0.90
@@ -627,7 +683,10 @@ class Tower {
         case .fire:       return level == Tower.maxLevel - 1 ? "+33% DPS, +15% duration, +Burning DOT" : "+33% DPS, +15% duration"
         case .ice:        return level == Tower.maxLevel - 1 ? "+20% duration, -18% cooldown, +8% slow, +10%/s Freeze Chance" : "+20% duration, -18% cooldown, +8% slow"
         case .bowler:     return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Ball Bounce" : "+33% dmg, -12% cooldown"
-        case .sword:      return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Swipe Arc" : "+33% dmg, -12% cooldown"
+        case .sword:
+            if level == Tower.maxLevel - 1 { return "+33% dmg, -12% cooldown, +Swipe Arc" }
+            if level == 3 { return "+33% dmg, -12% cooldown, +1 Heart" }
+            return "+33% dmg, -12% cooldown"
         case .healer:     return level == Tower.maxLevel - 1 ? "+1 charge, -10% cooldown, +1 radius" : "+1 charge, -10% cooldown"
         case .fireball:   return level == Tower.maxLevel - 1 ? "+33% dmg, +33% burn DPS, -12% cooldown, +Splash Radius" : "+33% dmg, +33% burn DPS, -12% cooldown"
         case .antiAir:    return level == Tower.maxLevel - 1 ? "+33% dmg, -12% cooldown, +Range" : "+33% dmg, -12% cooldown"
@@ -694,10 +753,21 @@ class Enemy {
     var hiveDropFromY: Float = 0              // world Y the drop starts from
     var hiveDropLateralOffset: SIMD2<Float> = .zero  // random XZ scatter, fades to zero on land
 
+    /// Whether this enemy is currently standing inside an active Castle "Gravity Wave" field —
+    /// updated every frame for every active enemy by `GameState.updateGravityWaveField`. Read by
+    /// `triggerHopperJump` (restricts jump range to 1), `effectiveHoverOffset` (halves flying
+    /// height), and `immuneTowerTypes` (strips flying units' immunity to ground towers).
+    var inGravityWave: Bool = false
+
+    /// `additionalHoverOffset`, halved while caught in a Gravity Wave field — see `inGravityWave`.
+    var effectiveHoverOffset: Float { inGravityWave ? additionalHoverOffset * 0.5 : additionalHoverOffset }
+
     /// Tower types that cannot *target* this enemy at all — purely positional/targetability rules
     /// (airborne units out of reach of ground-only towers). Damage-type resistance is handled
     /// separately by `resistances`/`resistanceMultiplier(for:)`.
     var immuneTowerTypes: Set<TowerType> {
+        // A Gravity Wave field drags flyers down into range of every tower, ground included.
+        if inGravityWave { return [] }
         var immune: Set<TowerType>
         switch enemyType {
         case .hive:    immune = [.fire, .ice, .sword, .bowler, .fireball, .projectile]
@@ -742,12 +812,41 @@ class Enemy {
     var jumpFromPos: SIMD3<Float>? = nil
     var jumpToPos: SIMD3<Float>? = nil
 
+    // MARK: - Corridor / crowd state (GameState+Crowd.swift)
+
+    /// Signed offset from the path centerline, in world units, perpendicular to the path
+    /// tangent in XZ (positive = left of travel). Rotates with the frame automatically at
+    /// corners and cell transitions — never needs conversion. Physical and cosmetic only;
+    /// never a targeting input (see `GameState.enemyNearestCoord`).
+    var lateralOffset: Float = 0
+    /// Latched avoidance side chosen by the corridor solver: -1 right, 0 none, +1 left.
+    /// Not re-evaluated while `avoidHold > 0`, which prevents side-to-side oscillation.
+    var avoidSide: Int8 = 0
+    /// Seconds the latched `avoidSide` stays locked in before it can be re-evaluated.
+    var avoidHold: Float = 0
+    /// Seconds this enemy has been continuously unblocked; gates recentring back to `avoidSide = 0`.
+    var clearTimer: Float = 0
+    /// Exponential moving average of actual along-path world speed, seeded to `speed`. Feeds
+    /// `predictEnemyPosition` so projectile lead accounts for enemies slowed/stopped by traffic.
+    var observedSpeed: Float
+    /// Previous frame's world position; used to derive `rollDeltaAngle`/`rollAxis` from actual
+    /// displacement rather than intended speed, so a blocked enemy doesn't visually keep rolling.
+    var lastWorldPos: SIMD3<Float>? = nil
+    /// Monotonic creation index — deterministic tiebreak when two enemies share a sort key
+    /// (e.g. pinned at the same gravity-well tile). Not a UUID: needs to be `Comparable`
+    /// and cheap to compare in the solver's inner loop.
+    let seq: Int
+    private static var nextSeq: Int = 0
+
     init(type: EnemyType, hitPoints: Float, speed: Float, baseDamage: Int = 1,
          shieldAmount: Float = 0, explosionRadius: Int = 0, explosionDamage: Int = 0) {
         self.enemyType = type
         self.hitPoints = hitPoints
         self.maxHitPoints = hitPoints
         self.speed = speed
+        self.observedSpeed = speed
+        Enemy.nextSeq += 1
+        self.seq = Enemy.nextSeq
         self.baseDamage = baseDamage
         self.shieldMaxHP = shieldAmount
         self.shieldHP = shieldAmount
@@ -860,8 +959,14 @@ class BowlingBall {
 class HexGrid {
     private(set) var cells: [HexCoord: HexCell] = [:]
 
+    /// Bumped on every topology change (cell add/remove). Lets callers cache derived
+    /// path data (e.g. GameState.cachedStepsToEnd) and cheaply detect when it's stale,
+    /// without having to hook every individual call site that mutates the grid.
+    private(set) var pathVersion: Int = 0
+
     func addCell(_ cell: HexCell) {
         cells[cell.coord] = cell
+        pathVersion += 1
     }
 
     func cell(at coord: HexCoord) -> HexCell? {
@@ -872,9 +977,13 @@ class HexGrid {
         (0..<6).compactMap { cells[coord.neighbor($0)] }
     }
 
-    func removeAllCells() { cells.removeAll() }
+    func removeAllCells() {
+        cells.removeAll()
+        pathVersion += 1
+    }
 
     func removeCell(at coord: HexCoord) {
         cells.removeValue(forKey: coord)
+        pathVersion += 1
     }
 }

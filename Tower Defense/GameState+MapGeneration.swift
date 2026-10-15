@@ -281,7 +281,7 @@ extension GameState {
             case .bank:
                 break  // banks don't benefit towers directly
             case .quarry:
-                tower.maxHitPoints += farm.accumulatedHP
+                tower.maxHitPoints += farm.accumulatedHP * Tower.hpPerHeart
                 tower.hitPoints = tower.maxHitPoints
             case .crystalStructure:
                 break  // no tower bonus — building here simply gives up its energy bonus
@@ -392,7 +392,7 @@ extension GameState {
     func useTowerHealItem(on tower: Tower) -> Bool {
         guard towerHealItemCount > 0, tower.hitPoints < tower.maxHitPoints else { return false }
         towerHealItemCount -= 1
-        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2 * Tower.hpPerHeart)
         return true
     }
 
@@ -400,7 +400,7 @@ extension GameState {
     func repairTower(_ tower: Tower) -> Bool {
         guard tower.hitPoints < tower.maxHitPoints, money >= repairCost else { return false }
         money -= repairCost
-        tower.hitPoints += 1
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + Tower.hpPerHeart)
         return true
     }
 
@@ -469,7 +469,7 @@ extension GameState {
     func applyPendingTowerHeal(on tower: Tower) -> Bool {
         guard isPendingTowerHeal, tower.hitPoints < tower.maxHitPoints else { return false }
         towerHealItemCount -= 1
-        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2)
+        tower.hitPoints = min(tower.maxHitPoints, tower.hitPoints + 2 * Tower.hpPerHeart)
         isPendingTowerHeal = false
         return true
     }
@@ -480,12 +480,35 @@ extension GameState {
         isSelectingTowerToMove = true
     }
 
+    /// Castle-ability entry point into the same select-tower/select-destination flow
+    /// `activateMoveTower()` starts, spending castle energy instead of an inventory item —
+    /// this is what lets a tower be relocated mid-round instead of only during placing (the
+    /// Move Tower item's own UI only appears while `phase == .placing`). Returns true if the
+    /// selection flow actually started.
+    @discardableResult
+    func beginMoveTowerAbility() -> Bool {
+        guard phase == .combat,
+              pendingAbility == nil,
+              !isSelectingTowerToMove, pendingMoveTower == nil,
+              abilityUnlocked(.moveTower),
+              abilityReady(.moveTower) else { return false }
+        castleEnergy -= CastleAbility.moveTower.energyCost
+        moveTowerViaAbility = true
+        isSelectingTowerToMove = true
+        return true
+    }
+
     func cancelPendingMoveTower() {
         if isSelectingTowerToMove || pendingMoveTower != nil {
-            moveTowerItemCount += 1
+            if moveTowerViaAbility {
+                castleEnergy = min(castleMaxEnergy, castleEnergy + CastleAbility.moveTower.energyCost)
+            } else {
+                moveTowerItemCount += 1
+            }
         }
         isSelectingTowerToMove = false
         pendingMoveTower = nil
+        moveTowerViaAbility = false
     }
 
     func selectTowerToMove(_ tower: Tower) {
@@ -521,8 +544,9 @@ extension GameState {
             case .bank:
                 break
             case .quarry:
-                tower.maxHitPoints += farm.accumulatedHP
-                tower.hitPoints = min(tower.hitPoints + farm.accumulatedHP, tower.maxHitPoints)
+                let bonusHP = farm.accumulatedHP * Tower.hpPerHeart
+                tower.maxHitPoints += bonusHP
+                tower.hitPoints = min(tower.hitPoints + bonusHP, tower.maxHitPoints)
             case .crystalStructure:
                 break  // no tower bonus — building here simply gives up its energy bonus
             }
@@ -552,6 +576,7 @@ extension GameState {
         }
 
         pendingMoveTower = nil
+        moveTowerViaAbility = false
         return true
     }
 
@@ -865,6 +890,7 @@ extension GameState {
         isPendingTowerHeal = false
         isSelectingTowerToMove = false
         pendingMoveTower = nil
+        moveTowerViaAbility = false
         isPaused = false
         return (towerIDs, terrainCoords + branchCoords, [])
     }

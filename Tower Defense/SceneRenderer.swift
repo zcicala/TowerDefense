@@ -1458,6 +1458,18 @@ class SceneRenderer {
             // Gold sphere — reads as "support unit, kill first".
             mesh = MeshResource.generateSphere(radius: radius * 1.9)
             material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.75, green: 0.62, blue: 0.15, alpha: 1))
+        case .brute:
+            // Dark red-brown sphere.
+            mesh = MeshResource.generateSphere(radius: radius * 2.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.45, green: 0.2, blue: 0.15, alpha: 1))
+        case .colossus:
+            // Slate box.
+            mesh = MeshResource.generateBox(width: radius * 2.6, height: radius * 2.6, depth: radius * 2.6, cornerRadius: radius * 0.3)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.3, green: 0.32, blue: 0.4, alpha: 1))
+        case .titan:
+            // Near-black sphere with a crimson tint.
+            mesh = MeshResource.generateSphere(radius: radius * 3.0)
+            material.baseColor = CustomMaterial.BaseColor(tint: .init(red: 0.25, green: 0.05, blue: 0.08, alpha: 1))
         }
 
         let entity = Entity()
@@ -1471,26 +1483,10 @@ class SceneRenderer {
         } else {
             entity.components.set(ModelComponent(mesh: mesh, materials: [material]))
         }
-        let collisionRadius: Float
-        switch enemy.enemyType {
-        case .basic:         collisionRadius = radius
-        case .hopper:        collisionRadius = radius * 1.1
-        case .tank:          collisionRadius = radius * 2
-        case .fastTank:      collisionRadius = radius * 2
-        case .shield:        collisionRadius = radius * 1.5
-        case .superHopper:   collisionRadius = radius * 1.5
-        case .boss:          collisionRadius = radius * 2
-        case .exploder:      collisionRadius = radius * 1.5
-        case .superExploder: collisionRadius = radius * 2
-        case .hive:          collisionRadius = radius * 2.5
-        case .mirroid:       collisionRadius = radius * 2
-        case .wisp:          collisionRadius = radius * 0.9
-        case .plated:        collisionRadius = radius * 2.0
-        case .insulated:     collisionRadius = radius * 1.7
-        case .cinder:        collisionRadius = radius * 1.6
-        case .nullifier:     collisionRadius = radius * 2.2
-        case .warden:        collisionRadius = radius * 1.9
-        }
+        // Tap-collision sphere: derived from the same EnemyType.bodyRadiusScale used for
+        // gameplay physics (was previously a separate, disagreeing table — see
+        // GameState+Crowd.swift). Slightly larger than the physical body for easy tapping.
+        let collisionRadius = radius * enemy.enemyType.bodyRadiusScale * CorridorTuning.tapColliderSlack
         entity.components.set(CollisionComponent(shapes: [.generateSphere(radius: collisionRadius)]))
         entity.components.set(InputTargetComponent())
 
@@ -1723,6 +1719,44 @@ class SceneRenderer {
         }
     }
 
+    /// Persistent violet particle field over every cell in the active Gravity Wave, for its
+    /// full (now much longer, 10s) duration — mirrors `showPoisonCloud`'s cast-and-forget,
+    /// self-cleaning pattern so the field visibly occupies its area the whole time it's active,
+    /// the same way the poison cloud does.
+    func showGravityWaveField(cells: [(coord: HexCoord, height: Float)], spacing: Float, duration: TimeInterval) {
+        guard let content else { return }
+        var entities: [Entity] = []
+        for (coord, height) in cells {
+            let pos = coord.worldPosition(spacing: spacing)
+            var emitter = ParticleEmitterComponent()
+            emitter.emitterShape = .torus
+            emitter.emitterShapeSize = [0.3, 0.06, 0.3]
+            emitter.speed = 0.12
+            emitter.speedVariation = 0.05
+            emitter.mainEmitter.birthRate = 45
+            emitter.mainEmitter.lifeSpan = 1.6
+            emitter.mainEmitter.size = 0.09
+            emitter.mainEmitter.sizeVariation = 0.03
+            emitter.mainEmitter.color = .evolving(
+                start: .single(.init(red: 0.75, green: 0.35, blue: 1.0, alpha: 0.8)),
+                end:   .single(.init(red: 0.35, green: 0.1, blue: 0.6, alpha: 0.0))
+            )
+            emitter.mainEmitter.blendMode = .additive
+            emitter.timing = .repeating(warmUp: 0, emit: .init(duration: duration), idle: .init(duration: 0))
+
+            let entity = Entity()
+            entity.components.set(emitter)
+            entity.position = SIMD3(pos.x, height + 0.1, pos.y)
+            content.add(entity)
+            entities.append(entity)
+        }
+        guard !entities.isEmpty else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(duration))
+            for entity in entities { entity.removeFromParent() }
+        }
+    }
+
     // MARK: - Ability Status Indicators
     //
     // Persistent per-entity indicators that stay visible for as long as a tower or enemy
@@ -1730,9 +1764,9 @@ class SceneRenderer {
     // toggle driven every frame from live `Tower`/`Enemy` state, mirroring the shield-dome pattern.
 
     private var overchargeIndicatorEntities: [UUID: Entity] = [:]
-    private var invulnerabilityIndicatorEntities: [UUID: Entity] = [:]
+    private var overchargeHealIndicatorEntities: [UUID: Entity] = [:]
     private var frozenIndicatorEntities: [UUID: Entity] = [:]
-    private var gravityPullIndicatorEntities: [UUID: Entity] = [:]
+    private var gravityWaveIndicatorEntities: [UUID: Entity] = [:]
 
     private func makeOverchargeIndicator(at position: SIMD3<Float>) -> Entity {
         var emitter = ParticleEmitterComponent()
@@ -1772,9 +1806,10 @@ class SceneRenderer {
         }
     }
 
-    private func makeInvulnerabilityShell(at position: SIMD3<Float>) -> Entity {
+    private func makeOverchargeHealShell(at position: SIMD3<Float>) -> Entity {
         let mesh = MeshResource.generateSphere(radius: 0.32)
-        var material = UnlitMaterial(color: .init(red: 0.3, green: 0.55, blue: 1.0, alpha: 0.28))
+        // Soft green, matching the healer tower's own tint (SceneRenderer's healer case).
+        var material = UnlitMaterial(color: .init(red: 0.3, green: 0.85, blue: 0.45, alpha: 0.28))
         material.blending = .transparent(opacity: .init(floatLiteral: 0.28))
 
         let entity = Entity()
@@ -1783,19 +1818,19 @@ class SceneRenderer {
         return entity
     }
 
-    /// Shows or hides the translucent blue shield shell while a tower is ability-invulnerable.
-    func setInvulnerabilityIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
+    /// Shows or hides the translucent green shell while a healer tower's Overcharge Heal is active.
+    func setOverchargeHealIndicator(for tower: Tower, at position: SIMD3<Float>, active: Bool) {
         if active {
-            if let entity = invulnerabilityIndicatorEntities[tower.id] {
+            if let entity = overchargeHealIndicatorEntities[tower.id] {
                 entity.position = SIMD3(position.x, position.y + 0.2, position.z)
             } else if let content {
-                let entity = makeInvulnerabilityShell(at: position)
+                let entity = makeOverchargeHealShell(at: position)
                 content.add(entity)
-                invulnerabilityIndicatorEntities[tower.id] = entity
+                overchargeHealIndicatorEntities[tower.id] = entity
             }
         } else {
-            invulnerabilityIndicatorEntities[tower.id]?.removeFromParent()
-            invulnerabilityIndicatorEntities.removeValue(forKey: tower.id)
+            overchargeHealIndicatorEntities[tower.id]?.removeFromParent()
+            overchargeHealIndicatorEntities.removeValue(forKey: tower.id)
         }
     }
 
@@ -1842,7 +1877,7 @@ class SceneRenderer {
         frozenIndicatorEntities.removeValue(forKey: enemy.id)
     }
 
-    private func makeGravityPullIndicator(at position: SIMD3<Float>) -> Entity {
+    private func makeGravityWaveIndicator(at position: SIMD3<Float>) -> Entity {
         var emitter = ParticleEmitterComponent()
         emitter.emitterShape = .torus
         emitter.emitterShapeSize = [0.16, 0.02, 0.16]
@@ -1864,45 +1899,45 @@ class SceneRenderer {
         return entity
     }
 
-    /// Shows or hides the purple swirl around an enemy currently held by Gravity Well.
-    func setGravityPullIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
+    /// Shows or hides the purple swirl around an enemy currently standing in a Gravity Wave field.
+    func setGravityWaveIndicator(for enemy: Enemy, at position: SIMD3<Float>, active: Bool) {
         if active {
-            if let entity = gravityPullIndicatorEntities[enemy.id] {
+            if let entity = gravityWaveIndicatorEntities[enemy.id] {
                 entity.position = position
             } else if let content {
-                let entity = makeGravityPullIndicator(at: position)
+                let entity = makeGravityWaveIndicator(at: position)
                 content.add(entity)
-                gravityPullIndicatorEntities[enemy.id] = entity
+                gravityWaveIndicatorEntities[enemy.id] = entity
             }
         } else {
-            gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
-            gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+            gravityWaveIndicatorEntities[enemy.id]?.removeFromParent()
+            gravityWaveIndicatorEntities.removeValue(forKey: enemy.id)
         }
     }
 
-    func removeGravityPullIndicator(for enemy: Enemy) {
-        gravityPullIndicatorEntities[enemy.id]?.removeFromParent()
-        gravityPullIndicatorEntities.removeValue(forKey: enemy.id)
+    func removeGravityWaveIndicator(for enemy: Enemy) {
+        gravityWaveIndicatorEntities[enemy.id]?.removeFromParent()
+        gravityWaveIndicatorEntities.removeValue(forKey: enemy.id)
     }
 
     /// Removes all per-tower ability indicators (called when a tower is destroyed).
     func removeAbilityIndicators(forTower id: UUID) {
         overchargeIndicatorEntities[id]?.removeFromParent()
         overchargeIndicatorEntities.removeValue(forKey: id)
-        invulnerabilityIndicatorEntities[id]?.removeFromParent()
-        invulnerabilityIndicatorEntities.removeValue(forKey: id)
+        overchargeHealIndicatorEntities[id]?.removeFromParent()
+        overchargeHealIndicatorEntities.removeValue(forKey: id)
     }
 
     /// Removes all per-enemy and per-tower ability indicators (called on round-over cleanup).
     func removeAllAbilityIndicators() {
         for (_, entity) in overchargeIndicatorEntities { entity.removeFromParent() }
         overchargeIndicatorEntities.removeAll()
-        for (_, entity) in invulnerabilityIndicatorEntities { entity.removeFromParent() }
-        invulnerabilityIndicatorEntities.removeAll()
+        for (_, entity) in overchargeHealIndicatorEntities { entity.removeFromParent() }
+        overchargeHealIndicatorEntities.removeAll()
         for (_, entity) in frozenIndicatorEntities { entity.removeFromParent() }
         frozenIndicatorEntities.removeAll()
-        for (_, entity) in gravityPullIndicatorEntities { entity.removeFromParent() }
-        gravityPullIndicatorEntities.removeAll()
+        for (_, entity) in gravityWaveIndicatorEntities { entity.removeFromParent() }
+        gravityWaveIndicatorEntities.removeAll()
     }
 
     // MARK: - Projectiles

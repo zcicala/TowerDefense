@@ -36,9 +36,6 @@ struct ContentView: View {
     @State private var dialogRefresh: Int = 0
     @State private var viewSize: CGSize = CGSize(width: 800, height: 600)
     @State private var hoveredPlacementCoord: HexCoord? = nil
-    /// True while waiting for the player to click an enemy for manual attack lock.
-    @State private var isPendingManualTarget: Bool = false
-    @State private var isPendingTargetLock: Bool = false
 
     var body: some View {
         gameScreen
@@ -180,12 +177,12 @@ struct ContentView: View {
                     for tower in gameState.towers {
                         guard let pos = gameState.towerWorldPosition(tower) else { continue }
                         renderer.setOverchargeIndicator(for: tower, at: pos, active: tower.overchargeTimer > 0)
-                        renderer.setInvulnerabilityIndicator(for: tower, at: pos, active: tower.abilityInvulnTimer > 0)
+                        renderer.setOverchargeHealIndicator(for: tower, at: pos, active: tower.overchargeHealTimer > 0)
                     }
                     for enemy in gameState.enemies where enemy.active {
                         guard let pos = gameState.enemyWorldPosition(enemy) else { continue }
                         renderer.setFrozenIndicator(for: enemy, at: pos, active: enemy.slowed && enemy.slowFactor <= 0.01)
-                        renderer.setGravityPullIndicator(for: enemy, at: pos, active: gameState.lastGravityWellPulledIDs.contains(enemy.id))
+                        renderer.setGravityWaveIndicator(for: enemy, at: pos, active: enemy.inGravityWave)
                     }
 
                     // Spawn new enemy entities
@@ -214,7 +211,7 @@ struct ContentView: View {
                     for enemy in events.killedEnemies {
                         renderer.removeShieldDome(for: enemy)
                         renderer.removeFrozenIndicator(for: enemy)
-                        renderer.removeGravityPullIndicator(for: enemy)
+                        renderer.removeGravityWaveIndicator(for: enemy)
                         renderer.removeEnemy(enemy)
                         if selectedEnemy?.id == enemy.id { selectedEnemy = nil }
                     }
@@ -363,15 +360,7 @@ struct ContentView: View {
                 }
             }
             .focusable()
-            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d"), .init("x")], phases: [.down, .repeat]) { press in
-                // 'x' triggers/cancels manual attack lock when a qualifying tower is selected
-                if press.characters == "x",
-                   gameState.phase == .combat,
-                   let tower = selectedTower,
-                   gameState.globalTargetingLevel >= 4 {
-                    isPendingManualTarget.toggle()
-                    return .handled
-                }
+            .onKeyPress(keys: [.init("w"), .init("a"), .init("s"), .init("d")], phases: [.down, .repeat]) { press in
                 guard cameraEntity != nil else { return .ignored }
                 keysPressed.insert(press.characters)
                 return .handled
@@ -384,12 +373,20 @@ struct ContentView: View {
                 gameState.togglePause()
                 return .handled
             }
-            .onKeyPress(keys: [.init("1"), .init("2"), .init("3"), .init("4")], phases: .down) { press in
+            .onKeyPress(keys: [.init("1"), .init("2"), .init("3"), .init("4"), .init("5"), .init("6")], phases: .down) { press in
                 // Number keys cast/cancel the matching castle ability during combat.
                 guard gameState.phase == .combat,
                       let ability = CastleAbility.allCases.first(where: { String($0.hotkey) == press.characters })
                 else { return .ignored }
-                if gameState.pendingAbility == ability {
+                if ability == .moveTower {
+                    // Move Tower drives its own select-tower/select-destination flow rather
+                    // than the generic pendingAbility mechanism — see beginMoveTowerAbility().
+                    if gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil {
+                        gameState.cancelPendingMoveTower()
+                    } else {
+                        gameState.beginMoveTowerAbility()
+                    }
+                } else if gameState.pendingAbility == ability {
                     gameState.cancelPendingAbility()
                 } else {
                     gameState.beginAbility(ability)
@@ -745,28 +742,6 @@ struct ContentView: View {
                 .padding(.top, 60)
             }
 
-            // Manual attack lock — pick an enemy to focus
-            if isPendingManualTarget {
-                VStack(spacing: 6) {
-                    Text("Attack — Select an Enemy")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Text("Click an enemy to lock this tower onto it.")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                    Button("Cancel") { isPendingManualTarget = false }
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
-            }
-
             // Castle ability — pick a target to cast on
             if let ability = gameState.pendingAbility {
                 VStack(spacing: 6) {
@@ -778,28 +753,6 @@ struct ContentView: View {
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
                     Button("Cancel") { gameState.cancelPendingAbility() }
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .padding(12)
-                .background(.black.opacity(0.8))
-                .cornerRadius(10)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 60)
-            }
-
-            // Target lock — pick a path cell to restrict firing to
-            if isPendingTargetLock {
-                VStack(spacing: 6) {
-                    Text("Target Lock — Select a Cell")
-                        .font(.headline)
-                        .foregroundColor(.cyan)
-                    Text("Click a path cell. The tower will only fire at enemies on that cell.")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                    Button("Cancel") { isPendingTargetLock = false }
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
                 }
@@ -829,15 +782,11 @@ struct ContentView: View {
 
         }
         .onChange(of: gameState.selectedTowerType) { _, _ in
-            isPendingManualTarget = false
-            isPendingTargetLock = false
             renderer?.removeGhostTower()
             renderer?.removeRangeHighlights()
             hoveredPlacementCoord = nil
         }
         .onChange(of: gameState.phase) { _, _ in
-            isPendingManualTarget = false
-            isPendingTargetLock = false
             renderer?.removeGhostTower()
             renderer?.removeRangeHighlights()
             hoveredPlacementCoord = nil
@@ -854,8 +803,9 @@ struct ContentView: View {
         case .overcharge:      return .orange
         case .freeze:          return .cyan
         case .poison:          return .green
-        case .invulnerability: return .blue
-        case .gravityWell:     return .purple
+        case .overchargeHeal:  return .mint
+        case .gravityWave:     return .purple
+        case .moveTower:       return .yellow
         }
     }
 
@@ -864,8 +814,9 @@ struct ContentView: View {
         case .overcharge:      return (1.0, 0.6, 0.1)
         case .freeze:          return (0.3, 0.85, 1.0)
         case .poison:          return (0.25, 0.9, 0.15)
-        case .invulnerability: return (0.3, 0.55, 1.0)
-        case .gravityWell:     return (0.7, 0.3, 1.0)
+        case .overchargeHeal:  return (0.3, 0.85, 0.45)
+        case .gravityWave:     return (0.7, 0.3, 1.0)
+        case .moveTower:       return (1.0, 0.85, 0.1)
         }
     }
 
@@ -887,6 +838,14 @@ struct ContentView: View {
                                  duration: TimeInterval(CastleAbility.poison.duration))
     }
 
+    private func spawnGravityWaveField(at coord: HexCoord) {
+        guard let renderer else { return }
+        let cells = gameState.gravityWaveCells(around: coord)
+        guard !cells.isEmpty else { return }
+        renderer.showGravityWaveField(cells: cells, spacing: gameState.spacing,
+                                      duration: TimeInterval(CastleAbility.gravityWave.duration))
+    }
+
     /// Combat-phase HUD row of castle ability buttons (only those unlocked by castle level),
     /// gated by the shared castle energy pool rather than individual cooldowns.
     @ViewBuilder
@@ -898,10 +857,23 @@ struct ContentView: View {
                 .foregroundColor(.cyan)
             HStack(spacing: 6) {
                 ForEach(unlocked, id: \.rawValue) { ability in
-                    let isPending = gameState.pendingAbility == ability
+                    // Move Tower drives its own select-tower/select-destination flow (shared
+                    // with the Move Tower inventory item) instead of the generic pendingAbility
+                    // mechanism every other ability uses — see beginMoveTowerAbility().
+                    let isMoveTowerInProgress = ability == .moveTower
+                        && (gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil)
+                    let isPending = gameState.pendingAbility == ability || isMoveTowerInProgress
                     let affordable = gameState.castleEnergy >= ability.energyCost
+                    let anyOtherPending = gameState.pendingAbility != nil
+                        || gameState.isSelectingTowerToMove || gameState.pendingMoveTower != nil
                     Button {
-                        if isPending {
+                        if ability == .moveTower {
+                            if isMoveTowerInProgress {
+                                gameState.cancelPendingMoveTower()
+                            } else {
+                                gameState.beginMoveTowerAbility()
+                            }
+                        } else if isPending {
                             gameState.cancelPendingAbility()
                         } else {
                             gameState.beginAbility(ability)
@@ -917,7 +889,7 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(isPending ? .white : abilityTint(ability))
                     .foregroundColor(isPending ? .black : .white)
-                    .disabled(!affordable || (gameState.pendingAbility != nil && !isPending))
+                    .disabled(!affordable || (anyOtherPending && !isPending))
                 }
             }
         }
@@ -1193,11 +1165,15 @@ struct ContentView: View {
             case .healer:
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        statRow("Charges", "\(tower.healer?.charges ?? 0)/\(tower.level)", label: statFont, labelColor: labelColor, valueColor: valueColor)
-                        statRow("Heal Radius", "\(tower.healer?.radius ?? 0)", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Charges", tower.overchargeHealTimer > 0 ? "∞" : "\(tower.healer?.charges ?? 0)/\(tower.level)",
+                                label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        statRow("Heal Radius", "\(tower.effectiveHealRadius)", label: statFont, labelColor: labelColor, valueColor: valueColor)
                     }
                     VStack(alignment: .leading, spacing: 2) {
                         statRow("Cooldown", "\(String(format: "%.1f", tower.cooldown))s", label: statFont, labelColor: labelColor, valueColor: valueColor)
+                        if tower.overchargeHealTimer > 0 {
+                            statRow("Overcharged", "\(String(format: "%.1f", tower.overchargeHealTimer))s", label: statFont, labelColor: labelColor, valueColor: .mint)
+                        }
                     }
                 }
             case .fireball:
@@ -1262,7 +1238,7 @@ struct ContentView: View {
             if tower.type != .targeting {
                 let tLevel = gameState.globalTargetingLevel
                 let detectBonus = tLevel >= 1
-                let fireBonus   = tLevel >= 5
+                let fireBonus   = tLevel >= 3
                 Divider().background(.white.opacity(0.2))
                 HStack(spacing: 12) {
                     statRow("Fire Range",
@@ -1630,12 +1606,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             }
         case .quarry:
-            Text(farm.accumulatedHP > 0 ? "Stored HP: +\(farm.accumulatedHP)" : "No HP stored yet")
+            Text(farm.accumulatedHP > 0 ? "Stored HP: +\(farm.accumulatedHP * Tower.hpPerHeart)" : "No HP stored yet")
                 .font(.caption)
                 .foregroundColor(farm.accumulatedHP > 0 ? .cyan : .white.opacity(0.5))
                 .frame(maxWidth: .infinity, alignment: .center)
             let roundsToNext = 4 - (farm.roundsGrown % 4)
-            Text("+1 HP in \(roundsToNext) round\(roundsToNext == 1 ? "" : "s")")
+            Text("+\(Tower.hpPerHeart) HP in \(roundsToNext) round\(roundsToNext == 1 ? "" : "s")")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.4))
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1696,15 +1672,24 @@ struct ContentView: View {
             Text("HP:")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.white.opacity(0.6))
-            ForEach(0..<tower.maxHitPoints, id: \.self) { i in
-                Image(systemName: i < tower.hitPoints ? "heart.fill" : "heart")
+            let filledHearts = Tower.hearts(for: tower.hitPoints)
+            ForEach(0..<Tower.hearts(for: tower.maxHitPoints), id: \.self) { i in
+                Image(systemName: i < filledHearts ? "heart.fill" : "heart")
                     .font(.caption2)
-                    .foregroundColor(i < tower.hitPoints ? .red : .gray)
+                    .foregroundColor(i < filledHearts ? .red : .gray)
             }
-            if tower.isInvulnerable || tower.abilityInvulnTimer > 0 {
+            Text("\(tower.hitPoints)/\(tower.maxHitPoints)")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.white.opacity(0.6))
+            if tower.isInvulnerable {
                 Image(systemName: "shield.fill")
                     .font(.caption2)
                     .foregroundColor(.cyan)
+            }
+            if tower.overchargeHealTimer > 0 {
+                Image(systemName: "bolt.heart.fill")
+                    .font(.caption2)
+                    .foregroundColor(.mint)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -1749,7 +1734,7 @@ struct ContentView: View {
             .disabled(gameState.money < 75)
             .frame(maxWidth: .infinity, alignment: .center)
 
-            Button("Heal +2 HP ×\(gameState.towerHealItemCount)") {
+            Button("Heal +\(2 * Tower.hpPerHeart) HP ×\(gameState.towerHealItemCount)") {
                 if gameState.useTowerHealItem(on: tower) { dialogRefresh += 1 }
             }
             .buttonStyle(.bordered)
@@ -1779,35 +1764,8 @@ struct ContentView: View {
                 .tint(tower.targetingMode == mode ? .blue : .gray)
             }
 
-            // Level 2+: target lock (restrict firing to a specific path cell)
+            // Level 2+: priority enemy type
             if tLevel >= 2 {
-                Divider().background(.white.opacity(0.3))
-                if let lockCoord = tower.lockedTargetCoord {
-                    Text("Cell Lock: (\(lockCoord.q), \(lockCoord.r))")
-                        .font(.caption.bold())
-                        .foregroundColor(.cyan)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    Button("Remove Lock") {
-                        tower.lockedTargetCoord = nil
-                        isPendingTargetLock = false
-                        dialogRefresh += 1
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.gray)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    Button(isPendingTargetLock && selectedTower?.id == tower.id ? "Click a Path Cell…" : "Target Lock") {
-                        isPendingTargetLock.toggle()
-                        isPendingManualTarget = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isPendingTargetLock && selectedTower?.id == tower.id ? .orange : .cyan)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-            }
-
-            // Level 3+: priority enemy type
-            if tLevel >= 3 {
                 Divider().background(.white.opacity(0.3))
                 Text("Priority Target")
                     .font(.caption)
@@ -1824,33 +1782,6 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, alignment: .center)
-            }
-
-            // Level 4+: manual attack lock
-            if tLevel >= 4 && gameState.phase == .combat {
-                Divider().background(.white.opacity(0.3))
-                if let manualID = tower.manualTargetEnemyID,
-                   let locked = gameState.enemies.first(where: { $0.id == manualID && $0.active }) {
-                    Text("Locked: \(locked.enemyType.displayName)")
-                        .font(.caption.bold())
-                        .foregroundColor(.red)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                    Button("Clear Lock") {
-                        tower.manualTargetEnemyID = nil
-                        dialogRefresh += 1
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.gray)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                } else {
-                    Button(isPendingManualTarget && selectedTower?.id == tower.id ? "Click an Enemy…" : "Attack (X)") {
-                        isPendingManualTarget.toggle()
-                        isPendingTargetLock = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isPendingManualTarget && selectedTower?.id == tower.id ? .orange : .red)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
             }
 
             Divider().background(.white.opacity(0.3))
@@ -1876,7 +1807,7 @@ struct ContentView: View {
     private func handleTap(entity: Entity) {
         guard let renderer else { return }
 
-        // Castle ability — resolve on the tapped target (a tower for Invuln, else a cell).
+        // Castle ability — resolve on the tapped target (a tower for Overcharge Heal, else a cell).
         if let ability = gameState.pendingAbility {
             if ability.targetsTower {
                 if let coord = renderer.coord(for: entity), let tower = gameState.tower(at: coord),
@@ -1888,30 +1819,10 @@ struct ContentView: View {
                 spawnAbilityCastRings(ability: ability, at: coord)
                 if ability == .poison {
                     spawnPoisonCloud(at: coord)
+                } else if ability == .gravityWave {
+                    spawnGravityWaveField(at: coord)
                 }
             }
-            return
-        }
-
-        // Manual attack lock — clicking an enemy sets it as the focused target
-        if isPendingManualTarget {
-            if let id = renderer.enemyID(for: entity),
-               let enemy = gameState.enemies.first(where: { $0.id == id && $0.active }) {
-                selectedTower?.manualTargetEnemyID = enemy.id
-                dialogRefresh += 1
-            }
-            isPendingManualTarget = false
-            return
-        }
-
-        if isPendingTargetLock {
-            if let coord = renderer.coord(for: entity),
-               let cell = gameState.hexGrid.cell(at: coord),
-               cell.type == .path || cell.type == .start || cell.type == .end {
-                selectedTower?.lockedTargetCoord = coord
-                dialogRefresh += 1
-            }
-            isPendingTargetLock = false
             return
         }
 
@@ -2197,6 +2108,9 @@ struct StatsView: View {
         case .cinder:       return "Cinder"
         case .nullifier:    return "Nullif."
         case .warden:       return "Warden"
+        case .brute:        return "Brute"
+        case .colossus:     return "Coloss."
+        case .titan:        return "Titan"
         }
     }
 

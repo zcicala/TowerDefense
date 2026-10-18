@@ -167,8 +167,7 @@ extension GameState {
         // Sorted for a stable RNG draw order — Dictionary.values has no guaranteed iteration
         // order, and without sorting, which start cell gets which random interval (and thus
         // all RNG state downstream) would vary run-to-run even with the same seed.
-        let startCoords = hexGrid.cells.values.filter { $0.type == .start }
-            .map(\.coord).sorted { ($0.q, $0.r) < ($1.q, $1.r) }
+        let startCoords = spawnCells.map(\.coord)
         spawnTimers = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, Float(0)) })
         spawnIntervals = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, rng.randomFloat(in: 0.3...1.0)) })
         spawnBlockedFor = Dictionary(uniqueKeysWithValues: startCoords.map { ($0, Float(0)) })

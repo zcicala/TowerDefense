@@ -520,6 +520,9 @@ class GameState {
     var globalDamageAuraCoords: Set<HexCoord> = []
     /// Coords of branch path cells added during gameplay (tracked so they can be removed on restart).
     var branchPathCoords: Set<HexCoord> = []
+    /// First cell of each branch path (a neighbour of the original start cell). Branch enemies
+    /// spawn here, since the shared start cell only has one `next`.
+    var branchEntryCoords: [HexCoord] = []
     /// True when the player has activated a Tower Heal item and is selecting which tower to heal.
     var isPendingTowerHeal: Bool = false
     /// True when the player has activated a Move Tower item and is selecting which tower to move.

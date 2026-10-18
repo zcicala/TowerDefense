@@ -52,6 +52,9 @@ enum HexCellType {
     case start
     case end
     case terrain
+    /// Buffer cell ringing the start and end cells — passable to nothing, buildable by nobody.
+    /// A new branch path replaces whichever ring cells it enters or leaves through.
+    case noBuild
 }
 
 
@@ -546,7 +549,7 @@ class Tower {
     static func makeSword(coord: HexCoord) -> Tower {
         let t = Tower(coord: coord, type: .sword,
                       detectionRadius: 1, fireRadius: 1,
-                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5 * 0.85 * 0.9, cooldown: 0.84)
+                      projectileSpeed: 0, damage: 112.5 * 1.15 * 1.5 * 0.85 * 0.9 * 1.15, cooldown: 0.84)
         t.sword = SwordState(swingDuration: 0.28)
         return t
     }

@@ -51,6 +51,8 @@ class SceneRenderer {
                 tint = SimpleMaterial.Color(red: 0.2, green: 0.6, blue: 0.25, alpha: 1)
             case .end:
                 tint = SimpleMaterial.Color(red: 0.7, green: 0.2, blue: 0.2, alpha: 1)
+            case .noBuild:
+                tint = SimpleMaterial.Color(red: 0.5, green: 0.28, blue: 0.26, alpha: 1)
             default:
                 tint = colorForHeight(t, isPath: cell.type == .path)
             }
@@ -2076,6 +2078,8 @@ class SceneRenderer {
             tint = SimpleMaterial.Color(red: 0.7, green: 0.2, blue: 0.2, alpha: 1)
         case .path:
             tint = colorForHeight(t, isPath: true)
+        case .noBuild:
+            tint = SimpleMaterial.Color(red: 0.5, green: 0.28, blue: 0.26, alpha: 1)
         default:
             switch cell.terrainType {
             case .grass:
@@ -2112,6 +2116,8 @@ class SceneRenderer {
     /// Adds a path or start cell entity to the scene (for dynamically grown branch paths).
     func addPathCell(_ cell: HexCell, spacing: Float, hexRadius: Float) {
         guard let content else { return }
+        // A branch replaces the no-build ring cells it enters/leaves through.
+        entityMap[cell.coord]?.removeFromParent()
         let mesh = HexMeshGenerator.generate(radius: hexRadius, height: cell.height, cornerRadius: 0.08)
         var material = SceneRenderer.surfaceMaterial!
         let tint: SimpleMaterial.Color

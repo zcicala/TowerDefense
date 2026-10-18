@@ -1270,6 +1270,51 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertNotNil(gs.pregeneratedTerrain[HexCoord(q: 10, r: -5)])
     }
 
+    func testNoBuildRing_surroundsStartAndEnd_andBlocksPlacement() {
+        let gs = GameState(rng: RandomSource())
+        gs.generateMap()
+        for hub in gs.hexGrid.cells.values where hub.type == .start || hub.type == .end {
+            for dir in 0..<6 {
+                let cell = gs.hexGrid.cell(at: hub.coord.neighbor(dir))
+                XCTAssertNotNil(cell)
+                XCTAssertTrue(cell?.type == .noBuild || cell?.type == .path)
+            }
+        }
+        let ring = gs.hexGrid.cells.values.first { $0.type == .noBuild }!
+        gs.phase = .placing
+        gs.selectedTowerType = .projectile
+        gs.money = 10_000
+        XCTAssertFalse(gs.isValidPlacement(at: ring.coord))
+        XCTAssertNil(gs.placeTower(at: ring.coord))
+    }
+
+    func testAddBranchPath_runsFromStartToEnd_andAddsSpawnCell() {
+        var found = 0
+        for _ in 0..<5 {
+            let gs = GameState(rng: RandomSource())
+            gs.generateMap()
+            let start = gs.hexGrid.cells.values.first { $0.type == .start }!
+            let end = gs.hexGrid.cells.values.first { $0.type == .end }!
+            let cells = gs.addBranchPath()
+            guard !cells.isEmpty else { continue }
+            found += 1
+            XCTAssertEqual(cells.first!.coord.distance(to: start.coord), 1)
+            XCTAssertEqual(cells.last!.coord.distance(to: end.coord), 1)
+            XCTAssertTrue(cells.last!.next === end)
+            XCTAssertEqual(gs.spawnCells.count, 2)
+            // Walking `next` from the entry reaches the end.
+            var cur: HexCell? = cells[0]
+            var steps = 0
+            while let c = cur, c.type != .end, steps < 10_000 { cur = c.next; steps += 1 }
+            XCTAssertEqual(cur?.type, .end)
+            // Restart restores the ring and drops the branch.
+            _ = gs.restart()
+            XCTAssertEqual(gs.spawnCells.count, 1)
+            XCTAssertEqual(gs.hexGrid.cell(at: cells[0].coord)?.type, .noBuild)
+        }
+        XCTAssertGreaterThan(found, 0)
+    }
+
     // MARK: Round reset
 
     func testResetAbilities_refillsEnergyAndClearsTimers() {

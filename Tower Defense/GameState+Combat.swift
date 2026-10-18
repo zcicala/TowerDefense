@@ -32,9 +32,7 @@ extension GameState {
         // additional branch paths (opened every 10 rounds) raise total spawn throughput
         // rather than just diversifying which entrance a shared spawn stream uses.
         // Sorted for a stable, seed-reproducible processing/RNG-draw order (see startRound()).
-        let startCells = hexGrid.cells.values.filter { $0.type == .start }
-            .sorted { ($0.coord.q, $0.coord.r) < ($1.coord.q, $1.coord.r) }
-        for startCell in startCells {
+        for startCell in spawnCells {
             var timer = spawnTimers[startCell.coord, default: 0] + deltaTime
             let interval = spawnIntervals[startCell.coord] ?? rng.randomFloat(in: 0.5...1.5)
             spawnIntervals[startCell.coord] = interval

@@ -943,7 +943,7 @@ extension GameState {
         addNoBuildRing()   // branches replaced some ring cells; put them back
         phase = .placing
         round = 0
-        money = 100 + startingGoldBonus
+        money = 50 + startingGoldBonus
         // upgradePoints and purchasedTechNodes intentionally preserved across restarts
         selectedTowerType = nil
         baseTowerHP = baseTowerMaxHP

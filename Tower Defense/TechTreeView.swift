@@ -25,11 +25,10 @@ struct TechTreeView: View {
         // Row 1 — Base tower upgrades (always accessible, no unlock gate)
         for lv in 2...6 { g[.baseTowerLevel(lv)] = (lv - 2, 1) }
 
-        // Row 2 — Projectile (root unlock)
-        g[.towerUnlock(.projectile)] = (0, 2)
+        // Row 2 — Projectile levels (always unlocked, no unlock node)
         for lv in 2...Tower.maxLevel { g[.towerLevel(.projectile, lv)] = (lv - 1, 2) }
 
-        // Rows 3–5 — towers that need Projectile (col 1 = one step deeper)
+        // Rows 3–5 — towers with no prerequisites (col 1 keeps the existing layout)
         g[.towerUnlock(.bowler)] = (1, 3)
         for lv in 2...Tower.maxLevel { g[.towerLevel(.bowler, lv)] = (lv, 3) }
 

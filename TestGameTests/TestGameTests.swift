@@ -97,15 +97,15 @@ final class HexCoordTests: XCTestCase {
 final class TowerTests: XCTestCase {
     func testCostForTower_firstPlacement_isBase() {
         let gs = makeGameState()
-        XCTAssertEqual(gs.costForTower(.projectile), 50)
-        XCTAssertEqual(gs.costForTower(.sword), 25)
+        XCTAssertEqual(gs.costForTower(.projectile), 60)
+        XCTAssertEqual(gs.costForTower(.sword), 15)
         XCTAssertEqual(gs.costForTower(.healer), 150)
     }
 
     func testCostForTower_scalesExponentiallyWithCount() {
         let gs = makeGameState()
         gs.towerPlacedCount[.projectile] = 3
-        let expected = Int(Double(50) * pow(1.1, 3.0))
+        let expected = Int(Double(60) * pow(1.1, 3.0))
         XCTAssertEqual(gs.costForTower(.projectile), expected)
     }
 
@@ -175,7 +175,6 @@ final class TowerTests: XCTestCase {
         gs.towers = [towerA, towerB]
         gs.upgradePoints = 20
 
-        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
         XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
         XCTAssertEqual(towerA.level, 2)
         XCTAssertEqual(towerB.level, 2)
@@ -193,7 +192,6 @@ final class TowerTests: XCTestCase {
         gs.towers = [tower]
         gs.upgradePoints = 20
 
-        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
         XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
 
         // Tower was already at level 2 — purchasing the 1→2 node must not push it to 3.
@@ -207,7 +205,6 @@ final class TowerTests: XCTestCase {
         gs.towers = [projectileTower, laserTower]
         gs.upgradePoints = 20
 
-        XCTAssertTrue(gs.purchase(.towerUnlock(.projectile)))
         XCTAssertTrue(gs.purchase(.towerLevel(.projectile, 2)))
 
         XCTAssertEqual(projectileTower.level, 2)
@@ -1326,6 +1323,7 @@ final class CastleAbilityTests: XCTestCase {
         gs.hexGrid.addCell(cell)
         gs.purchasedTechNodes.insert(.farmUnlock)
         gs.phase = .placing
+        gs.money = max(gs.money, 1000)
         _ = gs.placeFarm(at: coord)
         return gs.farm(at: coord)
     }
@@ -1360,6 +1358,7 @@ final class CastleAbilityTests: XCTestCase {
         let neighborCoord = crystalCoord.neighbor(0)
         let neighborCell = HexCell(coord: neighborCoord, height: 1.0, type: .terrain)
         gs.hexGrid.addCell(neighborCell)
+        gs.money = max(gs.money, 1000)
         _ = gs.placeFarm(at: neighborCoord)
 
         XCTAssertEqual(gs.castleMaxEnergy, 23, accuracy: 0.001, "+1 more max energy for the adjacent farm")
@@ -1373,7 +1372,6 @@ final class CastleAbilityTests: XCTestCase {
         XCTAssertEqual(gs.crystalStructureCount, 1)
 
         gs.phase = .placing
-        gs.purchasedTechNodes.insert(.towerUnlock(.projectile))
         gs.selectedTowerType = .projectile
         gs.money = 10000
         let result = gs.placeTower(at: coord)

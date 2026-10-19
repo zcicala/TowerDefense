@@ -136,17 +136,16 @@ class GameState {
     // MARK: - Tech Node Definitions
 
     static let techNodes: [TechNodeDef] = {
-        // Tower unlock nodes (Sword is always free — no unlock node needed)
+        // Tower unlock nodes (Sword and Projectile are always free — no unlock node needed)
         let unlockDefs: [(TowerType, Int, [TechNodeID])] = [
-            (.projectile, 2, []),
-            (.bowler,     2, [.towerUnlock(.projectile)]),
-            (.laser,      3, [.towerUnlock(.projectile)]),
-            (.fire,       2, [.towerUnlock(.projectile)]),
+            (.bowler,     2, []),
+            (.laser,      3, []),
+            (.fire,       2, []),
             (.fireball,   5, [.towerUnlock(.laser), .towerUnlock(.fire)]),
             (.ice,        2, [.farmUnlock]),
             (.antiAir,    3, [.farmUnlock]),
             (.healer,     2, [.targetingFeature(1)]),
-            (.lightning,  6, [.towerUnlock(.projectile)]),
+            (.lightning,  6, []),
         ]
 
         func unlockDescription(_ type: TowerType) -> String {
@@ -193,7 +192,7 @@ class GameState {
             let costMultiplier = towerCostMultiplier[type] ?? 1
             for level in 2...Tower.maxLevel {
                 let prereqs: [TechNodeID] = level == 2
-                    ? (type == .sword ? [] : [.towerUnlock(type)])
+                    ? (type == .sword || type == .projectile ? [] : [.towerUnlock(type)])
                     : [.towerLevel(type, level - 1)]
                 nodes.append(.init(
                     id: .towerLevel(type, level),
@@ -223,7 +222,7 @@ class GameState {
             nodes.append(.init(
                 id: .startingGold(level),
                 title: "+\(level * 50)g Start",
-                description: "Start each run with \(100 + level * 50) gold",
+                description: "Start each run with \(50 + level * 50) gold",
                 cost: goldCosts[level - 1],
                 prerequisites: prereqs))
         }
@@ -244,9 +243,9 @@ class GameState {
 
     // MARK: - Computed Tech State
 
-    /// Tower types the player has unlocked. Sword is always free.
+    /// Tower types the player has unlocked. Sword and Projectile are always free.
     var unlockedTowers: Set<TowerType> {
-        var result: Set<TowerType> = [.sword]
+        var result: Set<TowerType> = [.sword, .projectile]
         for node in purchasedTechNodes {
             if case .towerUnlock(let type) = node { result.insert(type) }
         }
@@ -300,7 +299,7 @@ class GameState {
 
     var phase: GamePhase = .placing
     var round: Int = 0
-    var money: Int = 100
+    var money: Int = 50
     let killReward: Int = 8
     var selectedTowerType: TowerType? = nil
     var isPlacingFarm: Bool = false
@@ -361,12 +360,12 @@ class GameState {
     func costForTower(_ type: TowerType) -> Int {
         let base: Int
         switch type {
-        case .projectile: base = 50
+        case .projectile: base = 60
         case .laser: base = 120
         case .fire: base = 80
         case .ice: base = 100
         case .bowler: base = 60
-        case .sword: base = 25
+        case .sword: base = 15
         case .healer: base = 150
         case .fireball: base = 300
         case .antiAir:   base = 150

@@ -32,16 +32,19 @@ extension GameState {
         // additional branch paths (opened every 10 rounds) raise total spawn throughput
         // rather than just diversifying which entrance a shared spawn stream uses.
         // Sorted for a stable, seed-reproducible processing/RNG-draw order (see startRound()).
-        let startCells = hexGrid.cells.values.filter { $0.type == .start }
-            .sorted { ($0.coord.q, $0.coord.r) < ($1.coord.q, $1.coord.r) }
-        for startCell in startCells {
+        for startCell in spawnCells {
             var timer = spawnTimers[startCell.coord, default: 0] + deltaTime
-            let interval = spawnIntervals[startCell.coord] ?? rng.randomFloat(in: 0.5...1.5)
+            let multiplier = spawnIntervalMultiplier(at: startCell.coord)
+            let interval = spawnIntervals[startCell.coord] ?? rng.randomFloat(in: 0.5...1.5) * multiplier
             spawnIntervals[startCell.coord] = interval
 
+            // A branch that is still ramping up leaves the boss to the other paths.
+            let skipBoss = isRampingBranch(at: startCell.coord)
             let spawnedCount = enemies.filter { $0.currentCell != nil }.count
             if spawnedCount < enemies.count && timer >= interval,
-               let candidate = enemies.first(where: { $0.currentCell == nil && $0.hitPoints > 0 }) {
+               let candidate = enemies.first(where: {
+                   $0.currentCell == nil && $0.hitPoints > 0 && !(skipBoss && $0.enemyType == .boss)
+               }) {
                 let blockedSoFar = spawnBlockedFor[startCell.coord, default: 0]
                 if isStartCellCongested(startCell, for: candidate) && blockedSoFar < CorridorTuning.spawnBlockTimeout {
                     // Leave `timer` at/above `interval` so spawning is retried next frame —
@@ -51,7 +54,7 @@ extension GameState {
                 } else {
                     spawnBlockedFor[startCell.coord] = 0
                     timer = 0
-                    spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5)
+                    spawnIntervals[startCell.coord] = rng.randomFloat(in: 0.5...1.5) * multiplier
                     candidate.currentCell = startCell
                     candidate.progress = 0
                     // Alternate by creation order (not RNG, to keep the seeded draw sequence

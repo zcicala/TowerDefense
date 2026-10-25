@@ -1524,6 +1524,7 @@ struct ContentView: View {
     private func terrainCellContent(cell: HexCell) -> some View {
         // Terrain type header
         let (terrainName, terrainColor): (String, Color) = {
+            if cell.type == .noBuild { return ("No-Build Zone", Color(red: 0.85, green: 0.4, blue: 0.35)) }
             switch cell.terrainType {
             case .grass:       return ("Grass", .green)
             case .rock:        return ("Rock", Color(red: 0.6, green: 0.55, blue: 0.5))

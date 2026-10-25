@@ -7,6 +7,7 @@ extension GameState {
 
     func generateMap() {
         generatePath()
+        addNoBuildRing()
         pregenerateTerrain()
         ringItemCount = 1
         moveTowerItemCount = 1
@@ -47,11 +48,18 @@ extension GameState {
         }
     }
 
-    /// Adds a ring of terrain tiles around the base tower (end cell) as the starting board.
+    /// Adds a terrain tile next to the base tower's no-build ring as the starting board.
     @discardableResult
     func seedTerrainAroundBase() -> [HexCell] {
         guard let endCell = hexGrid.cells.values.first(where: { $0.type == .end }) else { return [] }
-        return expandTerrainAround(coord: endCell.coord, count: 1)
+        let outer = (0..<6).map { endCell.coord.neighbor($0) }
+            .compactMap { hexGrid.cell(at: $0) }
+            .filter { $0.type == .noBuild }
+            .flatMap { ring in (0..<6).map { ring.coord.neighbor($0) } }
+            .filter { hexGrid.cell(at: $0) == nil }
+        let candidates = Set(outer).sorted { ($0.q, $0.r) < ($1.q, $1.r) }
+        guard let coord = rng.randomElement(candidates) else { return [] }
+        return [makeTerrainCell(at: coord)]
     }
 
     private func generatePath() {
@@ -783,64 +791,164 @@ extension GameState {
 
     // MARK: - Branch Paths
 
-    /// Grows a new 10-cell branch path off a random existing path cell. Returns the new cells (path + start).
-    @discardableResult
-    func addBranchPath() -> [HexCell] {
-        let pathCells = rng.shuffled(hexGrid.cells.values.filter { $0.type == .path })
-        for junction in pathCells {
-            if let cells = tryGenerateBranch(from: junction, length: 10) {
-                for cell in cells {
-                    hexGrid.addCell(cell)
-                    branchPathCoords.insert(cell.coord)
-                }
-                return cells
-            }
-        }
-        return []
+    /// Every cell enemies spawn from: each `.start` cell plus the entry cell of every branch.
+    /// A branch shares the original start cell, which only has one `next`, so its enemies
+    /// spawn on the branch's first cell (a neighbour of the start). Sorted for stable RNG order.
+    var spawnCells: [HexCell] {
+        var coords = Set(hexGrid.cells.values.filter { $0.type == .start }.map(\.coord))
+        coords.formUnion(branchEntryCoords)
+        return coords.compactMap { hexGrid.cell(at: $0) }
+            .sorted { ($0.coord.q, $0.coord.r) < ($1.coord.q, $1.coord.r) }
     }
 
-    private func tryGenerateBranch(from junction: HexCell, length: Int) -> [HexCell]? {
-        let freeDirs = (0..<6).filter { hexGrid.cell(at: junction.coord.neighbor($0)) == nil }
-        guard let startDir = rng.randomElement(freeDirs) else { return nil }
-        var dir = startDir
-        var current = junction.coord
-        var placedCoords: [HexCoord] = []
-        for _ in 0..<length {
-            var placed = false
-            for offset in 0..<6 {
-                let tryDir = (dir + offset) % 6
-                let candidate = current.neighbor(tryDir)
-                // Reject occupied cells, self-touching branch cells, or cells adjacent to
-                // existing path cells other than the direct predecessor.
-                let touchesGrid = wouldTouchPath(at: candidate, except: current)
-                let touchesSelf = placedCoords.dropLast().contains(candidate)
-                if hexGrid.cell(at: candidate) == nil && !placedCoords.contains(candidate)
-                    && !touchesGrid && !touchesSelf {
-                    if offset > 0 { dir = tryDir }
-                    placedCoords.append(candidate)
-                    current = candidate
-                    placed = true
-                    break
-                }
+    /// Fills every empty neighbour of the start and end cells with a `.noBuild` cell.
+    /// Returns the cells added.
+    @discardableResult
+    func addNoBuildRing() -> [HexCell] {
+        var added: [HexCell] = []
+        for hub in hexGrid.cells.values.filter({ $0.type == .start || $0.type == .end }) {
+            for dir in 0..<6 {
+                let coord = hub.coord.neighbor(dir)
+                guard hexGrid.cell(at: coord) == nil else { continue }
+                let cell = HexCell(coord: coord, height: hub.height, type: .noBuild)
+                hexGrid.addCell(cell)
+                added.append(cell)
             }
-            if !placed { return nil }
-            if rng.randomFloat(in: 0..<1) < 0.3 { dir = (dir + (rng.randomBool() ? 1 : 5)) % 6 }
         }
+        return added
+    }
+
+    /// Opens a new path from the original start cell to the end cell, winding around the
+    /// existing paths. It leaves through one of the start's no-build neighbours (its first
+    /// cell becomes a spawn cell) and enters the end through one of the end's. Returns the new
+    /// path cells in order, or `[]` if there is no room for a route.
+    @discardableResult
+    func addBranchPath() -> [HexCell] {
+        guard let startCell = spawnCells.first(where: { $0.type == .start }),
+              let endCell = hexGrid.cells.values.first(where: { $0.type == .end }),
+              let route = takeBranchRoute(), !route.isEmpty else { return [] }
+
         var cells: [HexCell] = []
-        var height = junction.height
-        for (i, coord) in placedCoords.enumerated() {
+        var height = startCell.height
+        for coord in route {
             height *= rng.randomFloat(in: 0.92...1.08)
-            let isStart = i == placedCoords.count - 1
-            let cell = HexCell(coord: coord, height: height, type: isStart ? .start : .path)
-            cells.append(cell)
+            cells.append(HexCell(coord: coord, height: height, type: .path))
         }
-        // Link: outermost (new .start) → ... → innermost → junction
+        // Link: entry → ... → last → end
         for i in 0..<(cells.count - 1) {
-            cells[i + 1].next = cells[i]
-            cells[i].previous = cells[i + 1]
+            cells[i].next = cells[i + 1]
+            cells[i + 1].previous = cells[i]
         }
-        cells[0].next = junction
-        return cells
+        cells[cells.count - 1].next = endCell
+        for cell in cells {
+            hexGrid.addCell(cell)   // replaces any no-build cell at that coord
+            branchPathCoords.insert(cell.coord)
+        }
+        branchEntryCoords.append(cells[0].coord)
+        branchOpenedRound[cells[0].coord] = round
+
+        // Give the player something to build on: a few terrain tiles beside the new path
+        // (empty cells only, so no path / no-build / terrain cell is ever replaced).
+        var candidates = Set(cells.flatMap { cell in (0..<6).map { cell.coord.neighbor($0) } })
+            .filter { hexGrid.cell(at: $0) == nil }
+            .sorted { ($0.q, $0.r) < ($1.q, $1.r) }
+        var terrain: [HexCell] = []
+        while terrain.count < Self.branchSeedTileCount, let coord = rng.randomElement(candidates) {
+            candidates.removeAll { $0 == coord }
+            terrain.append(makeTerrainCell(at: coord))
+        }
+
+        ringItemCount += Self.branchSpawnTilesGrant
+        moveTowerItemCount += Self.branchMoveTowerGrant
+        return cells + terrain
+    }
+
+    // MARK: Branch spawn ramp
+
+    static let branchSeedTileCount = 3
+    static let branchSpawnTilesGrant = 1
+    static let branchMoveTowerGrant = 2
+    static let branchStartShare: Float = 0.15
+    static let branchEndShare: Float = 0.50
+    static let branchRampRounds = 10
+
+    /// Fraction of a wave a branch takes, `roundsSinceOpen` full rounds after its first one:
+    /// linear from `branchStartShare` to `branchEndShare` over `branchRampRounds`, then flat.
+    static func branchSpawnShare(roundsSinceOpen n: Int) -> Float {
+        let t = Float(min(max(n, 0), branchRampRounds)) / Float(branchRampRounds)
+        return branchStartShare + (branchEndShare - branchStartShare) * t
+    }
+
+    /// Spawn-interval multiplier that yields share `s` against one other path: `1/s - 1`.
+    static func branchIntervalMultiplier(roundsSinceOpen n: Int) -> Float {
+        1 / branchSpawnShare(roundsSinceOpen: n) - 1
+    }
+
+    /// Full rounds since the branch entered at `coord` opened (0 in the first round after
+    /// opening), or nil for the original start cell.
+    func branchRoundsSinceOpen(at coord: HexCoord) -> Int? {
+        branchOpenedRound[coord].map { max(round - $0 - 1, 0) }
+    }
+
+    /// 1 for the main start cell; the ramp multiplier for a branch entry.
+    func spawnIntervalMultiplier(at coord: HexCoord) -> Float {
+        branchRoundsSinceOpen(at: coord).map { Self.branchIntervalMultiplier(roundsSinceOpen: $0) } ?? 1
+    }
+
+    /// True while a branch is still ramping, during which it may not spawn the boss.
+    func isRampingBranch(at coord: HexCoord) -> Bool {
+        (branchRoundsSinceOpen(at: coord) ?? Self.branchRampRounds) < Self.branchRampRounds
+    }
+
+    /// Snapshot of what the route search needs, safe to hand to a background thread.
+    private func makeBranchSearch() -> BranchRouteSearch? {
+        guard let startCell = spawnCells.first(where: { $0.type == .start }),
+              let endCell = hexGrid.cells.values.first(where: { $0.type == .end }) else { return nil }
+        // Target: as many cells as the main path has between its start and end.
+        var mainCount = 0
+        var walker = startCell.next
+        while let c = walker, c.type != .end, mainCount < 10_000 { mainCount += 1; walker = c.next }
+        return BranchRouteSearch(types: hexGrid.cells.mapValues(\.type),
+                                 start: startCell.coord, end: endCell.coord, mainCount: mainCount)
+    }
+
+    /// Starts searching for the next branch route on a background thread, so the result is
+    /// ready when the round ends. Called while a round is being fought.
+    func beginBranchRouteSearch() {
+        guard let search = makeBranchSearch() else { return }
+        branchSearchGeneration += 1
+        let generation = branchSearchGeneration
+        branchSearchFinished = false
+        precomputedBranchRoute = nil
+        let seed = UInt64(rng.randomInt(in: 1..<Int.max))
+        Task.detached(priority: .utility) {
+            let route = search.findRoute(seed: seed)
+            await MainActor.run {
+                guard self.branchSearchGeneration == generation else { return }
+                self.precomputedBranchRoute = route
+                self.branchSearchFinished = true
+            }
+        }
+    }
+
+    /// Discards any in-flight or finished background search.
+    func cancelBranchRouteSearch() {
+        branchSearchGeneration += 1
+        branchSearchFinished = false
+        precomputedBranchRoute = nil
+    }
+
+    /// The background result if it finished and still fits the grid; otherwise a search run now.
+    private func takeBranchRoute() -> [HexCoord]? {
+        guard let search = makeBranchSearch() else { return nil }
+        let finished = branchSearchFinished
+        let precomputed = precomputedBranchRoute
+        cancelBranchRouteSearch()
+        if finished {
+            guard let precomputed else { return nil }   // searched already: no room
+            if search.isValid(route: precomputed) { return precomputed }
+        }
+        return search.findRoute(seed: UInt64(rng.randomInt(in: 1..<Int.max)))
     }
 
     /// Resets the entire game. Returns removed tower IDs, removed terrain coords, and the new seed cells around the base.
@@ -854,9 +962,13 @@ extension GameState {
         let branchCoords = Array(branchPathCoords)
         for coord in branchCoords { hexGrid.removeCell(at: coord) }
         branchPathCoords.removeAll()
+        branchEntryCoords.removeAll()
+        branchOpenedRound.removeAll()
+        cancelBranchRouteSearch()
+        addNoBuildRing()   // branches replaced some ring cells; put them back
         phase = .placing
         round = 0
-        money = 50 + startingGoldBonus
+        money = 1000 + startingGoldBonus   // TEMP: testing boost (normally 50)
         // upgradePoints and purchasedTechNodes intentionally preserved across restarts
         selectedTowerType = nil
         baseTowerHP = baseTowerMaxHP
@@ -893,5 +1005,216 @@ extension GameState {
         moveTowerViaAbility = false
         isPaused = false
         return (towerIDs, terrainCoords + branchCoords, [])
+    }
+}
+
+/// Minimal binary min-heap for the branch route search, ordered by cost then (q, r) so equal
+/// costs pop in a stable, seed-reproducible order.
+nonisolated private struct RouteHeap {
+    private var items: [(cost: Float, coord: HexCoord)] = []
+
+    private static func less(_ a: (cost: Float, coord: HexCoord), _ b: (cost: Float, coord: HexCoord)) -> Bool {
+        (a.cost, a.coord.q, a.coord.r) < (b.cost, b.coord.q, b.coord.r)
+    }
+
+    mutating func push(_ cost: Float, _ coord: HexCoord) {
+        items.append((cost, coord))
+        var i = items.count - 1
+        while i > 0 {
+            let parent = (i - 1) / 2
+            guard RouteHeap.less(items[i], items[parent]) else { break }
+            items.swapAt(i, parent)
+            i = parent
+        }
+    }
+
+    mutating func pop() -> (Float, HexCoord)? {
+        guard !items.isEmpty else { return nil }
+        let top = items[0]
+        let last = items.removeLast()
+        if !items.isEmpty {
+            items[0] = last
+            var i = 0
+            while true {
+                let l = 2 * i + 1, r = l + 1
+                var smallest = i
+                if l < items.count, RouteHeap.less(items[l], items[smallest]) { smallest = l }
+                if r < items.count, RouteHeap.less(items[r], items[smallest]) { smallest = r }
+                if smallest == i { break }
+                items.swapAt(i, smallest)
+                i = smallest
+            }
+        }
+        return (top.cost, top.coord)
+    }
+}
+
+/// Tiny seeded xorshift generator so the background search never touches `GameState.rng`.
+nonisolated private struct SearchRandom {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed == 0 ? 1 : seed }
+
+    private mutating func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+    mutating func float(in range: ClosedRange<Float>) -> Float {
+        range.lowerBound + Float(next() >> 40) / 16_777_216.0 * (range.upperBound - range.lowerBound)
+    }
+    mutating func int(below n: Int) -> Int { Int(next() % UInt64(n)) }
+}
+
+/// Branch route search over a plain snapshot of the grid (cell types only), so it can run on a
+/// background thread while the game keeps going.
+nonisolated struct BranchRouteSearch {
+    let types: [HexCoord: HexCellType]
+    let start: HexCoord
+    let end: HexCoord
+    /// Cells on the main path between its start and end.
+    let mainCount: Int
+
+    private func isOpen(_ coord: HexCoord) -> Bool {
+        guard let type = types[coord] else { return true }
+        return type == .noBuild
+    }
+
+    /// True if `coord` touches a path cell, ignoring the hub and its ring when `hub` is given.
+    private func touchesPath(_ coord: HexCoord, hub: HexCoord?) -> Bool {
+        for dir in 0..<6 {
+            let n = coord.neighbor(dir)
+            guard let type = types[n], type == .path || type == .start || type == .end else { continue }
+            if let hub, hub.distance(to: n) <= 1 { continue }
+            return true
+        }
+        return false
+    }
+
+    private func isValidInterior(_ coord: HexCoord) -> Bool {
+        coord.distance(to: start) > 1 && coord.distance(to: end) > 1
+            && isOpen(coord) && !touchesPath(coord, hub: nil)
+    }
+
+    /// Whether a previously found route still fits the grid: open cells, no touching of other
+    /// paths except inside the start/end rings, and a connected chain.
+    func isValid(route: [HexCoord]) -> Bool {
+        guard let first = route.first, let last = route.last else { return false }
+        guard first.distance(to: start) == 1, isOpen(first), !touchesPath(first, hub: start),
+              last.distance(to: end) == 1, isOpen(last), !touchesPath(last, hub: end) else { return false }
+        for i in 0..<route.count {
+            if i > 0 && route[i].distance(to: route[i - 1]) != 1 { return false }
+            if i > 0 && i < route.count - 1 && !isValidInterior(route[i]) { return false }
+        }
+        return true
+    }
+
+    /// Finds a route from a free neighbour of `start` to a free neighbour of `end` whose length
+    /// is close to the main path's. A plain cheapest-route search would take nearly the
+    /// shortest line, so this also tries routes bent through a random waypoint (two searches,
+    /// the second walled off from the first) and keeps whichever lands nearest the target length.
+    /// Interior cells must be empty and not touch any existing path cell; only the first and
+    /// last cells may sit beside other paths, and only inside the start/end rings.
+    func findRoute(seed: UInt64) -> [HexCoord]? {
+        var rng = SearchRandom(seed: seed)
+        let desired = max(mainCount, start.distance(to: end))
+        let mid = HexCoord(q: (start.q + end.q) / 2, r: (start.r + end.r) / 2)
+        let radius = max(start.distance(to: end), desired / 2) + 10
+
+        // The snapshot doesn't change during a search, so each cell's verdict is computed once.
+        var interiorCache: [HexCoord: Bool] = [:]
+        func validInterior(_ coord: HexCoord) -> Bool {
+            if let cached = interiorCache[coord] { return cached }
+            let valid = isValidInterior(coord)
+            interiorCache[coord] = valid
+            return valid
+        }
+
+        let ringSources = Set((0..<6).map { start.neighbor($0) }
+            .filter { isOpen($0) && !touchesPath($0, hub: start) })
+        let ringTargets = Set((0..<6).map { end.neighbor($0) }
+            .filter { isOpen($0) && !touchesPath($0, hub: end) })
+        guard !ringSources.isEmpty, !ringTargets.isEmpty else { return nil }
+
+        var costs: [HexCoord: Float] = [:]
+        func cost(_ coord: HexCoord) -> Float {
+            if let c = costs[coord] { return c }
+            let c = rng.float(in: 1.0...2.0)
+            costs[coord] = c
+            return c
+        }
+
+        /// Cheapest route from any of `sources` to any of `targets`. Interior steps avoid
+        /// `blocked`; sources and targets are trusted (validated by the caller).
+        func search(sources: Set<HexCoord>, targets: Set<HexCoord>, blocked: Set<HexCoord>) -> [HexCoord]? {
+            guard !sources.isEmpty, !targets.isEmpty else { return nil }
+            var dist: [HexCoord: Float] = [:]
+            var prev: [HexCoord: HexCoord] = [:]
+            var done = Set<HexCoord>()
+            var heap = RouteHeap()
+            for s in sources.sorted(by: { ($0.q, $0.r) < ($1.q, $1.r) }) {
+                let d = cost(s)
+                dist[s] = d
+                heap.push(d, s)
+            }
+            while let (d, current) = heap.pop() {
+                guard done.insert(current).inserted else { continue }   // stale heap entry
+
+                if targets.contains(current) {
+                    var route = [current]
+                    while let p = prev[route[route.count - 1]] { route.append(p) }
+                    return route.reversed()
+                }
+                for dir in 0..<6 {
+                    let n = current.neighbor(dir)
+                    guard !done.contains(n), n.distance(to: mid) <= radius else { continue }
+                    if !targets.contains(n) {
+                        guard validInterior(n), !blocked.contains(n) else { continue }
+                    }
+                    let nd = d + cost(n)
+                    if nd < dist[n, default: .infinity] {
+                        dist[n] = nd
+                        prev[n] = current
+                        heap.push(nd, n)
+                    }
+                }
+            }
+            return nil
+        }
+
+        var best: [HexCoord]?
+        var bestGap = Int.max
+        func consider(_ route: [HexCoord]?) {
+            guard let route else { return }
+            let gap = abs(route.count - desired)
+            if gap < bestGap { best = route; bestGap = gap }
+        }
+
+        consider(search(sources: ringSources, targets: ringTargets, blocked: []))
+
+        let tolerance = max(2, desired / 10)
+        var attempts = 0
+        while bestGap > tolerance && attempts < 14 {
+            attempts += 1
+            let waypoint = HexCoord(q: mid.q + rng.int(below: 2 * radius + 1) - radius,
+                                    r: mid.r + rng.int(below: 2 * radius + 1) - radius)
+            guard waypoint.distance(to: mid) <= radius, validInterior(waypoint),
+                  let first = search(sources: ringSources, targets: [waypoint], blocked: []) else { continue }
+
+            // Wall off the first leg and everything beside it, so the second leg can't touch it.
+            let firstSet = Set(first)
+            var blocked = firstSet
+            for c in first { for d in 0..<6 { blocked.insert(c.neighbor(d)) } }
+            // The second leg may only start beside the waypoint (not beside any other first-leg cell).
+            let beforeWaypoint = Set(first.dropLast())
+            let secondSources = Set((0..<6).map { waypoint.neighbor($0) }.filter { n in
+                validInterior(n) && !firstSet.contains(n)
+                    && !(0..<6).contains { beforeWaypoint.contains(n.neighbor($0)) }
+            })
+            let secondTargets = ringTargets.filter { !blocked.contains($0) }
+            guard let second = search(sources: secondSources, targets: secondTargets, blocked: blocked) else { continue }
+            consider(first + second)
+        }
+        return best
     }
 }

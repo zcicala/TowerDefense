@@ -299,7 +299,7 @@ class GameState {
 
     var phase: GamePhase = .placing
     var round: Int = 0
-    var money: Int = 50
+    var money: Int = 1000   // TEMP: testing boost (normally 50)
     let killReward: Int = 8
     var selectedTowerType: TowerType? = nil
     var isPlacingFarm: Bool = false
@@ -522,6 +522,14 @@ class GameState {
     /// First cell of each branch path (a neighbour of the original start cell). Branch enemies
     /// spawn here, since the shared start cell only has one `next`.
     var branchEntryCoords: [HexCoord] = []
+    /// Round at whose end each branch opened, keyed by its entry coord. Drives the branch's
+    /// spawn-share ramp (see `branchSpawnShare`); the original start cell has no entry.
+    var branchOpenedRound: [HexCoord: Int] = [:]
+    /// Route found by the background branch search (nil if it found no room), valid once
+    /// `branchSearchFinished`. `branchSearchGeneration` lets stale searches be ignored.
+    var precomputedBranchRoute: [HexCoord]?
+    var branchSearchFinished = false
+    var branchSearchGeneration = 0
     /// True when the player has activated a Tower Heal item and is selecting which tower to heal.
     var isPendingTowerHeal: Bool = false
     /// True when the player has activated a Move Tower item and is selecting which tower to move.
@@ -675,13 +683,78 @@ class GameState {
         ),
     ]
 
-    /// Hard cap on regular (non-boss) enemies per round. Past this, waves stay the same size
-    /// and total HP keeps growing through heavier enemy types instead of more bodies.
+    /// Hard cap on regular (non-boss) enemies per round. A wave is built from an HP budget
+    /// (see `buildWave`), so past the point where the cap binds, total HP keeps growing
+    /// through heavier enemy types instead of more bodies.
     static let maxEnemiesPerRound = 40
 
-    /// Number of regular enemies spawned in `round`: `3 + 3·round`, capped at `maxEnemiesPerRound`.
-    static func enemyCount(forRound round: Int) -> Int {
-        min(3 + round * 3, maxEnemiesPerRound)
+    // MARK: - Wave HP Curve
+
+    /// Target total HP of a round's regular enemies, interpolated log-linearly between these
+    /// anchors (a smooth rise, steep early and flattening late). It is each wave's HP budget:
+    /// `buildWave` spends it on enemies with fixed HP, so debuts change a wave's mix and
+    /// head-count, never its overall size or any single enemy's HP.
+    static let regularHPAnchors: [(round: Int, hp: Float)] = [
+        (1, 6_450), (5, 17_000), (10, 70_000), (15, 200_000), (20, 480_000), (30, 1_300_000),
+        (40, 2_300_000), (50, 3_000_000), (60, 3_400_000),
+    ]
+
+    static func targetRegularHP(forRound round: Int) -> Float {
+        let a = regularHPAnchors
+        if round <= a[0].round { return a[0].hp }
+        if let last = a.last, round >= last.round {
+            return last.hp * powf(1.01, Float(round - last.round))
+        }
+        let i = a.lastIndex(where: { $0.round <= round })!
+        let (lo, hi) = (a[i], a[i + 1])
+        let t = Float(round - lo.round) / Float(hi.round - lo.round)
+        return expf(logf(lo.hp) + t * (logf(hi.hp) - logf(lo.hp)))
+    }
+
+    /// Relative HP weight of each regular enemy type (× a basic enemy at its debut round).
+    static func hpMultiplier(for type: EnemyType) -> Float {
+        switch type {
+        case .basic: return 1.0
+        case .tank: return 4.0
+        case .mirroid: return 4.0
+        case .fastTank: return 8.0
+        case .exploder: return 0.8
+        case .superExploder: return 2.4
+        case .shield: return 2.0
+        case .hopper: return 0.35
+        case .superHopper: return 0.3114
+        case .hive: return 6.3
+        case .wisp: return 1.0
+        case .plated: return 4.4
+        case .insulated: return 3.2
+        case .cinder: return 2.8
+        case .nullifier: return 4.0
+        case .warden: return 3.6
+        case .brute: return 12.0
+        case .colossus: return 15.0
+        case .titan: return 24.0
+        case .boss: return 1.0
+        }
+    }
+
+    /// The type's unscaled HP: tier HP at its earliest eligible round × its weight × 1.2.
+    static func baseHP(for type: EnemyType) -> Float {
+        let debut = debutRound(for: type)
+        let tier = tiers.first(where: { $0.rounds.contains(debut) }) ?? tiers[0]
+        return tier.hp(atRound: debut) * hpMultiplier(for: type) * 1.2
+    }
+
+    /// Fixed shield barrier of the shield enemy (what it had at its round-16 debut).
+    static let shieldBarrier: Float = 270 + 120 * 16
+
+    /// What one enemy of `type` costs against a wave's HP budget: its fixed HP plus barrier.
+    static func spawnCost(for type: EnemyType) -> Float {
+        baseHP(for: type) + (type == .shield ? shieldBarrier : 0)
+    }
+
+    /// Boss HP: a fixed share of the round's wave budget, so bosses follow the same curve.
+    static func bossHP(forRound round: Int) -> Float {
+        targetRegularHP(forRound: round) * 0.22
     }
 
     /// The active difficulty tier for the given round (falls back to Act I for round ≤ 0).

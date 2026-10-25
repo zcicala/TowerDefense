@@ -290,24 +290,88 @@ final class CombatTests: XCTestCase {
 
     // MARK: Regular enemies no longer scale HP/damage with round (except the boss)
 
-    /// A regular enemy's HP is pinned to 120% of what the old always-scaling formula would
-    /// have produced at its debut round — spawning the same type much later should give the
-    /// exact same HP, not a bigger one.
-    func testMakeEnemy_regularEnemyHP_isFrozenAtDebutRoundPlus20Percent() {
+    /// A regular enemy's HP is fixed: tier HP at its debut round × its weight × 1.2, the same
+    /// whenever it spawns.
+    func testMakeEnemy_regularEnemyHP_isFixedAcrossRounds() {
         let gs = makeGameState()
-        let debutRound = GameState.debutRound(for: .tank)
-        XCTAssertEqual(debutRound, 6, "tank debuts in Act I's roster at round 6")
+        XCTAssertEqual(GameState.debutRound(for: .tank), 6, "tank debuts in Act I's roster at round 6")
+        let expected = gs.tier(for: 6).hp(atRound: 6) * 4.0 * 1.2
 
-        gs.round = debutRound
-        let atDebut = gs._makeEnemy(type: .tank, hp: gs.tier(for: debutRound).hp(atRound: debutRound), speed: 1.0)
+        for round in [6, 12, 30, 60] {
+            gs.round = round
+            let tank = gs._makeEnemy(type: .tank, hp: 1, speed: 1.0)
+            XCTAssertEqual(tank.hitPoints, expected, accuracy: 0.01, "round \(round)")
+        }
+    }
 
-        gs.round = 30
-        let muchLater = gs._makeEnemy(type: .tank, hp: gs.tier(for: 30).hp(atRound: 30), speed: 1.0)
+    func testShield_barrierIsFixedAcrossRounds() {
+        let gs = makeGameState()
+        gs.round = 16
+        let early = gs._makeEnemy(type: .shield, hp: 1, speed: 1.0)
+        gs.round = 50
+        let late = gs._makeEnemy(type: .shield, hp: 1, speed: 1.0)
+        XCTAssertEqual(early.hitPoints, late.hitPoints)
+        XCTAssertEqual(early.shieldHP, late.shieldHP)
+    }
 
-        let expectedHP = gs.tier(for: debutRound).hp(atRound: debutRound) * 4.0 * 1.2
-        XCTAssertEqual(atDebut.hitPoints, expectedHP, accuracy: 0.01)
-        XCTAssertEqual(muchLater.hitPoints, expectedHP, accuracy: 0.01,
-                       "HP must not keep growing with round for a regular enemy")
+    /// Waves are built from the round's HP budget: never over it, and (unless the 40-enemy cap
+    /// is what stops the wave) close to it.
+    func testBuildWave_totalHPTracksBudget() {
+        let gs = makeGameState()
+        for round in 1...80 {
+            gs.round = round
+            let wave = gs.buildWave(forRound: round, theme: nil)
+            let total = wave.reduce(Float(0)) { $0 + GameState.spawnCost(for: $1) }
+            let budget = GameState.targetRegularHP(forRound: round)
+            XCTAssertLessThanOrEqual(total, budget, "round \(round) overspends")
+            if wave.count < GameState.maxEnemiesPerRound {
+                XCTAssertGreaterThan(total, budget * 0.85, "round \(round) leaves too much budget unspent")
+            }
+        }
+    }
+
+    func testBuildWave_neverExceedsCap_andIsNonEmpty() {
+        let gs = makeGameState()
+        for round in 1...80 {
+            gs.round = round
+            let wave = gs.buildWave(forRound: round, theme: nil)
+            XCTAssertFalse(wave.isEmpty, "round \(round)")
+            XCTAssertLessThanOrEqual(wave.count, GameState.maxEnemiesPerRound, "round \(round)")
+        }
+    }
+
+    func testBuildWave_debutTypeSpawnsAtMostOncePerRound() {
+        let gs = makeGameState()
+        for round in [6, 8, 10, 12, 14, 20] {
+            gs.round = round
+            let debuting = Set(gs.tier(for: round).roster.filter { $0.minRound == round }.map(\.type))
+            let wave = gs.buildWave(forRound: round, theme: nil)
+            for type in debuting {
+                XCTAssertLessThanOrEqual(wave.filter { $0 == type }.count, 1, "\(type) at round \(round)")
+            }
+        }
+    }
+
+    /// No round's wave is dramatically bigger than the one before it.
+    func testBuildWave_totalHPHasNoSpikes() {
+        let gs = makeGameState()
+        var previous: Float?
+        for round in 1...80 {
+            gs.round = round
+            let total = gs.buildWave(forRound: round, theme: nil).reduce(Float(0)) { $0 + GameState.spawnCost(for: $1) }
+            if let previous { XCTAssertLessThan(total / previous, 1.6, "round \(round) jumps too sharply") }
+            previous = total
+        }
+    }
+
+    func testTargetRegularHP_risesSmoothly_noSpikes() {
+        var previous = GameState.targetRegularHP(forRound: 1)
+        for round in 2...80 {
+            let hp = GameState.targetRegularHP(forRound: round)
+            XCTAssertGreaterThan(hp, previous, "round \(round)")
+            XCTAssertLessThan(hp / previous, 1.6, "round \(round) jumps too sharply")
+            previous = hp
+        }
     }
 
     /// A regular enemy's baseDamage was already round-independent; lock that in explicitly now
@@ -440,29 +504,30 @@ final class CombatTests: XCTestCase {
 
     // MARK: Spawn cap and bruisers
 
-    func testEnemyCount_scalesThenCapsAtForty() {
-        XCTAssertEqual(GameState.enemyCount(forRound: 1), 6)
-        XCTAssertEqual(GameState.enemyCount(forRound: 12), 39)
-        XCTAssertEqual(GameState.enemyCount(forRound: 13), 40)
-        XCTAssertEqual(GameState.enemyCount(forRound: 60), 40)
+    func testStartRound_round1_spawnsSixBasics() {
+        let gs = makeGameState()
+        gs.startRound()
+        XCTAssertEqual(gs.enemies.count, 6)
+        XCTAssertTrue(gs.enemies.allSatisfy { $0.enemyType == .basic })
     }
 
-    func testStartRound_lateRound_spawnsCappedCountPlusBoss() {
+    func testStartRound_lateRound_spawnsAtMostCapPlusBoss() {
         let gs = makeGameState()
         gs.round = 39  // startRound() advances to 40
         gs.startRound()
-        XCTAssertEqual(gs.enemies.count, GameState.maxEnemiesPerRound + 1)  // + boss
+        XCTAssertLessThanOrEqual(gs.enemies.count, GameState.maxEnemiesPerRound + 1)  // + boss
+        XCTAssertTrue(gs.enemies.contains { $0.enemyType == .boss })
+        XCTAssertEqual(gs.enemiesToSpawn, gs.enemies.count - 1)
     }
 
-    func testBruisers_haveFixedHPFromDebutRound() {
+    func testBruisers_titanOutweighsBrute_atSameRound() {
         let gs = makeGameState()
+        gs.round = 50
         let brute = gs._makeEnemy(type: .brute, hp: 1, speed: 1.0)
         let titan = gs._makeEnemy(type: .titan, hp: 1, speed: 1.0)
-        gs.round = 20
-        XCTAssertEqual(gs._makeEnemy(type: .brute, hp: 1, speed: 1.0).hitPoints, brute.hitPoints)
-        gs.round = 60
-        XCTAssertEqual(gs._makeEnemy(type: .titan, hp: 1, speed: 1.0).hitPoints, titan.hitPoints)
         XCTAssertGreaterThan(titan.hitPoints, brute.hitPoints)
+        gs.round = 20
+        XCTAssertEqual(gs._makeEnemy(type: .brute, hp: 1, speed: 1.0).hitPoints, brute.hitPoints, "fixed HP")
     }
 
     func testBruiserRoster_debutRounds() {
@@ -1292,7 +1357,7 @@ final class CastleAbilityTests: XCTestCase {
             gs.generateMap()
             let start = gs.hexGrid.cells.values.first { $0.type == .start }!
             let end = gs.hexGrid.cells.values.first { $0.type == .end }!
-            let cells = gs.addBranchPath()
+            let cells = gs.addBranchPath().filter { $0.type == .path }
             guard !cells.isEmpty else { continue }
             found += 1
             XCTAssertEqual(cells.first!.coord.distance(to: start.coord), 1)
@@ -1310,6 +1375,158 @@ final class CastleAbilityTests: XCTestCase {
             XCTAssertEqual(gs.hexGrid.cell(at: cells[0].coord)?.type, .noBuild)
         }
         XCTAssertGreaterThan(found, 0)
+    }
+
+    func testAddBranchPath_lengthIsCloseToMainPath() {
+        var ratios: [Double] = []
+        for _ in 0..<15 {
+            let gs = GameState(rng: RandomSource())
+            gs.generateMap()
+            let start = gs.hexGrid.cells.values.first { $0.type == .start }!
+            var main = 0
+            var cur = start.next
+            while let c = cur, c.type != .end { main += 1; cur = c.next }
+            let branch = gs.addBranchPath().filter { $0.type == .path }.count
+            guard branch > 0 else { continue }
+            ratios.append(Double(branch) / Double(main))
+        }
+        XCTAssertFalse(ratios.isEmpty)
+        let average = ratios.reduce(0, +) / Double(ratios.count)
+        XCTAssertEqual(average, 1.0, accuracy: 0.25)
+    }
+
+    func testBackgroundBranchSearch_resultIsUsedWhenReady() async {
+        let gs = GameState(rng: RandomSource())
+        gs.generateMap()
+        gs.beginBranchRouteSearch()
+        for _ in 0..<300 where !gs.branchSearchFinished {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(gs.branchSearchFinished)
+        let expected = gs.precomputedBranchRoute
+        let added = gs.addBranchPath()
+        XCTAssertEqual(added.filter { $0.type == .path }.map(\.coord), expected ?? [])
+        XCTAssertFalse(gs.branchSearchFinished, "result is consumed")
+    }
+
+    func testBackgroundBranchSearch_startRoundOnRound10Begins() {
+        let gs = GameState(rng: RandomSource())
+        gs.generateMap()
+        gs.round = 9
+        gs.startRound()
+        XCTAssertEqual(gs.branchSearchGeneration, 1)
+    }
+
+    // MARK: Branch spawn ramp
+
+    func testBranchSpawnShare_rampsLinearlyThenFlat() {
+        XCTAssertEqual(GameState.branchSpawnShare(roundsSinceOpen: 0), 0.15, accuracy: 0.0001)
+        XCTAssertEqual(GameState.branchSpawnShare(roundsSinceOpen: 5), 0.325, accuracy: 0.0001)
+        XCTAssertEqual(GameState.branchSpawnShare(roundsSinceOpen: 10), 0.50, accuracy: 0.0001)
+        XCTAssertEqual(GameState.branchSpawnShare(roundsSinceOpen: 25), 0.50, accuracy: 0.0001)
+        XCTAssertEqual(GameState.branchIntervalMultiplier(roundsSinceOpen: 0), 1 / 0.15 - 1, accuracy: 0.0001)
+        XCTAssertEqual(GameState.branchIntervalMultiplier(roundsSinceOpen: 10), 1, accuracy: 0.0001)
+    }
+
+    /// Opens a branch at the end of `openRound`; nil if the map has no room for one.
+    private func makeStateWithBranch(openedAt openRound: Int = 10) -> (GameState, HexCoord)? {
+        for _ in 0..<10 {
+            let gs = GameState(rng: RandomSource())
+            gs.generateMap()
+            gs.round = openRound
+            if !gs.addBranchPath().isEmpty { return (gs, gs.branchEntryCoords[0]) }
+        }
+        return nil
+    }
+
+    func testAddBranchPath_grantsItemsSeedsTerrainAndRecordsRound() {
+        var checked = 0
+        for _ in 0..<5 {
+            let gs = GameState(rng: RandomSource())
+            gs.generateMap()
+            gs.round = 10
+            let rings = gs.ringItemCount, moves = gs.moveTowerItemCount
+            let before = Set(gs.hexGrid.cells.keys)
+            let result = gs.addBranchPath()
+            if result.isEmpty {
+                XCTAssertEqual(gs.ringItemCount, rings)
+                XCTAssertEqual(gs.moveTowerItemCount, moves)
+                XCTAssertTrue(gs.branchOpenedRound.isEmpty)
+                continue
+            }
+            checked += 1
+            XCTAssertEqual(gs.ringItemCount, rings + 1)
+            XCTAssertEqual(gs.moveTowerItemCount, moves + 2)
+            XCTAssertEqual(gs.branchOpenedRound[gs.branchEntryCoords[0]], 10)
+            let terrain = result.filter { $0.type == .terrain }
+            // Three tiles, unless the route is so hemmed in that fewer empty cells are adjacent.
+            let leftoverEmpty = gs.branchPathCoords
+                .flatMap { c in (0..<6).map { c.neighbor($0) } }
+                .filter { gs.hexGrid.cell(at: $0) == nil }
+            XCTAssertGreaterThan(terrain.count, 0)
+            if terrain.count < GameState.branchSeedTileCount {
+                XCTAssertTrue(leftoverEmpty.isEmpty, "fewer than 3 tiles only when no empty adjacent cell remains")
+            }
+            for cell in terrain {
+                XCTAssertFalse(before.contains(cell.coord), "must not replace an existing cell")
+                XCTAssertTrue((0..<6).contains { gs.branchPathCoords.contains(cell.coord.neighbor($0)) })
+                XCTAssertTrue(gs.hexGrid.cell(at: cell.coord) === cell)
+            }
+            _ = gs.restart()
+            XCTAssertTrue(gs.branchOpenedRound.isEmpty)
+            XCTAssertEqual(gs.spawnCells.count, 1)
+        }
+        XCTAssertGreaterThan(checked, 0)
+    }
+
+    func testBranchesRampIndependently() throws {
+        let (gs, first) = try XCTUnwrap(makeStateWithBranch(openedAt: 10))
+        gs.round = 20
+        let second = gs.addBranchPath()
+        try XCTSkipIf(second.isEmpty, "no room for a second branch on this map")
+        let secondEntry = gs.branchEntryCoords[1]
+        gs.round = 21
+        XCTAssertEqual(gs.branchRoundsSinceOpen(at: first), 10)
+        XCTAssertEqual(gs.branchRoundsSinceOpen(at: secondEntry), 0)
+        XCTAssertEqual(gs.spawnIntervalMultiplier(at: first), 1, accuracy: 0.0001)
+        XCTAssertFalse(gs.isRampingBranch(at: first))
+        XCTAssertTrue(gs.isRampingBranch(at: secondEntry))
+        let start = gs.hexGrid.cells.values.first { $0.type == .start }!.coord
+        XCTAssertEqual(gs.spawnIntervalMultiplier(at: start), 1)
+        XCTAssertFalse(gs.isRampingBranch(at: start))
+    }
+
+    /// Runs a round to the point where every enemy has spawned, returning the spawn cell of each.
+    private func spawnWholeRound(_ gs: GameState) -> [(type: EnemyType, cell: HexCoord)] {
+        gs.startRound()
+        gs.baseTowerHP = 1_000_000
+        var spawned: [(EnemyType, HexCoord)] = []
+        var steps = 0
+        while spawned.count < gs.enemies.count && steps < 40_000 {
+            let events = gs.update(deltaTime: 0.05)
+            for e in events.spawnedEnemies { spawned.append((e.enemyType, e.currentCell!.coord)) }
+            steps += 1
+        }
+        XCTAssertEqual(spawned.count, gs.enemies.count, "every enemy of the wave still spawns")
+        return spawned
+    }
+
+    func testRampingBranch_takesSmallerShareThanMainPath() throws {
+        let (gs, entry) = try XCTUnwrap(makeStateWithBranch(openedAt: 10))
+        gs.phase = .placing
+        let spawned = spawnWholeRound(gs)   // round 11: branch at 15%
+        let onBranch = spawned.filter { $0.cell == entry }.count
+        XCTAssertLessThan(onBranch, spawned.count - onBranch)
+    }
+
+    func testRampingBranch_neverSpawnsBoss() throws {
+        let (gs, entry) = try XCTUnwrap(makeStateWithBranch(openedAt: 10))
+        gs.phase = .placing
+        gs.round = 14   // next round is 15: a boss round, branch still ramping
+        let spawned = spawnWholeRound(gs)
+        let boss = spawned.filter { $0.type == .boss }
+        XCTAssertEqual(boss.count, 1)
+        XCTAssertNotEqual(boss.first?.cell, entry)
     }
 
     // MARK: Round reset
